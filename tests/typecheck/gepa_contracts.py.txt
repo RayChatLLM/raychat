@@ -1,0 +1,15 @@
+"""Serialized optimizer results and loader identifiers retain their contracts."""
+from plugins.optimization.gepa.core.data_loader import DataLoader, ensure_loader
+from plugins.optimization.gepa.core.result import ResultSnapshot
+
+
+def misspelled_result_field(snapshot: ResultSnapshot) -> None:
+    snapshot["best_index"] = 0  # expect-error: typeddict-unknown-key
+
+
+def wrong_best_index(snapshot: ResultSnapshot) -> None:
+    snapshot["best_idx"] = "bad"  # expect-error: typeddict-item
+
+
+def wrong_loader_identifiers() -> DataLoader[str, str]:
+    return ensure_loader(["row"])  # expect-error: return-value

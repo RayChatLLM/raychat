@@ -1,0 +1,9 @@
+{
+  "id": "example_counter",
+  "sdk": 4,
+  "version": "1.0.0",
+  "entrypoint": "__init__:register",
+  "description": "Count calls in a saved session",
+  "requires": {},
+  "instructions": "Use the count tool to increment this session counter. /count-status reports its current value."
+}

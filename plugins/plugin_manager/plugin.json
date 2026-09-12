@@ -1,0 +1,10 @@
+{
+  "id": "plugin_manager",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "plugin manager capabilities",
+  "requires": {},
+  "defaults": {},
+  "instructions": "Manage external plugin packages with {\"action\":\"plugins\",\"command\":\"install SOURCE\"}, where SOURCE is a package directory, ZIP, HTTPS URL, github:OWNER/REPO@REF, or catalog/ID@VERSION. Other commands include new PATH, check PATH, pack PATH ZIP, search QUERY, catalog add NAME URL, info ID, link PATH, update ID, enable ID, disable ID, uninstall ID, reload. The operator can use the same arguments after /plugins. New packages require plugin.json with instructions and a register(api) entrypoint. Newly created trusted packages and edits activate at idle message boundaries. Finish the current turn with done before using a newly added tool."
+}

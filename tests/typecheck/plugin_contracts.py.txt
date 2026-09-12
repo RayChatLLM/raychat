@@ -1,0 +1,52 @@
+from raychat.event_types import CONTEXT, BEFORE_TOOL, Context, Message, BeforeTool
+from raychat.sdk import HTTP_PROVIDER, PluginAPI, PluginContext, SessionHost
+from plugins.memory.configuration import MemorySettings
+from raychat.validation import object_field, text_field
+
+
+def reject_wrong_implementation(api: PluginAPI) -> None:
+    api.register_typed_service(HTTP_PROVIDER, object())  # expect-error: misc
+
+
+def reject_unknown_method(ctx: PluginContext) -> None:
+    ctx.require_service(HTTP_PROVIDER).missing_method()  # expect-error: attr-defined
+
+
+def reject_wrong_setting(settings: MemorySettings) -> str:
+    return settings.max_memory_items  # expect-error: return-value
+
+
+def reject_unvalidated_field(raw: object) -> str:
+    return object_field(raw, "settings")["unknown"]  # expect-error: return-value
+
+
+def reject_implicit_coercion(raw: object) -> int:
+    return text_field(raw, "count")  # expect-error: return-value
+
+
+def reject_wrong_event_value() -> Message:
+    return Message("user", 42)  # expect-error: arg-type
+
+
+def reject_misspelled_event_field() -> Context:
+    return Context(message=())  # expect-error: call-arg
+
+
+def reject_legacy_emitter(host: SessionHost) -> None:
+    host.emit("context", {"messages": []})  # expect-error: arg-type
+
+
+def reject_mismatched_payload(host: SessionHost) -> None:
+    host.emit(CONTEXT, BeforeTool({}))  # expect-error: misc
+
+
+def reject_wrong_handler(api: PluginAPI) -> None:
+    def handler(payload: BeforeTool, ctx: PluginContext) -> None:
+        pass
+    api.on(CONTEXT, handler)  # expect-error: arg-type
+
+
+def reject_wrong_result(api: PluginAPI) -> None:
+    def handler(payload: BeforeTool, ctx: PluginContext) -> str:
+        return "blocked"
+    api.on(BEFORE_TOOL, handler)  # expect-error: arg-type

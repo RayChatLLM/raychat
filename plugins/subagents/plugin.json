@@ -1,0 +1,42 @@
+{
+  "id": "subagents",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "subagents capabilities",
+  "requires": {
+    "chat_completions": "1.0.0"
+  },
+  "defaults": {
+    "primary_profile": "primary",
+    "default_profile": "primary",
+    "primary_purposes": [
+      "judge"
+    ],
+    "allow_default_fallback": true,
+    "max_parallel": 4,
+    "purpose_routes": {},
+    "profiles": {},
+    "default_purposes": [
+      "*"
+    ],
+    "default_profile_priority": 0,
+    "child_allowed_actions": [
+      "list",
+      "read",
+      "done"
+    ],
+    "process_poll_seconds": 0.05,
+    "child_plugins": [
+      "filesystem",
+      "context"
+    ],
+    "root_session_id": "main",
+    "max_parallel_monitors": 16,
+    "max_profiles": 64,
+    "max_profile_name_chars": 64,
+    "max_report_chars": 2048,
+    "max_error_chars": 2048
+  },
+  "instructions": "Use separate agent sessions when a user asks for a subagent, independent review, or parallel help. When the workflows plugin supplies delegation tools, invoke delegate for one task or delegate_many for independent tasks; do not merely describe delegation. Consult the available model profile catalog. Children are read-only by default. /agents is an operator command opening the agent session switcher; /parent returns to the parent. A selected child can be stopped with double Escape without cancelling siblings."
+}

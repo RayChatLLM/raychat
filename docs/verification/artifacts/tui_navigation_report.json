@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "checks": [
+    "selected workflow child stops and accepts a replacement",
+    "exact text copied from child chat",
+    "mouse switches to sibling",
+    "sibling survives focused cancellation",
+    "parent workflow completes",
+    "parent processing stops and accepts a new prompt",
+    "one saved session resumes directly",
+    "resume picker selects a usable session"
+  ],
+  "terminal_restored": true
+}

@@ -1,0 +1,18 @@
+"""Captured package snapshots preserve their fixed transport schema."""
+from raychat.plugin_sources import PluginSources, SourceSnapshot
+
+
+def wrong_source_encoding(snapshot: SourceSnapshot) -> None:
+    snapshot["files"]["__init__.py"] = b"code"  # expect-error: assignment
+
+
+def unchecked_setting(snapshot: SourceSnapshot) -> int:
+    return snapshot["settings"]["limit"]  # expect-error: return-value
+
+
+def wrong_package_entry(source: PluginSources) -> None:
+    source["packages"].append({"path": "/tmp/plugin"})  # expect-error: typeddict-item
+
+
+def misspelled_source_field(snapshot: SourceSnapshot) -> None:
+    snapshot["modules"] = "worker"  # expect-error: typeddict-unknown-key

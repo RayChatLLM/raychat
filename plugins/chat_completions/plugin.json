@@ -1,0 +1,73 @@
+{
+  "id": "chat_completions",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "chat completions capabilities",
+  "requires": {},
+  "defaults": {
+    "url": "https://api.fireworks.ai/inference/v1/chat/completions",
+    "model": "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+    "api_key_envs": [
+      "FIREWORK_API_KEY",
+      "FIREWORKS_API_KEY",
+      "LLM_API_KEY"
+    ],
+    "custom_api_key_env": "LLM_API_KEY",
+    "user_agent": "stdlib-chat-agent/1",
+    "request_options": {},
+    "api_timeout_seconds": 120,
+    "name": "chat_completions",
+    "max_http_bytes": 2097152,
+    "max_request_options_bytes": 65536,
+    "max_provider_api_key_chars": 8192,
+    "reserved_request_options": [
+      "model",
+      "messages",
+      "stream",
+      "n",
+      "tools",
+      "tool_choice",
+      "parallel_tool_calls",
+      "functions",
+      "function_call",
+      "modalities",
+      "audio"
+    ],
+    "successful_finish_reasons": [
+      "stop",
+      "complete",
+      "completed",
+      "end_turn",
+      "stop_sequence",
+      "eos",
+      "eos_token"
+    ]
+  },
+  "cli": [
+    {
+      "flags": [
+        "--url"
+      ],
+      "setting": "url",
+      "environment": "LLM_API_URL",
+      "help": "HTTP chat-completions endpoint"
+    },
+    {
+      "flags": [
+        "--api-timeout"
+      ],
+      "type": "float",
+      "setting": "api_timeout_seconds"
+    },
+    {
+      "flags": [
+        "--request-options"
+      ],
+      "setting": "request_options",
+      "json": true,
+      "environment": "LLM_REQUEST_OPTIONS"
+    }
+  ],
+  "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Operator launch options include --url, --model, --api-timeout and --request-options. Never expose provider credentials."
+}

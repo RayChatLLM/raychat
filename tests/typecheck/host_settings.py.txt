@@ -1,0 +1,11 @@
+"""Reject invalid host configuration consumers without suppressing diagnostics."""
+
+from raychat.host_settings import HostSettings
+
+
+def wrong_field_types(settings: HostSettings) -> None:
+    columns: str = settings.tui.min_columns  # expect-error: assignment
+    color: tuple[str, str, str] = settings.renderer.black  # expect-error: assignment
+    plugin_text: str = settings.plugins.settings["custom"]["option"]  # expect-error: assignment
+    settings.tui.target_fps = 90.0  # expect-error: misc
+    settings.tui.missing  # expect-error: attr-defined

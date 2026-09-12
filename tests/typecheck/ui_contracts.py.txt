@@ -1,0 +1,39 @@
+from raychat.ui.state import TuiState, approval_details, calculate_layout, sanitize_text, wrap_display
+from raychat.ui.terminal import KeyDecoder, LineEditor
+
+
+def reject_nontext_sanitizer_input() -> None:
+    sanitize_text(1)  # expect-error: arg-type
+
+
+def reject_fractional_source_limit() -> None:
+    sanitize_text("x", max_chars=1.5)  # expect-error: arg-type
+
+
+def reject_fractional_wrap_width() -> None:
+    wrap_display("x", 1.5)  # expect-error: arg-type
+
+
+def reject_fractional_approval_dimensions() -> None:
+    approval_details({"action": "forget", "id": "1"}, 1.5)  # expect-error: arg-type
+    approval_details({"action": "forget", "id": "1"}, 20, 1.5)  # expect-error: arg-type
+
+
+def reject_mutable_snapshot(state: TuiState) -> None:
+    state.snapshot().entries[0].body = "mutated"  # expect-error: misc
+
+
+def reject_fractional_transcript_limit() -> None:
+    TuiState(max_entries=1.5)  # expect-error: arg-type
+
+
+def reject_optional_show_system() -> None:
+    calculate_layout(120, 32, show_system=None)  # expect-error: arg-type
+
+
+def reject_text_decoder_input() -> None:
+    KeyDecoder().feed("text")  # expect-error: arg-type
+
+
+def reject_text_editor_event() -> None:
+    LineEditor().handle("left")  # expect-error: arg-type

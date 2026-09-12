@@ -1,0 +1,768 @@
+{
+  "schema_version": 1,
+  "chat": {
+    "environment": {
+      "model": "LLM_MODEL",
+      "context_chars": "LLM_CONTEXT_CHARS",
+      "instruction_role": "LLM_INSTRUCTION_ROLE"
+    },
+    "workspace": "workspace",
+    "max_steps": 0,
+    "command_timeout_seconds": 30,
+    "context_chars": 32000,
+    "keep_recent_turns": 4,
+    "instruction_role": "system",
+    "message_roles": [
+      "system",
+      "developer",
+      "user",
+      "assistant"
+    ],
+    "bare_protocol": "Reply with one JSON action. Finish with {\"action\":\"done\",\"message\":\"...\"}.",
+    "protocol_file": null,
+    "auto_approve": false,
+    "log_file": null,
+    "instruction_roles": [
+      "system",
+      "developer",
+      "user"
+    ],
+    "protocol": {
+      "result_prefix": "HOST_RESULT: "
+    },
+    "default_provider": "chat_completions"
+  },
+  "plugins": {
+    "disabled": [],
+    "paths": [],
+    "auto_reload": true,
+    "settings": {},
+    "profile": "plugin_catalog/profile.json"
+  },
+  "storage": {
+    "home_directory": ".raychat",
+    "workspace_plugin_directory": ".raychat/plugins",
+    "user_plugin_directory": "plugins",
+    "trust_filename": "trust.json",
+    "sessions_directory": "sessions",
+    "session_suffix": ".jsonl",
+    "session_schema_version": 1,
+    "session_id_hex_chars": 32,
+    "workspace_digest_chars": 24,
+    "directory_mode": 448,
+    "file_mode": 384,
+    "record_types": [
+      "message",
+      "turn_start",
+      "turn_commit",
+      "select",
+      "state"
+    ],
+    "preview_bytes": 32768,
+    "atomic_attempts": 100,
+    "atomic_random_bytes": 12,
+    "workspace_file_mode": 438
+  },
+  "limits": {
+    "max_reply_chars": 262144,
+    "max_protocol_bytes": 262144,
+    "max_timeout_seconds": 86400,
+    "max_config_bytes": 65536,
+    "max_child_input_bytes": 67108864,
+    "max_child_output_bytes": 4194304,
+    "child_read_bytes": 65536,
+    "max_source_chars": 16384,
+    "max_title_cells": 120,
+    "max_detail_cells": 480,
+    "max_transcript_entries": 500,
+    "max_argv_items": 16,
+    "max_result_items": 12,
+    "max_worker_error_chars": 4096,
+    "worker_poll_seconds": 0.05,
+    "worker_stop_seconds": 1.0
+  },
+  "tui": {
+    "target_fps": 120,
+    "quality": 0,
+    "animation": true,
+    "ascii": false,
+    "color_256": false,
+    "approval_debounce_seconds": 0.25,
+    "mouse_scroll_lines": 3,
+    "keyboard_page_lines": 8,
+    "min_columns": 48,
+    "min_rows": 14,
+    "min_quality": 1,
+    "max_quality": 8,
+    "compose_quality": 3,
+    "input_max_chars": 16384,
+    "paste_max_bytes": 65536,
+    "no_animation_fps": 10,
+    "escape_delay_seconds": 0.03,
+    "double_escape_seconds": 0.75,
+    "fallback_columns": 100,
+    "fallback_rows": 30,
+    "show_system": false,
+    "adaptive_quality": {
+      "over_budget_ratio": 0.82,
+      "under_budget_ratio": 0.42,
+      "degrade_after_frames": 3,
+      "recover_after_frames": 120
+    },
+    "quality_sample_thresholds": [
+      [
+        2500,
+        1
+      ],
+      [
+        4500,
+        2
+      ],
+      [
+        5500,
+        3
+      ],
+      [
+        20000,
+        4
+      ]
+    ],
+    "quality_large_base": 5,
+    "quality_large_sample_start": 20001,
+    "quality_large_sample_step": 9000,
+    "unicode_ui_glyphs": "\u2580\u2502\u2500\u256d\u256e\u2570\u256f\u203a\u00b7\u2026",
+    "layout": {
+      "wide_at_columns": 96,
+      "preferred_sidebar_columns": 30,
+      "max_composer_lines": 5,
+      "sidebar_min_columns": 20,
+      "transcript_min_columns_with_sidebar": 21
+    },
+    "palette": {
+      "panel": [
+        7,
+        11,
+        24
+      ],
+      "panel_alt": [
+        10,
+        16,
+        32
+      ],
+      "header": [
+        9,
+        13,
+        28
+      ],
+      "ink": [
+        226,
+        235,
+        250
+      ],
+      "muted": [
+        122,
+        139,
+        169
+      ],
+      "cyan": [
+        54,
+        222,
+        236
+      ],
+      "magenta": [
+        238,
+        84,
+        190
+      ],
+      "amber": [
+        250,
+        184,
+        68
+      ],
+      "green": [
+        80,
+        218,
+        150
+      ],
+      "red": [
+        250,
+        94,
+        112
+      ],
+      "blue": [
+        90,
+        142,
+        246
+      ]
+    },
+    "benchmark": {
+      "enabled": false,
+      "width": 100,
+      "height": 30,
+      "seconds": 1,
+      "quality": 3,
+      "include_ansi": true,
+      "ascii": false,
+      "truecolor": true
+    },
+    "job_scoped_events": [
+      "started",
+      "request",
+      "result",
+      "done",
+      "error",
+      "approval_required",
+      "notification",
+      "completed",
+      "cancelled",
+      "subagent_started",
+      "subagent_activity",
+      "subagent_completed",
+      "subagent_failed",
+      "goal_judge_started",
+      "goal_judge_decision",
+      "goal_retry",
+      "ui",
+      "subagent_cancelled",
+      "session_restored",
+      "status"
+    ],
+    "min_fps": 1,
+    "max_fps": 240,
+    "picker": {
+      "max_width": 94,
+      "max_rows": 16,
+      "margin": 2,
+      "poll_seconds": 0.03
+    },
+    "initial_prompt": null,
+    "text_cache_entries": 4096,
+    "approval_cache_entries": 8,
+    "composer_cache_entries": 16,
+    "clipboard": "auto"
+  },
+  "release": {
+    "archive_root": "raychat",
+    "manifest_name": "PORTABLE_MANIFEST.json",
+    "fixed_timestamp": [
+      1980,
+      1,
+      1,
+      0,
+      0,
+      0
+    ],
+    "file_mode": 420,
+    "manifest_format": 1,
+    "python_requires": ">=3.10",
+    "zip_create_system": 3,
+    "archive_path": "build/raychat.zip",
+    "folder_path": "build/raychat",
+    "smoke_test": true,
+    "cache_directory_names": [
+      "__pycache__",
+      ".hypothesis",
+      ".mypy_cache",
+      ".pytest_cache",
+      ".ruff_cache"
+    ],
+    "cache_file_suffixes": [
+      ".pyc",
+      ".pyo"
+    ],
+    "cache_file_names": [
+      ".DS_Store",
+      ".coverage"
+    ],
+    "cleanup_excluded_top_level": [
+      ".git",
+      "dist",
+      "workspace"
+    ],
+    "lf_suffixes": [
+      ".json",
+      ".jsonl",
+      ".md",
+      ".py",
+      ".txt",
+      ".yaml",
+      ".yml"
+    ],
+    "lf_names": [
+      ".gitattributes",
+      "GEPA_LICENSE",
+      "LICENSE"
+    ],
+    "source_files": [
+      ".gitattributes",
+      ".github/workflows/portable.yml",
+      ".gitignore",
+      "LICENSE",
+      "README.md",
+      "docs/GEPA_PORT.md",
+      "docs/IMPLEMENTATION_TODOS.md",
+      "docs/PLUGINS.md",
+      "docs/QA_TODOS.md",
+      "docs/RELEASE.md",
+      "docs/SELF_HARNESS.md",
+      "docs/SUBAGENTS.md",
+      "docs/TYPING.md",
+      "docs/VERIFICATION.md",
+      "docs/retired-compaction-specs.json",
+      "docs/verification/README.md",
+      "docs/verification/artifacts/incident_response_offline_protocol.txt",
+      "docs/verification/artifacts/incident_response_offline_report.json",
+      "docs/verification/artifacts/live_optimization_report.json",
+      "docs/verification/artifacts/live_optimized_protocol.txt",
+      "docs/verification/artifacts/offline_optimization_report.json",
+      "docs/verification/artifacts/optimization_tui_report.json",
+      "docs/verification/artifacts/optimized_protocol.txt",
+      "docs/verification/artifacts/port_verification_report.json",
+      "docs/verification/artifacts/reorganization_report.json",
+      "docs/verification/artifacts/scalability_report.json",
+      "docs/verification/artifacts/self_harness_final_report.json",
+      "docs/verification/artifacts/self_harness_glm_report.json",
+      "docs/verification/artifacts/self_harness_live_report.json",
+      "docs/verification/artifacts/self_harness_qa_report.json",
+      "docs/verification/artifacts/self_harness_sdk_v2_report.json",
+      "docs/verification/artifacts/self_harness_tui_provider_failure_report.json",
+      "docs/verification/artifacts/self_harness_tui_rejected_report.json",
+      "docs/verification/artifacts/self_harness_tui_report.json",
+      "docs/verification/artifacts/tui_bare_core_report.json",
+      "docs/verification/artifacts/tui_features_report.json",
+      "docs/verification/artifacts/tui_manual_default_report.json",
+      "docs/verification/artifacts/tui_navigation_report.json",
+      "docs/verification/artifacts/tui_plugin_lifecycle_report.json",
+      "docs/verification/artifacts/tui_process_report.json",
+      "docs/verification/artifacts/tui_qa_report.json",
+      "docs/verification/artifacts/ui_queue_status_report.json",
+      "docs/verification/artifacts/useful_optimization_report.json",
+      "docs/verification/artifacts/useful_optimized_protocol.txt",
+      "docs/verification/artifacts/workflow_glm_report.json",
+      "docs/verification/artifacts/workflow_live_report.json",
+      "docs/verification/artifacts/workflow_stress_report.json",
+      "docs/verification/artifacts/workflow_tui_context_report.json",
+      "docs/verification/artifacts/workflow_tui_live_report.json",
+      "docs/verification/artifacts/workflow_tui_qa_live_report.json",
+      "examples/plugins/counter/__init__.py",
+      "examples/plugins/counter/plugin.json",
+      "plugin_catalog/catalog.json",
+      "plugin_catalog/chat_completions-1.0.0.zip",
+      "plugin_catalog/context-1.0.0.zip",
+      "plugin_catalog/filesystem-1.0.0.zip",
+      "plugin_catalog/goals-1.0.0.zip",
+      "plugin_catalog/memory-1.0.0.zip",
+      "plugin_catalog/optimization-1.0.0.zip",
+      "plugin_catalog/plugin_manager-1.0.0.zip",
+      "plugin_catalog/process-1.0.0.zip",
+      "plugin_catalog/profile.json",
+      "plugin_catalog/self_harness-1.0.0.zip",
+      "plugin_catalog/skills-1.0.0.zip",
+      "plugin_catalog/subagents-1.0.0.zip",
+      "plugin_catalog/workflows-1.0.0.zip",
+      "plugins/chat_completions/__init__.py",
+      "plugins/chat_completions/client.py",
+      "plugins/chat_completions/configuration.py",
+      "plugins/chat_completions/plugin.json",
+      "plugins/context/__init__.py",
+      "plugins/context/configuration.py",
+      "plugins/context/plugin.json",
+      "plugins/filesystem/__init__.py",
+      "plugins/filesystem/configuration.py",
+      "plugins/filesystem/plugin.json",
+      "plugins/goals/__init__.py",
+      "plugins/goals/configuration.py",
+      "plugins/goals/plugin.json",
+      "plugins/memory/__init__.py",
+      "plugins/memory/configuration.py",
+      "plugins/memory/plugin.json",
+      "plugins/optimization/GEPA_LICENSE",
+      "plugins/optimization/__init__.py",
+      "plugins/optimization/configuration.py",
+      "plugins/optimization/gepa/__init__.py",
+      "plugins/optimization/gepa/core/__init__.py",
+      "plugins/optimization/gepa/core/adapter.py",
+      "plugins/optimization/gepa/core/data_loader.py",
+      "plugins/optimization/gepa/core/engine.py",
+      "plugins/optimization/gepa/core/result.py",
+      "plugins/optimization/gepa/core/state.py",
+      "plugins/optimization/gepa/evaluation.py",
+      "plugins/optimization/gepa/evaluation_types.py",
+      "plugins/optimization/gepa/gepa_utils.py",
+      "plugins/optimization/gepa/image.py",
+      "plugins/optimization/gepa/logging/__init__.py",
+      "plugins/optimization/gepa/logging/logger.py",
+      "plugins/optimization/gepa/logging/utils.py",
+      "plugins/optimization/gepa/normalization.py",
+      "plugins/optimization/gepa/optimize_anything.py",
+      "plugins/optimization/gepa/proposer/__init__.py",
+      "plugins/optimization/gepa/proposer/base.py",
+      "plugins/optimization/gepa/proposer/merge.py",
+      "plugins/optimization/gepa/proposer/reflective_mutation/__init__.py",
+      "plugins/optimization/gepa/proposer/reflective_mutation/base.py",
+      "plugins/optimization/gepa/proposer/reflective_mutation/reflective_mutation.py",
+      "plugins/optimization/gepa/serialization.py",
+      "plugins/optimization/gepa/strategies/__init__.py",
+      "plugins/optimization/gepa/strategies/batch_sampler.py",
+      "plugins/optimization/gepa/strategies/candidate_selector.py",
+      "plugins/optimization/gepa/strategies/component_selector.py",
+      "plugins/optimization/gepa/strategies/eval_policy.py",
+      "plugins/optimization/gepa/strategies/instruction_proposal.py",
+      "plugins/optimization/gepa/type_support.py",
+      "plugins/optimization/gepa/utils/__init__.py",
+      "plugins/optimization/gepa/utils/stdio_capture.py",
+      "plugins/optimization/gepa/utils/stop_condition.py",
+      "plugins/optimization/opaque_incident_demo.py",
+      "plugins/optimization/optimize_chat_prompt.py",
+      "plugins/optimization/plugin.json",
+      "plugins/optimization/self_harness_benchmark.py",
+      "plugins/optimization/workflow_benchmark.py",
+      "plugins/plugin_manager/__init__.py",
+      "plugins/plugin_manager/plugin.json",
+      "plugins/process/__init__.py",
+      "plugins/process/configuration.py",
+      "plugins/process/plugin.json",
+      "plugins/self_harness/__init__.py",
+      "plugins/self_harness/candidate.py",
+      "plugins/self_harness/configuration.py",
+      "plugins/self_harness/evaluation.py",
+      "plugins/self_harness/evidence.py",
+      "plugins/self_harness/plugin.json",
+      "plugins/skills/__init__.py",
+      "plugins/skills/configuration.py",
+      "plugins/skills/plugin.json",
+      "plugins/subagents/__init__.py",
+      "plugins/subagents/config.py",
+      "plugins/subagents/configuration.py",
+      "plugins/subagents/coordinator.py",
+      "plugins/subagents/models.py",
+      "plugins/subagents/plugin.json",
+      "plugins/subagents/sessions.py",
+      "plugins/workflows/__init__.py",
+      "plugins/workflows/configuration.py",
+      "plugins/workflows/plugin.json",
+      "pyproject.toml",
+      "raychat.json",
+      "raychat.py",
+      "raychat/__init__.py",
+      "raychat/_common.py",
+      "raychat/application.py",
+      "raychat/composition.py",
+      "raychat/configuration.py",
+      "raychat/distribution.py",
+      "raychat/entrypoint.py",
+      "raychat/event_bus.py",
+      "raychat/event_types.py",
+      "raychat/file_lock.py",
+      "raychat/host_settings.py",
+      "raychat/navigation.py",
+      "raychat/packages.py",
+      "raychat/plugin_manager.py",
+      "raychat/plugin_sources.py",
+      "raychat/plugins.py",
+      "raychat/presentation.py",
+      "raychat/protocol.py",
+      "raychat/resources.py",
+      "raychat/sdk.py",
+      "raychat/service_types.py",
+      "raychat/session.py",
+      "raychat/status.py",
+      "raychat/storage.py",
+      "raychat/transport.py",
+      "raychat/type_support.py",
+      "raychat/ui/__init__.py",
+      "raychat/ui/commands.py",
+      "raychat/ui/controller.py",
+      "raychat/ui/feedback.py",
+      "raychat/ui/message_queue.py",
+      "raychat/ui/picker.py",
+      "raychat/ui/renderer.py",
+      "raychat/ui/selection.py",
+      "raychat/ui/state.py",
+      "raychat/ui/terminal.py",
+      "raychat/validation.py",
+      "raychat/worker_entry.py",
+      "raychat/workers.py",
+      "requirements-dev.txt",
+      "tests/__init__.py",
+      "tests/fixtures/features/__init__.py",
+      "tests/fixtures/features/plugin.json",
+      "tests/fixtures/probe/__init__.py",
+      "tests/fixtures/probe/plugin.json",
+      "tests/module_origins.py",
+      "tests/plugin_support.py",
+      "tests/provider_support.py",
+      "tests/test_agent_sessions.py",
+      "tests/test_app_config.py",
+      "tests/test_build_portable.py",
+      "tests/test_cancellation.py",
+      "tests/test_composer_features.py",
+      "tests/test_distribution.py",
+      "tests/test_entrypoint.py",
+      "tests/test_event_bus.py",
+      "tests/test_hot_plugins.py",
+      "tests/test_opaque_incident_demo.py",
+      "tests/test_optimize_chat_prompt.py",
+      "tests/test_orchestration.py",
+      "tests/test_package_download.py",
+      "tests/test_package_system.py",
+      "tests/test_picker.py",
+      "tests/test_plugin_chat_completions.py",
+      "tests/test_plugin_context.py",
+      "tests/test_plugin_contracts.py",
+      "tests/test_plugin_filesystem_process.py",
+      "tests/test_plugin_integration.py",
+      "tests/test_plugin_memory.py",
+      "tests/test_plugin_protocol.py",
+      "tests/test_plugin_run.py",
+      "tests/test_plugin_sessions.py",
+      "tests/test_plugin_settings.py",
+      "tests/test_plugin_skills.py",
+      "tests/test_plugin_sources.py",
+      "tests/test_plugins.py",
+      "tests/test_presentation.py",
+      "tests/test_ray_chat_tui.py",
+      "tests/test_ray_renderer.py",
+      "tests/test_release.py",
+      "tests/test_self_harness.py",
+      "tests/test_terminal_rendering.py",
+      "tests/test_terminal_runtime.py",
+      "tests/test_tui_sessions.py",
+      "tests/test_tui_state.py",
+      "tests/test_tui_support.py",
+      "tests/test_validation.py",
+      "tests/test_workflow_stress.py",
+      "tests/tui_support.py",
+      "tests/typecheck/__init__.py",
+      "tests/typecheck/gepa_contracts.py.txt",
+      "tests/typecheck/host_settings.py.txt",
+      "tests/typecheck/opaque_contracts.py.txt",
+      "tests/typecheck/optimization_contracts.py.txt",
+      "tests/typecheck/plugin_contracts.py.txt",
+      "tests/typecheck/plugin_settings.py.txt",
+      "tests/typecheck/provider_contracts.py.txt",
+      "tests/typecheck/shared_fixtures.py.txt",
+      "tests/typecheck/source_contracts.py.txt",
+      "tests/typecheck/subagent_contracts.py.txt",
+      "tests/typecheck/ui_contracts.py.txt",
+      "tests/typecheck/valid_contracts.py",
+      "tools/__init__.py",
+      "tools/accept_tui.py",
+      "tools/adversarial_agents_tui.py",
+      "tools/bare_tui.py",
+      "tools/build_plugin_catalog.py",
+      "tools/build_portable.py",
+      "tools/check_types.py",
+      "tools/collective_tui.py",
+      "tools/composer_tui.py",
+      "tools/drive_tui.py",
+      "tools/features_tui.py",
+      "tools/fps_tui.py",
+      "tools/optimization_tui.py",
+      "tools/package_download_tui.py",
+      "tools/persistence_tui.py",
+      "tools/plugin_guide_tui.py",
+      "tools/profile_upgrade_tui.py",
+      "tools/release.py",
+      "tools/reload_race_tui.py",
+      "tools/self_harness_tui.py",
+      "tools/startup_tui.py",
+      "tools/terminal_screen.py",
+      "tools/ui_stress_tui.py",
+      "tools/verify_quality.py"
+    ],
+    "smoke_timeout_seconds": 180,
+    "smoke_error_chars": 16384
+  },
+  "terminal": {
+    "max_paste_bytes": 1048576,
+    "max_editor_chars": 16384,
+    "read_timeout_seconds": 0,
+    "read_bytes": 4096,
+    "frame_ewma_alpha": 0.12,
+    "approval_poll_seconds": 0.05,
+    "event_poll_seconds": 0,
+    "timing_epsilon": 1e-12,
+    "max_escape_bytes": 64,
+    "windows_poll_seconds": 0.001
+  },
+  "renderer": {
+    "black": [
+      0,
+      0,
+      0
+    ],
+    "white": [
+      238,
+      244,
+      255
+    ],
+    "rgb_quantization_step": 6,
+    "samples_per_cell": 2,
+    "animation_hertz": 60,
+    "default_quality": 1,
+    "scene": {
+      "ray_cache_entries": 5,
+      "pixel_aspect": 0.52,
+      "field_scale": 0.72,
+      "hit_epsilon": 0.001,
+      "plane_direction_epsilon": 0.0001,
+      "surface_bias": 0.002,
+      "normal_floor": 0.0001,
+      "camera": [
+        0,
+        0.18,
+        -4.35
+      ],
+      "light": [
+        -3.2,
+        4.2,
+        -1.6
+      ],
+      "plane": {
+        "y": -1.05,
+        "checker_scale": 1.15,
+        "even_color": [
+          10,
+          13,
+          27
+        ],
+        "odd_color": [
+          18,
+          22,
+          38
+        ],
+        "reflection": 0.12
+      },
+      "spheres": [
+        {
+          "position": [
+            -1.05,
+            -0.05,
+            3.05
+          ],
+          "radius": 0.88,
+          "color": [
+            222,
+            54,
+            174
+          ],
+          "reflection": 0.42,
+          "x_motion": [
+            "sin",
+            0.7,
+            0.18
+          ],
+          "y_motion": [
+            "sin",
+            1.1,
+            0.12
+          ]
+        },
+        {
+          "position": [
+            0.92,
+            -0.28,
+            2.62
+          ],
+          "radius": 0.66,
+          "color": [
+            42,
+            204,
+            234
+          ],
+          "reflection": 0.3,
+          "x_motion": [
+            "cos",
+            0.55,
+            0.16
+          ],
+          "y_motion": [
+            "sin",
+            0.8,
+            0.08
+          ]
+        },
+        {
+          "position": [
+            0.12,
+            0.98,
+            4.1
+          ],
+          "radius": 0.48,
+          "color": [
+            246,
+            174,
+            64
+          ],
+          "reflection": 0.18,
+          "x_motion": [
+            "sin",
+            0.4,
+            0.24
+          ],
+          "y_motion": [
+            "cos",
+            0.9,
+            0.1
+          ]
+        }
+      ],
+      "sky": {
+        "fade_y_offset": 0.55,
+        "fade_scale": 0.72,
+        "glow_vector": [
+          -0.45,
+          0.5,
+          0.18
+        ],
+        "glow_exponent": 18,
+        "star_y_threshold": 0,
+        "star_noise": [
+          593.3,
+          271.9,
+          977.1
+        ],
+        "star_threshold": 0.985,
+        "star_intensity": 80,
+        "base_color": [
+          8,
+          10,
+          24
+        ],
+        "fade_color": [
+          18,
+          20,
+          34
+        ],
+        "glow_color": [
+          62,
+          34,
+          72
+        ]
+      },
+      "lighting": {
+        "shadow": 0.22,
+        "ambient": 0.16,
+        "diffuse": 0.78,
+        "specular_exponent": 28,
+        "specular_color": [
+          150,
+          160,
+          175
+        ],
+        "secondary_reflection_scale": 0.72,
+        "fog_max": 0.72,
+        "fog_start": 4,
+        "fog_density": 0.075
+      }
+    },
+    "benchmark": {
+      "width": 100,
+      "height": 30,
+      "seconds": 1,
+      "quality": 1,
+      "include_ansi": true
+    }
+  }
+}

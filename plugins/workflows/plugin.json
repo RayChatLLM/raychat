@@ -1,0 +1,16 @@
+{
+  "id": "workflows",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "workflows capabilities",
+  "requires": {
+    "subagents": "1.0.0"
+  },
+  "defaults": {
+    "max_agents_per_batch": 8,
+    "max_task_chars": 65536,
+    "max_identifier_chars": 64
+  },
+  "instructions": "To ask one subagent to solve a task, emit {\"action\":\"delegate\",\"agent\":\"reviewer\",\"purpose\":\"review\",\"task\":\"Read the relevant files and report findings.\"}. For independent tasks use {\"action\":\"delegate_many\",\"agents\":[{\"agent\":\"first\",\"purpose\":\"review\",\"task\":\"Task A\"},{\"agent\":\"second\",\"purpose\":\"review\",\"task\":\"Task B\"}]}. An optional profile selects a configured model profile. Keep agent names unique per batch and respect the host batch limit. Wait for HOST_RESULT; inspect each child status and combine their findings. Use serial delegation for dependent work and multiple bounded batches for larger collective tasks."
+}

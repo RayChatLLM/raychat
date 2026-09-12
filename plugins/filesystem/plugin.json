@@ -1,0 +1,15 @@
+{
+  "id": "filesystem",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "filesystem capabilities",
+  "requires": {},
+  "defaults": {
+    "output_bytes": 16384,
+    "list_page_entries": 200,
+    "file_copy_bytes": 65536,
+    "max_file_offset": 9223372036854775807
+  },
+  "instructions": "Inspect and modify workspace files with list, read, write and edit. Examples: {\"action\":\"list\",\"path\":\".\"}, {\"action\":\"read\",\"path\":\"notes.txt\"}, {\"action\":\"write\",\"path\":\"notes.txt\",\"content\":\"new text\"}. Read is paginated: follow next_offset when truncated. Use edit with byte start/end and expected_sha256 from a fresh read. Only enabled actions are available; writes and edits require the host approval policy. Paths are workspace-relative and confined to the workspace. list accepts cursor and limit; follow next_cursor. read offset/limit and edit start/end count bytes; edits require UTF-8 character boundaries. content_base64 is authoritative when present. write atomically replaces the whole file; edit atomically replaces [start,end) only if expected_sha256 still matches."
+}

@@ -1,0 +1,26 @@
+{
+  "passed": true,
+  "interaction": "Actual terminal keyboard/mouse input and rendered screen inspection; standard installed home, provider, workspace and approval policy",
+  "provider": "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+  "child_sessions": [
+    "fbcc8000fb8a4385832e438a7172169c",
+    "af794ae331814cc49ee067471dd95478"
+  ],
+  "checks": [
+    "Default python3 raychat.py starts after the installed-package upgrade",
+    "Workflow runs two independent live reviewers",
+    "Approval UI accepts file changes and command; independent verifier returns 2440",
+    "Keyboard and mouse open the existing child session; /parent restores parent chat",
+    "Child reads updated file during follow-up",
+    "Double Escape cancels child; replacement prompt and subsequent file read complete",
+    "Double Escape stops approved long-running command; another message completes",
+    "Denied file write reports denial, is not retried and creates no file",
+    "Plugin picker opens and terminal modes are restored on exit"
+  ],
+  "observed_model_errors": [
+    "Model initially used an incorrect byte range, reread the resulting file, and repaired it before the verifier passed.",
+    "The function-review child guessed 0 when asked for invoice totals without tools; after an explicit file read it returned 2440. This is not counted as a correct unaided calculation."
+  ],
+  "terminal_restored": true,
+  "evidence": "/tmp/raychat-expanded/manual-default-v1"
+}

@@ -1,0 +1,55 @@
+{
+  "oracle": {
+    "best_candidate": "excellent",
+    "bytes": 2029,
+    "evals": [
+      "bad",
+      "bad",
+      "excellent",
+      "excellent"
+    ],
+    "identical": true,
+    "scores": [
+      0.0,
+      1.0
+    ],
+    "sha256": "adc7258f502b2c9a5d52c8d15220f31948414639c8160bf544675f8660ae3c29"
+  },
+  "prompts": {
+    "dynamic": {
+      "bytes": 1552,
+      "identical": true,
+      "sha256": "e35670058028dd8226d2257558922652135e274edcee2d390c8b6b5cc2ced73a"
+    },
+    "instruction_default": {
+      "bytes": 942,
+      "identical": true,
+      "sha256": "c8125637a50786c335d73d2f0ac78b5463059d46a75843dae74576ddb8b28c80"
+    },
+    "oa_default": {
+      "bytes": 1287,
+      "identical": true,
+      "sha256": "51216891e8091f3fffb3737480d9b30be3ed96ca1741afe0cf385952ed8efbb2"
+    },
+    "seed": {
+      "bytes": 341,
+      "identical": true,
+      "sha256": "2ef26e1125e23fb8e6b3a8985cea66374fa935112765ea5e7c2a4998a22526cc"
+    }
+  },
+  "source": {
+    "bytes": 252473,
+    "external_imports": [],
+    "file_count": 31,
+    "modified_from_upstream": true,
+    "stdlib_only": true,
+    "tree_sha256": "34d7ecb2eec292cc25bbc2dd4d3fb0218698b7d9459640f46b739fd3be3183be"
+  },
+  "upstream_commit": "a79dc2922cdb0308e9de4f6a5bb9b5ec16f05a91",
+  "upstream_source": {
+    "bytes": 322289,
+    "file_count": 39,
+    "tree_sha256": "41298300b7fe5588afd81e50f07a4e1b49b060a317687e0a351b279a1e758c7d"
+  },
+  "upstream_tag": "v0.1.0"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "probe",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "Deterministic provider for terminal acceptance scenarios",
+  "requires": {"process": "1.0.0"},
+  "instructions": "A local acceptance fixture responds to scenario prompts; no remote model is used."
+}

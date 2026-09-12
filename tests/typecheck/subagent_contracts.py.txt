@@ -1,0 +1,41 @@
+"""Delegation configuration and child snapshots must preserve exact service types."""
+from raychat.sdk import (
+    SUBAGENT_FACTORY, ChildSessionInfo, PluginAPI, ProviderClient,
+    SubagentFactoryService, SubagentSetup,
+)
+
+
+def invalid_provider() -> None:
+    SubagentSetup(provider=object(), context_chars=16000, max_parallel=8)  # expect-error: arg-type
+
+
+def invalid_context_limit(client: ProviderClient) -> None:
+    SubagentSetup(provider=client, context_chars="bad", max_parallel=8)  # expect-error: arg-type
+
+
+def misspelled_parallel_limit(client: ProviderClient) -> None:
+    SubagentSetup(provider=client, context_chars=16000, max_paralell=8)  # expect-error: call-arg
+
+
+def mutate_frozen_settings(setup: SubagentSetup) -> None:
+    setup.max_parallel = 20  # expect-error: misc
+
+
+def invalid_child_worker() -> None:
+    ChildSessionInfo(name="child", worker=object())  # expect-error: arg-type
+
+
+def invalid_configure_callback() -> None:
+    def configure(setup: SubagentSetup) -> str:
+        return "unexpected"
+    SubagentFactoryService(configure=configure, children=lambda: ())  # expect-error: arg-type
+
+
+def invalid_children_callback() -> None:
+    def children() -> tuple[object, ...]:
+        return (object(),)
+    SubagentFactoryService(configure=lambda setup: None, children=children)  # expect-error: arg-type
+
+
+def invalid_service(api: PluginAPI) -> None:
+    api.register_typed_service(SUBAGENT_FACTORY, object())  # expect-error: misc

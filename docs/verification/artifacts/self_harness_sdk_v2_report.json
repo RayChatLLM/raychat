@@ -1,0 +1,1745 @@
+{
+  "model": "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+  "request_options": {
+    "reasoning_effort": "none",
+    "temperature": 0,
+    "max_tokens": 8192
+  },
+  "repetitions": 2,
+  "candidate_count": 1,
+  "started": 1789184349.4465,
+  "scope": "Existing synthetic deployment-policy and data-rollup tasks; this does not establish general coding improvement.",
+  "fixture_sha256": "6d29f41da42eb0ae52b9615ab39d8d218ebb9edbe238c2ec95ff2666523c1053",
+  "message": "All self-harness candidates were rejected; active harness retained.",
+  "overlay": "",
+  "test_baseline": [
+    {
+      "test": {
+        "passed": 1,
+        "total": 2,
+        "results": [
+          {
+            "score": 1.0,
+            "side_info": {
+              "Case": "test_invoice_rollup",
+              "Task": "Read quarter 1/invoices.json first. Calculate the count and total cents of unpaid invoices. Then write quarter 1/outstanding.json as exactly one compact JSON object with keys outstanding_count and outstanding_total_cents in that order, followed by one LF newline. Finally finish with done message exactly 'outstanding calculated'.",
+              "InitialFiles": {
+                "quarter 1/invoices.json": "{\"invoices\":[{\"amount_cents\":1299,\"paid\":true},{\"amount_cents\":2500,\"paid\":false},{\"amount_cents\":701,\"paid\":false}]}\n"
+              },
+              "Checks": {
+                "completed": true,
+                "exact_action_sequence": true,
+                "exact_done_message": true,
+                "first_action_effect": true,
+                "no_invalid_replies": true
+              },
+              "Actions": [
+                "read",
+                "write",
+                "done"
+              ],
+              "ActualActionObjects": [
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json"
+                },
+                {
+                  "action": "write",
+                  "path": "quarter 1/outstanding.json",
+                  "content": "{\"outstanding_count\":2,\"outstanding_total_cents\":3201}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "outstanding calculated"
+                }
+              ],
+              "ExpectedActionObjects": [
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json"
+                },
+                {
+                  "action": "write",
+                  "path": "quarter 1/outstanding.json",
+                  "content": "{\"outstanding_count\":2,\"outstanding_total_cents\":3201}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "outstanding calculated"
+                }
+              ],
+              "ActionEffects": [
+                true,
+                true
+              ],
+              "VerifiedArtifacts": [
+                {
+                  "path": "quarter 1/outstanding.json",
+                  "expected_bytes": 55,
+                  "expected_sha256": "30ba360fb75428a2a2792317f22867a46281708f43c339cc45f5c928cbf68e77",
+                  "actual_bytes": 55,
+                  "actual_sha256": "30ba360fb75428a2a2792317f22867a46281708f43c339cc45f5c928cbf68e77",
+                  "byte_exact": true
+                }
+              ],
+              "InvalidReplies": 0,
+              "Failure": "",
+              "PartialScore": 1.0,
+              "ReplyCount": 3,
+              "ExactJSONReplies": 3,
+              "AllRepliesExactJSON": true,
+              "Feedback": "All protocol checks passed."
+            }
+          },
+          {
+            "score": 0.0,
+            "side_info": {
+              "Case": "test_deployment_key_policy",
+              "Task": "For this development deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+              "InitialFiles": {
+                "deployment.json": "{\"environment\":\"development\",\"service\":\"Event Worker\",\"version\":105}\n"
+              },
+              "Checks": {
+                "completed": true,
+                "exact_action_sequence": false,
+                "exact_done_message": true,
+                "first_action_effect": false,
+                "no_invalid_replies": true
+              },
+              "Actions": [
+                "read",
+                "write",
+                "done"
+              ],
+              "ActualActionObjects": [
+                {
+                  "action": "read",
+                  "path": "deployment.json"
+                },
+                {
+                  "action": "write",
+                  "path": "deployment-key.json",
+                  "content": "{\"deployment_key\": \"dev-12345\"}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "deployment key created"
+                }
+              ],
+              "ExpectedActionObjects": [
+                {
+                  "action": "read",
+                  "path": "deployment.json"
+                },
+                {
+                  "action": "write",
+                  "path": "deployment-key.json",
+                  "content": "{\"deployment_key\":\"DEV::event-worker::v0105\"}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "deployment key created"
+                }
+              ],
+              "ActionEffects": [
+                true,
+                false
+              ],
+              "VerifiedArtifacts": [],
+              "InvalidReplies": 0,
+              "Failure": "",
+              "PartialScore": 0.6,
+              "ReplyCount": 3,
+              "ExactJSONReplies": 3,
+              "AllRepliesExactJSON": true,
+              "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "test": {
+        "passed": 0,
+        "total": 2,
+        "results": [
+          {
+            "score": 0.0,
+            "side_info": {
+              "Case": "test_invoice_rollup",
+              "Task": "Read quarter 1/invoices.json first. Calculate the count and total cents of unpaid invoices. Then write quarter 1/outstanding.json as exactly one compact JSON object with keys outstanding_count and outstanding_total_cents in that order, followed by one LF newline. Finally finish with done message exactly 'outstanding calculated'.",
+              "InitialFiles": {
+                "quarter 1/invoices.json": "{\"invoices\":[{\"amount_cents\":1299,\"paid\":true},{\"amount_cents\":2500,\"paid\":false},{\"amount_cents\":701,\"paid\":false}]}\n"
+              },
+              "Checks": {
+                "completed": true,
+                "exact_action_sequence": false,
+                "exact_done_message": true,
+                "first_action_effect": false,
+                "no_invalid_replies": true
+              },
+              "Actions": [
+                "read",
+                "write",
+                "done"
+              ],
+              "ActualActionObjects": [
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json"
+                },
+                {
+                  "action": "write",
+                  "path": "quarter 1/outstanding.json",
+                  "content": "{\"outstanding_count\":2,\"outstanding_total_cents\":3200}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "outstanding calculated"
+                }
+              ],
+              "ExpectedActionObjects": [
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json"
+                },
+                {
+                  "action": "write",
+                  "path": "quarter 1/outstanding.json",
+                  "content": "{\"outstanding_count\":2,\"outstanding_total_cents\":3201}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "outstanding calculated"
+                }
+              ],
+              "ActionEffects": [
+                true,
+                false
+              ],
+              "VerifiedArtifacts": [],
+              "InvalidReplies": 0,
+              "Failure": "",
+              "PartialScore": 0.6,
+              "ReplyCount": 3,
+              "ExactJSONReplies": 3,
+              "AllRepliesExactJSON": true,
+              "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field."
+            }
+          },
+          {
+            "score": 0.0,
+            "side_info": {
+              "Case": "test_deployment_key_policy",
+              "Task": "For this development deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+              "InitialFiles": {
+                "deployment.json": "{\"environment\":\"development\",\"service\":\"Event Worker\",\"version\":105}\n"
+              },
+              "Checks": {
+                "completed": true,
+                "exact_action_sequence": false,
+                "exact_done_message": true,
+                "first_action_effect": false,
+                "no_invalid_replies": true
+              },
+              "Actions": [
+                "read",
+                "write",
+                "done"
+              ],
+              "ActualActionObjects": [
+                {
+                  "action": "read",
+                  "path": "deployment.json"
+                },
+                {
+                  "action": "write",
+                  "path": "deployment-key.json",
+                  "content": "{\"deployment_key\":\"development\"}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "deployment key created"
+                }
+              ],
+              "ExpectedActionObjects": [
+                {
+                  "action": "read",
+                  "path": "deployment.json"
+                },
+                {
+                  "action": "write",
+                  "path": "deployment-key.json",
+                  "content": "{\"deployment_key\":\"DEV::event-worker::v0105\"}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "deployment key created"
+                }
+              ],
+              "ActionEffects": [
+                true,
+                false
+              ],
+              "VerifiedArtifacts": [],
+              "InvalidReplies": 0,
+              "Failure": "",
+              "PartialScore": 0.6,
+              "ReplyCount": 3,
+              "ExactJSONReplies": 3,
+              "AllRepliesExactJSON": true,
+              "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field."
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "test_deployed": [
+    {
+      "test": {
+        "passed": 0,
+        "total": 2,
+        "results": [
+          {
+            "score": 0.0,
+            "side_info": {
+              "Case": "test_invoice_rollup",
+              "Task": "Read quarter 1/invoices.json first. Calculate the count and total cents of unpaid invoices. Then write quarter 1/outstanding.json as exactly one compact JSON object with keys outstanding_count and outstanding_total_cents in that order, followed by one LF newline. Finally finish with done message exactly 'outstanding calculated'.",
+              "InitialFiles": {
+                "quarter 1/invoices.json": "{\"invoices\":[{\"amount_cents\":1299,\"paid\":true},{\"amount_cents\":2500,\"paid\":false},{\"amount_cents\":701,\"paid\":false}]}\n"
+              },
+              "Checks": {
+                "completed": false,
+                "exact_action_sequence": false,
+                "exact_done_message": false,
+                "first_action_effect": false,
+                "no_invalid_replies": false
+              },
+              "Actions": [
+                "read",
+                "read"
+              ],
+              "ActualActionObjects": [
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json"
+                },
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json",
+                  "offset": 0,
+                  "limit": 16384
+                }
+              ],
+              "ExpectedActionObjects": [
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json"
+                },
+                {
+                  "action": "write",
+                  "path": "quarter 1/outstanding.json",
+                  "content": "{\"outstanding_count\":2,\"outstanding_total_cents\":3201}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "outstanding calculated"
+                }
+              ],
+              "ActionEffects": [
+                true,
+                false
+              ],
+              "VerifiedArtifacts": [],
+              "InvalidReplies": 1,
+              "Failure": "RuntimeError: Stopped at 3 model turns without a done action.",
+              "PartialScore": 0.0,
+              "ReplyCount": 3,
+              "ExactJSONReplies": 2,
+              "AllRepliesExactJSON": false,
+              "Feedback": "Failed checks: completed, exact_action_sequence, exact_done_message, first_action_effect, no_invalid_replies. At least one model reply included text outside the JSON object or was otherwise invalid JSON."
+            }
+          },
+          {
+            "score": 0.0,
+            "side_info": {
+              "Case": "test_deployment_key_policy",
+              "Task": "For this development deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+              "InitialFiles": {
+                "deployment.json": "{\"environment\":\"development\",\"service\":\"Event Worker\",\"version\":105}\n"
+              },
+              "Checks": {
+                "completed": true,
+                "exact_action_sequence": false,
+                "exact_done_message": true,
+                "first_action_effect": false,
+                "no_invalid_replies": true
+              },
+              "Actions": [
+                "read",
+                "write",
+                "done"
+              ],
+              "ActualActionObjects": [
+                {
+                  "action": "read",
+                  "path": "deployment.json"
+                },
+                {
+                  "action": "write",
+                  "path": "deployment-key.json",
+                  "content": "{\"deployment_key\":\"dev-105\"}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "deployment key created"
+                }
+              ],
+              "ExpectedActionObjects": [
+                {
+                  "action": "read",
+                  "path": "deployment.json"
+                },
+                {
+                  "action": "write",
+                  "path": "deployment-key.json",
+                  "content": "{\"deployment_key\":\"DEV::event-worker::v0105\"}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "deployment key created"
+                }
+              ],
+              "ActionEffects": [
+                true,
+                false
+              ],
+              "VerifiedArtifacts": [],
+              "InvalidReplies": 0,
+              "Failure": "",
+              "PartialScore": 0.6,
+              "ReplyCount": 3,
+              "ExactJSONReplies": 3,
+              "AllRepliesExactJSON": true,
+              "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "test": {
+        "passed": 1,
+        "total": 2,
+        "results": [
+          {
+            "score": 1.0,
+            "side_info": {
+              "Case": "test_invoice_rollup",
+              "Task": "Read quarter 1/invoices.json first. Calculate the count and total cents of unpaid invoices. Then write quarter 1/outstanding.json as exactly one compact JSON object with keys outstanding_count and outstanding_total_cents in that order, followed by one LF newline. Finally finish with done message exactly 'outstanding calculated'.",
+              "InitialFiles": {
+                "quarter 1/invoices.json": "{\"invoices\":[{\"amount_cents\":1299,\"paid\":true},{\"amount_cents\":2500,\"paid\":false},{\"amount_cents\":701,\"paid\":false}]}\n"
+              },
+              "Checks": {
+                "completed": true,
+                "exact_action_sequence": true,
+                "exact_done_message": true,
+                "first_action_effect": true,
+                "no_invalid_replies": true
+              },
+              "Actions": [
+                "read",
+                "write",
+                "done"
+              ],
+              "ActualActionObjects": [
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json"
+                },
+                {
+                  "action": "write",
+                  "path": "quarter 1/outstanding.json",
+                  "content": "{\"outstanding_count\":2,\"outstanding_total_cents\":3201}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "outstanding calculated"
+                }
+              ],
+              "ExpectedActionObjects": [
+                {
+                  "action": "read",
+                  "path": "quarter 1/invoices.json"
+                },
+                {
+                  "action": "write",
+                  "path": "quarter 1/outstanding.json",
+                  "content": "{\"outstanding_count\":2,\"outstanding_total_cents\":3201}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "outstanding calculated"
+                }
+              ],
+              "ActionEffects": [
+                true,
+                true
+              ],
+              "VerifiedArtifacts": [
+                {
+                  "path": "quarter 1/outstanding.json",
+                  "expected_bytes": 55,
+                  "expected_sha256": "30ba360fb75428a2a2792317f22867a46281708f43c339cc45f5c928cbf68e77",
+                  "actual_bytes": 55,
+                  "actual_sha256": "30ba360fb75428a2a2792317f22867a46281708f43c339cc45f5c928cbf68e77",
+                  "byte_exact": true
+                }
+              ],
+              "InvalidReplies": 0,
+              "Failure": "",
+              "PartialScore": 1.0,
+              "ReplyCount": 3,
+              "ExactJSONReplies": 3,
+              "AllRepliesExactJSON": true,
+              "Feedback": "All protocol checks passed."
+            }
+          },
+          {
+            "score": 0.0,
+            "side_info": {
+              "Case": "test_deployment_key_policy",
+              "Task": "For this development deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+              "InitialFiles": {
+                "deployment.json": "{\"environment\":\"development\",\"service\":\"Event Worker\",\"version\":105}\n"
+              },
+              "Checks": {
+                "completed": true,
+                "exact_action_sequence": false,
+                "exact_done_message": true,
+                "first_action_effect": false,
+                "no_invalid_replies": true
+              },
+              "Actions": [
+                "read",
+                "write",
+                "done"
+              ],
+              "ActualActionObjects": [
+                {
+                  "action": "read",
+                  "path": "deployment.json"
+                },
+                {
+                  "action": "write",
+                  "path": "deployment-key.json",
+                  "content": "{\"deployment_key\":\"development\"}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "deployment key created"
+                }
+              ],
+              "ExpectedActionObjects": [
+                {
+                  "action": "read",
+                  "path": "deployment.json"
+                },
+                {
+                  "action": "write",
+                  "path": "deployment-key.json",
+                  "content": "{\"deployment_key\":\"DEV::event-worker::v0105\"}\n"
+                },
+                {
+                  "action": "done",
+                  "message": "deployment key created"
+                }
+              ],
+              "ActionEffects": [
+                true,
+                false
+              ],
+              "VerifiedArtifacts": [],
+              "InvalidReplies": 0,
+              "Failure": "",
+              "PartialScore": 0.6,
+              "ReplyCount": 3,
+              "ExactJSONReplies": 3,
+              "AllRepliesExactJSON": true,
+              "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field."
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "attempts": [
+    {
+      "time": 1789184363.929311,
+      "attempt": "d1c8781f2673427eb6ffe54ddfd41c20-1",
+      "proposal": null,
+      "decision": "rejected",
+      "reason": "Proposal requires a rationale, an observed signature, overlay text and optional files.",
+      "baseline": [
+        {
+          "held_in": {
+            "passed": 0,
+            "total": 3,
+            "results": [
+              {
+                "score": 0.0,
+                "side_info": {
+                  "Case": "train_deployment_key_policy",
+                  "Task": "For this production deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+                  "InitialFiles": {
+                    "deployment.json": "{\"environment\":\"production\",\"service\":\"Billing API\",\"version\":7}\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": false,
+                    "exact_done_message": true,
+                    "first_action_effect": false,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\": \"bfba2583da81e1bcc03258460f029e1945d45c85da0a890a1e86dda83d845afb\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"PRO::billing-api::v0007\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    false
+                  ],
+                  "VerifiedArtifacts": [],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 0.6,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field.",
+                  "LearningEvidence": {
+                    "input_fields": {
+                      "environment": "production",
+                      "service": "Billing API",
+                      "version": 7
+                    },
+                    "expected_output_segments": [
+                      "PRO",
+                      "billing-api",
+                      "v0007"
+                    ],
+                    "trainer_annotations": "environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::"
+                  }
+                }
+              },
+              {
+                "score": 0.0,
+                "side_info": {
+                  "Case": "train_deployment_key_policy_testing",
+                  "Task": "For this testing deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+                  "InitialFiles": {
+                    "deployment.json": "{\"environment\":\"testing\",\"service\":\"Data Worker\",\"version\":83}\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": false,
+                    "exact_done_message": true,
+                    "first_action_effect": false,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\": \"testing\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"TES::data-worker::v0083\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    false
+                  ],
+                  "VerifiedArtifacts": [],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 0.6,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field.",
+                  "LearningEvidence": {
+                    "input_fields": {
+                      "environment": "testing",
+                      "service": "Data Worker",
+                      "version": 83
+                    },
+                    "expected_output_segments": [
+                      "TES",
+                      "data-worker",
+                      "v0083"
+                    ],
+                    "trainer_annotations": "environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::"
+                  }
+                }
+              },
+              {
+                "score": 0.0,
+                "side_info": {
+                  "Case": "train_deployment_key_policy_canary",
+                  "Task": "For this canary deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+                  "InitialFiles": {
+                    "deployment.json": "{\"environment\":\"canary\",\"service\":\"Web Portal\",\"version\":1200}\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": false,
+                    "exact_done_message": true,
+                    "first_action_effect": false,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\": \"canary-deploy-key-12345\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"CAN::web-portal::v1200\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    false
+                  ],
+                  "VerifiedArtifacts": [],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 0.6,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field.",
+                  "LearningEvidence": {
+                    "input_fields": {
+                      "environment": "canary",
+                      "service": "Web Portal",
+                      "version": 1200
+                    },
+                    "expected_output_segments": [
+                      "CAN",
+                      "web-portal",
+                      "v1200"
+                    ],
+                    "trainer_annotations": "environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::"
+                  }
+                }
+              }
+            ],
+            "failures": [
+              {
+                "signature": [
+                  "deployment-key verifier mismatch",
+                  "observed output failure",
+                  "missing organization policy"
+                ],
+                "trace": "{\"Case\": \"train_deployment_key_policy\", \"ActualActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\": \\\"bfba2583da81e1bcc03258460f029e1945d45c85da0a890a1e86dda83d845afb\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"ExpectedActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\":\\\"PRO::billing-api::v0007\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"LearningEvidence\": {\"input_fields\": {\"environment\": \"production\", \"service\": \"Billing API\", \"version\": 7}, \"expected_output_segments\": [\"PRO\", \"billing-api\", \"v0007\"], \"trainer_annotations\": \"environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::\"}}"
+              },
+              {
+                "signature": [
+                  "deployment-key verifier mismatch",
+                  "observed output failure",
+                  "missing organization policy"
+                ],
+                "trace": "{\"Case\": \"train_deployment_key_policy_testing\", \"ActualActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\": \\\"testing\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"ExpectedActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\":\\\"TES::data-worker::v0083\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"LearningEvidence\": {\"input_fields\": {\"environment\": \"testing\", \"service\": \"Data Worker\", \"version\": 83}, \"expected_output_segments\": [\"TES\", \"data-worker\", \"v0083\"], \"trainer_annotations\": \"environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::\"}}"
+              },
+              {
+                "signature": [
+                  "deployment-key verifier mismatch",
+                  "observed output failure",
+                  "missing organization policy"
+                ],
+                "trace": "{\"Case\": \"train_deployment_key_policy_canary\", \"ActualActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\": \\\"canary-deploy-key-12345\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"ExpectedActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\":\\\"CAN::web-portal::v1200\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"LearningEvidence\": {\"input_fields\": {\"environment\": \"canary\", \"service\": \"Web Portal\", \"version\": 1200}, \"expected_output_segments\": [\"CAN\", \"web-portal\", \"v1200\"], \"trainer_annotations\": \"environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::\"}}"
+              }
+            ]
+          },
+          "held_out": {
+            "passed": 1,
+            "total": 2,
+            "results": [
+              {
+                "score": 1.0,
+                "side_info": {
+                  "Case": "validation_failure_rollup",
+                  "Task": "Read events.json first. Count failed events in total and by service. Then write failure-summary.json as exactly one compact JSON object with keys failed_by_service and failed_total in that order; service keys must be sorted; append one LF newline. Finally finish with done message exactly 'failures summarized'.",
+                  "InitialFiles": {
+                    "events.json": "[{\"service\":\"api\",\"status\":\"failed\"},{\"service\":\"web\",\"status\":\"ok\"},{\"service\":\"api\",\"status\":\"failed\"},{\"service\":\"worker\",\"status\":\"failed\"}]\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": true,
+                    "exact_done_message": true,
+                    "first_action_effect": true,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "events.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "failure-summary.json",
+                      "content": "{\"failed_by_service\":{\"api\":2,\"worker\":1},\"failed_total\":3}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "failures summarized"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "events.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "failure-summary.json",
+                      "content": "{\"failed_by_service\":{\"api\":2,\"worker\":1},\"failed_total\":3}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "failures summarized"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    true
+                  ],
+                  "VerifiedArtifacts": [
+                    {
+                      "path": "failure-summary.json",
+                      "expected_bytes": 60,
+                      "expected_sha256": "ad39e4cac959c0c3689e7e2b419da7859d6ae97ad11eb9e879c12eb1b684ab2a",
+                      "actual_bytes": 60,
+                      "actual_sha256": "ad39e4cac959c0c3689e7e2b419da7859d6ae97ad11eb9e879c12eb1b684ab2a",
+                      "byte_exact": true
+                    }
+                  ],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 1.0,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "All protocol checks passed."
+                }
+              },
+              {
+                "score": 0.0,
+                "side_info": {
+                  "Case": "validation_deployment_key_policy",
+                  "Task": "For this staging deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+                  "InitialFiles": {
+                    "deployment.json": "{\"environment\":\"staging\",\"service\":\"Search Service\",\"version\":42}\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": false,
+                    "exact_done_message": true,
+                    "first_action_effect": false,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\": \"d0fef7898985d755460e652fb1ee9571931f0241267d861ba7d5deae70b6d0f9\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"STA::search-service::v0042\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    false
+                  ],
+                  "VerifiedArtifacts": [],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 0.6,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field."
+                }
+              }
+            ]
+          }
+        },
+        {
+          "held_in": {
+            "passed": 0,
+            "total": 3,
+            "results": [
+              {
+                "score": 0.0,
+                "side_info": {
+                  "Case": "train_deployment_key_policy",
+                  "Task": "For this production deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+                  "InitialFiles": {
+                    "deployment.json": "{\"environment\":\"production\",\"service\":\"Billing API\",\"version\":7}\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": false,
+                    "exact_done_message": true,
+                    "first_action_effect": false,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\": \"bfba2583da81e1bcc03258460f029e1945d45c85da0a890a1e86dda83d845afb\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"PRO::billing-api::v0007\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    false
+                  ],
+                  "VerifiedArtifacts": [],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 0.6,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field.",
+                  "LearningEvidence": {
+                    "input_fields": {
+                      "environment": "production",
+                      "service": "Billing API",
+                      "version": 7
+                    },
+                    "expected_output_segments": [
+                      "PRO",
+                      "billing-api",
+                      "v0007"
+                    ],
+                    "trainer_annotations": "environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::"
+                  }
+                }
+              },
+              {
+                "score": 0.0,
+                "side_info": {
+                  "Case": "train_deployment_key_policy_testing",
+                  "Task": "For this testing deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+                  "InitialFiles": {
+                    "deployment.json": "{\"environment\":\"testing\",\"service\":\"Data Worker\",\"version\":83}\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": false,
+                    "exact_done_message": true,
+                    "first_action_effect": false,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\": \"testing-key-123\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"TES::data-worker::v0083\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    false
+                  ],
+                  "VerifiedArtifacts": [],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 0.6,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field.",
+                  "LearningEvidence": {
+                    "input_fields": {
+                      "environment": "testing",
+                      "service": "Data Worker",
+                      "version": 83
+                    },
+                    "expected_output_segments": [
+                      "TES",
+                      "data-worker",
+                      "v0083"
+                    ],
+                    "trainer_annotations": "environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::"
+                  }
+                }
+              },
+              {
+                "score": 0.0,
+                "side_info": {
+                  "Case": "train_deployment_key_policy_canary",
+                  "Task": "For this canary deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+                  "InitialFiles": {
+                    "deployment.json": "{\"environment\":\"canary\",\"service\":\"Web Portal\",\"version\":1200}\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": false,
+                    "exact_done_message": true,
+                    "first_action_effect": false,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"canary-env-1200\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"CAN::web-portal::v1200\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    false
+                  ],
+                  "VerifiedArtifacts": [],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 0.6,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field.",
+                  "LearningEvidence": {
+                    "input_fields": {
+                      "environment": "canary",
+                      "service": "Web Portal",
+                      "version": 1200
+                    },
+                    "expected_output_segments": [
+                      "CAN",
+                      "web-portal",
+                      "v1200"
+                    ],
+                    "trainer_annotations": "environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::"
+                  }
+                }
+              }
+            ],
+            "failures": [
+              {
+                "signature": [
+                  "deployment-key verifier mismatch",
+                  "observed output failure",
+                  "missing organization policy"
+                ],
+                "trace": "{\"Case\": \"train_deployment_key_policy\", \"ActualActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\": \\\"bfba2583da81e1bcc03258460f029e1945d45c85da0a890a1e86dda83d845afb\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"ExpectedActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\":\\\"PRO::billing-api::v0007\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"LearningEvidence\": {\"input_fields\": {\"environment\": \"production\", \"service\": \"Billing API\", \"version\": 7}, \"expected_output_segments\": [\"PRO\", \"billing-api\", \"v0007\"], \"trainer_annotations\": \"environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::\"}}"
+              },
+              {
+                "signature": [
+                  "deployment-key verifier mismatch",
+                  "observed output failure",
+                  "missing organization policy"
+                ],
+                "trace": "{\"Case\": \"train_deployment_key_policy_testing\", \"ActualActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\": \\\"testing-key-123\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"ExpectedActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\":\\\"TES::data-worker::v0083\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"LearningEvidence\": {\"input_fields\": {\"environment\": \"testing\", \"service\": \"Data Worker\", \"version\": 83}, \"expected_output_segments\": [\"TES\", \"data-worker\", \"v0083\"], \"trainer_annotations\": \"environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::\"}}"
+              },
+              {
+                "signature": [
+                  "deployment-key verifier mismatch",
+                  "observed output failure",
+                  "missing organization policy"
+                ],
+                "trace": "{\"Case\": \"train_deployment_key_policy_canary\", \"ActualActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\":\\\"canary-env-1200\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"ExpectedActionObjects\": [{\"action\": \"read\", \"path\": \"deployment.json\"}, {\"action\": \"write\", \"path\": \"deployment-key.json\", \"content\": \"{\\\"deployment_key\\\":\\\"CAN::web-portal::v1200\\\"}\\n\"}, {\"action\": \"done\", \"message\": \"deployment key created\"}], \"LearningEvidence\": {\"input_fields\": {\"environment\": \"canary\", \"service\": \"Web Portal\", \"version\": 1200}, \"expected_output_segments\": [\"CAN\", \"web-portal\", \"v1200\"], \"trainer_annotations\": \"environment maps to the uppercase first three characters; service maps to lowercase with each space replaced by a hyphen; version maps to the letter v followed by the decimal number left-padded with zeroes to four digits; join the three segments with ::\"}}"
+              }
+            ]
+          },
+          "held_out": {
+            "passed": 1,
+            "total": 2,
+            "results": [
+              {
+                "score": 1.0,
+                "side_info": {
+                  "Case": "validation_failure_rollup",
+                  "Task": "Read events.json first. Count failed events in total and by service. Then write failure-summary.json as exactly one compact JSON object with keys failed_by_service and failed_total in that order; service keys must be sorted; append one LF newline. Finally finish with done message exactly 'failures summarized'.",
+                  "InitialFiles": {
+                    "events.json": "[{\"service\":\"api\",\"status\":\"failed\"},{\"service\":\"web\",\"status\":\"ok\"},{\"service\":\"api\",\"status\":\"failed\"},{\"service\":\"worker\",\"status\":\"failed\"}]\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": true,
+                    "exact_done_message": true,
+                    "first_action_effect": true,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "events.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "failure-summary.json",
+                      "content": "{\"failed_by_service\":{\"api\":2,\"worker\":1},\"failed_total\":3}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "failures summarized"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "events.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "failure-summary.json",
+                      "content": "{\"failed_by_service\":{\"api\":2,\"worker\":1},\"failed_total\":3}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "failures summarized"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    true
+                  ],
+                  "VerifiedArtifacts": [
+                    {
+                      "path": "failure-summary.json",
+                      "expected_bytes": 60,
+                      "expected_sha256": "ad39e4cac959c0c3689e7e2b419da7859d6ae97ad11eb9e879c12eb1b684ab2a",
+                      "actual_bytes": 60,
+                      "actual_sha256": "ad39e4cac959c0c3689e7e2b419da7859d6ae97ad11eb9e879c12eb1b684ab2a",
+                      "byte_exact": true
+                    }
+                  ],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 1.0,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "All protocol checks passed."
+                }
+              },
+              {
+                "score": 0.0,
+                "side_info": {
+                  "Case": "validation_deployment_key_policy",
+                  "Task": "For this staging deployment, read deployment.json first. Apply the organization's deployment-key policy, which is not included in this task. Then write deployment-key.json as exactly one compact JSON object with the key deployment_key, followed by one LF newline. Finally finish with done message exactly 'deployment key created'.",
+                  "InitialFiles": {
+                    "deployment.json": "{\"environment\":\"staging\",\"service\":\"Search Service\",\"version\":42}\n"
+                  },
+                  "Checks": {
+                    "completed": true,
+                    "exact_action_sequence": false,
+                    "exact_done_message": true,
+                    "first_action_effect": false,
+                    "no_invalid_replies": true
+                  },
+                  "Actions": [
+                    "read",
+                    "write",
+                    "done"
+                  ],
+                  "ActualActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\": \"staging-search-42\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ExpectedActionObjects": [
+                    {
+                      "action": "read",
+                      "path": "deployment.json"
+                    },
+                    {
+                      "action": "write",
+                      "path": "deployment-key.json",
+                      "content": "{\"deployment_key\":\"STA::search-service::v0042\"}\n"
+                    },
+                    {
+                      "action": "done",
+                      "message": "deployment key created"
+                    }
+                  ],
+                  "ActionEffects": [
+                    true,
+                    false
+                  ],
+                  "VerifiedArtifacts": [],
+                  "InvalidReplies": 0,
+                  "Failure": "",
+                  "PartialScore": 0.6,
+                  "ReplyCount": 3,
+                  "ExactJSONReplies": 3,
+                  "AllRepliesExactJSON": true,
+                  "Feedback": "Failed checks: exact_action_sequence, first_action_effect. Review the action sequence, effects, final message, and failure field."
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "candidate": null,
+      "validation_argv": [
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+        "-B",
+        "-S",
+        "evaluator.py"
+      ],
+      "mode": "scores"
+    }
+  ],
+  "calls": [
+    {
+      "seconds": 0.35571529099252075,
+      "ok": true,
+      "prompt_characters": 4961,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3719303750258405,
+      "ok": true,
+      "prompt_characters": 5307,
+      "proposer": false
+    },
+    {
+      "seconds": 0.30635379199520685,
+      "ok": true,
+      "prompt_characters": 5614,
+      "proposer": false
+    },
+    {
+      "seconds": 0.6460014580225106,
+      "ok": true,
+      "prompt_characters": 4958,
+      "proposer": false
+    },
+    {
+      "seconds": 0.7149417909968179,
+      "ok": true,
+      "prompt_characters": 5302,
+      "proposer": false
+    },
+    {
+      "seconds": 0.6117343340010848,
+      "ok": true,
+      "prompt_characters": 5552,
+      "proposer": false
+    },
+    {
+      "seconds": 0.2868690000032075,
+      "ok": true,
+      "prompt_characters": 4957,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4109930000267923,
+      "ok": true,
+      "prompt_characters": 5301,
+      "proposer": false
+    },
+    {
+      "seconds": 0.31927329098107293,
+      "ok": true,
+      "prompt_characters": 5567,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3294605420087464,
+      "ok": true,
+      "prompt_characters": 4939,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4513235419872217,
+      "ok": true,
+      "prompt_characters": 5385,
+      "proposer": false
+    },
+    {
+      "seconds": 0.30016479099867865,
+      "ok": true,
+      "prompt_characters": 5671,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3327387919998728,
+      "ok": true,
+      "prompt_characters": 4958,
+      "proposer": false
+    },
+    {
+      "seconds": 0.668103833013447,
+      "ok": true,
+      "prompt_characters": 5305,
+      "proposer": false
+    },
+    {
+      "seconds": 0.6257728339987807,
+      "ok": true,
+      "prompt_characters": 5612,
+      "proposer": false
+    },
+    {
+      "seconds": 0.28789145898190327,
+      "ok": true,
+      "prompt_characters": 4961,
+      "proposer": false
+    },
+    {
+      "seconds": 0.37421512498985976,
+      "ok": true,
+      "prompt_characters": 5307,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3266479170124512,
+      "ok": true,
+      "prompt_characters": 5614,
+      "proposer": false
+    },
+    {
+      "seconds": 0.30811783400713466,
+      "ok": true,
+      "prompt_characters": 4958,
+      "proposer": false
+    },
+    {
+      "seconds": 0.42387224998674355,
+      "ok": true,
+      "prompt_characters": 5302,
+      "proposer": false
+    },
+    {
+      "seconds": 0.2850946670223493,
+      "ok": true,
+      "prompt_characters": 5560,
+      "proposer": false
+    },
+    {
+      "seconds": 0.31887954100966454,
+      "ok": true,
+      "prompt_characters": 4957,
+      "proposer": false
+    },
+    {
+      "seconds": 0.34004291699966416,
+      "ok": true,
+      "prompt_characters": 5301,
+      "proposer": false
+    },
+    {
+      "seconds": 0.29330595801002346,
+      "ok": true,
+      "prompt_characters": 5558,
+      "proposer": false
+    },
+    {
+      "seconds": 0.30792179200216196,
+      "ok": true,
+      "prompt_characters": 4939,
+      "proposer": false
+    },
+    {
+      "seconds": 0.35406795801827684,
+      "ok": true,
+      "prompt_characters": 5385,
+      "proposer": false
+    },
+    {
+      "seconds": 0.29368962498847395,
+      "ok": true,
+      "prompt_characters": 5671,
+      "proposer": false
+    },
+    {
+      "seconds": 0.29068904198356904,
+      "ok": true,
+      "prompt_characters": 4958,
+      "proposer": false
+    },
+    {
+      "seconds": 0.419746125000529,
+      "ok": true,
+      "prompt_characters": 5305,
+      "proposer": false
+    },
+    {
+      "seconds": 0.2960534169978928,
+      "ok": true,
+      "prompt_characters": 5565,
+      "proposer": false
+    },
+    {
+      "seconds": 1.0533417080005165,
+      "ok": true,
+      "prompt_characters": 2997,
+      "proposer": true
+    },
+    {
+      "seconds": 0.3341480419912841,
+      "ok": true,
+      "prompt_characters": 4958,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3234259169839788,
+      "ok": true,
+      "prompt_characters": 5371,
+      "proposer": false
+    },
+    {
+      "seconds": 0.277794041991001,
+      "ok": true,
+      "prompt_characters": 5660,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3165352499927394,
+      "ok": true,
+      "prompt_characters": 4962,
+      "proposer": false
+    },
+    {
+      "seconds": 0.37472033299854957,
+      "ok": true,
+      "prompt_characters": 5312,
+      "proposer": false
+    },
+    {
+      "seconds": 1.7137963330023922,
+      "ok": true,
+      "prompt_characters": 5564,
+      "proposer": false
+    },
+    {
+      "seconds": 0.30826937497477047,
+      "ok": true,
+      "prompt_characters": 4958,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3263058330048807,
+      "ok": true,
+      "prompt_characters": 5371,
+      "proposer": false
+    },
+    {
+      "seconds": 0.2663558330095839,
+      "ok": true,
+      "prompt_characters": 5660,
+      "proposer": false
+    },
+    {
+      "seconds": 0.520462291984586,
+      "ok": true,
+      "prompt_characters": 4962,
+      "proposer": false
+    },
+    {
+      "seconds": 0.5090682090085465,
+      "ok": true,
+      "prompt_characters": 5312,
+      "proposer": false
+    },
+    {
+      "seconds": 0.5113081670133397,
+      "ok": true,
+      "prompt_characters": 5565,
+      "proposer": false
+    },
+    {
+      "seconds": 0.2912824169907253,
+      "ok": true,
+      "prompt_characters": 4958,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4043192910030484,
+      "ok": true,
+      "prompt_characters": 5371,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4062158339947928,
+      "ok": true,
+      "prompt_characters": 5706,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4659743750235066,
+      "ok": true,
+      "prompt_characters": 4962,
+      "proposer": false
+    },
+    {
+      "seconds": 0.49669158400502056,
+      "ok": true,
+      "prompt_characters": 5312,
+      "proposer": false
+    },
+    {
+      "seconds": 2.190946457994869,
+      "ok": true,
+      "prompt_characters": 5561,
+      "proposer": false
+    },
+    {
+      "seconds": 0.5097630409873091,
+      "ok": true,
+      "prompt_characters": 4958,
+      "proposer": false
+    },
+    {
+      "seconds": 1.1097932499833405,
+      "ok": true,
+      "prompt_characters": 5371,
+      "proposer": false
+    },
+    {
+      "seconds": 0.29563758301083,
+      "ok": true,
+      "prompt_characters": 5660,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3015051670081448,
+      "ok": true,
+      "prompt_characters": 4962,
+      "proposer": false
+    },
+    {
+      "seconds": 0.32707016699714586,
+      "ok": true,
+      "prompt_characters": 5312,
+      "proposer": false
+    },
+    {
+      "seconds": 0.2906232090026606,
+      "ok": true,
+      "prompt_characters": 5565,
+      "proposer": false
+    }
+  ],
+  "elapsed_seconds": 28.583828926086426
+}

@@ -1,0 +1,188 @@
+{
+  "model": "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+  "request_options": {
+    "temperature": 0,
+    "max_tokens": 8192
+  },
+  "repetitions": 2,
+  "candidate_count": 1,
+  "started": 1789180894.339596,
+  "scope": "Existing synthetic deployment-policy and data-rollup tasks; this does not establish general coding improvement.",
+  "fixture_sha256": "6d29f41da42eb0ae52b9615ab39d8d218ebb9edbe238c2ec95ff2666523c1053",
+  "attempts": [
+    {
+      "time": 1789180939.65276,
+      "attempt": "93b3aedf3f294ef797c2e8e39b946b38",
+      "decision": "rejected",
+      "reason": "ValueError: Score evaluator failed, timed out or exceeded its output limit."
+    }
+  ],
+  "error": "ValueError: Score evaluator failed, timed out or exceeded its output limit.",
+  "calls": [
+    {
+      "seconds": 1.2883829170023091,
+      "ok": true,
+      "prompt_characters": 4829,
+      "proposer": false
+    },
+    {
+      "seconds": 1.1370816669950727,
+      "ok": true,
+      "prompt_characters": 5175,
+      "proposer": false
+    },
+    {
+      "seconds": 0.9155642080004327,
+      "ok": true,
+      "prompt_characters": 5417,
+      "proposer": false
+    },
+    {
+      "seconds": 0.595433749986114,
+      "ok": true,
+      "prompt_characters": 4826,
+      "proposer": false
+    },
+    {
+      "seconds": 1.2021468750026543,
+      "ok": true,
+      "prompt_characters": 4952,
+      "proposer": false
+    },
+    {
+      "seconds": 1.3267991250031628,
+      "ok": true,
+      "prompt_characters": 5296,
+      "proposer": false
+    },
+    {
+      "seconds": 0.47079641598975286,
+      "ok": true,
+      "prompt_characters": 4825,
+      "proposer": false
+    },
+    {
+      "seconds": 0.7107841249962803,
+      "ok": true,
+      "prompt_characters": 4951,
+      "proposer": false
+    },
+    {
+      "seconds": 4.398578292020829,
+      "ok": true,
+      "prompt_characters": 5295,
+      "proposer": false
+    },
+    {
+      "seconds": 0.40545120800379664,
+      "ok": true,
+      "prompt_characters": 4807,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4798982919892296,
+      "ok": true,
+      "prompt_characters": 4929,
+      "proposer": false
+    },
+    {
+      "seconds": 1.1387565420009196,
+      "ok": true,
+      "prompt_characters": 5375,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4532201249967329,
+      "ok": true,
+      "prompt_characters": 4826,
+      "proposer": false
+    },
+    {
+      "seconds": 0.7822924999927636,
+      "ok": true,
+      "prompt_characters": 4952,
+      "proposer": false
+    },
+    {
+      "seconds": 1.2602200000255834,
+      "ok": true,
+      "prompt_characters": 5299,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4224276659952011,
+      "ok": true,
+      "prompt_characters": 4829,
+      "proposer": false
+    },
+    {
+      "seconds": 1.2108217919885647,
+      "ok": true,
+      "prompt_characters": 5175,
+      "proposer": false
+    },
+    {
+      "seconds": 2.3795218330051284,
+      "ok": true,
+      "prompt_characters": 5417,
+      "proposer": false
+    },
+    {
+      "seconds": 0.3568713329732418,
+      "ok": true,
+      "prompt_characters": 4826,
+      "proposer": false
+    },
+    {
+      "seconds": 0.9050649160053581,
+      "ok": true,
+      "prompt_characters": 4952,
+      "proposer": false
+    },
+    {
+      "seconds": 3.065305708994856,
+      "ok": true,
+      "prompt_characters": 5296,
+      "proposer": false
+    },
+    {
+      "seconds": 0.36163412500172853,
+      "ok": true,
+      "prompt_characters": 4825,
+      "proposer": false
+    },
+    {
+      "seconds": 1.2200349579798058,
+      "ok": true,
+      "prompt_characters": 4951,
+      "proposer": false
+    },
+    {
+      "seconds": 2.351273250009399,
+      "ok": true,
+      "prompt_characters": 5295,
+      "proposer": false
+    },
+    {
+      "seconds": 0.4681414579972625,
+      "ok": true,
+      "prompt_characters": 4807,
+      "proposer": false
+    },
+    {
+      "seconds": 0.6705015000188723,
+      "ok": true,
+      "prompt_characters": 4929,
+      "proposer": false
+    },
+    {
+      "seconds": 14.502128457999788,
+      "ok": false,
+      "prompt_characters": 5375,
+      "proposer": false,
+      "error": "RuntimeError: Chat response did not report a successful text completion."
+    }
+  ],
+  "elapsed_seconds": 45.793829917907715,
+  "conclusion": "No efficacy estimate: baseline evaluation aborted on an incomplete provider response. No candidate was tested or promoted in this run."
+}
