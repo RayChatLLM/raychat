@@ -1,0 +1,1182 @@
+{
+  "agents": 50,
+  "live": true,
+  "model": "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+  "context_chars": 16000,
+  "padding_pages": 6,
+  "page_bytes": 6000,
+  "request_options": {
+    "reasoning_effort": "low",
+    "temperature": 0,
+    "max_tokens": 2048
+  },
+  "batches": [
+    {
+      "ok": false,
+      "batch": 1,
+      "agents": [
+        {
+          "batch": 1,
+          "agent": "ledger-0",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "60d532c439194d14b302895f5a83fbf9",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-1",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "d9601a37b95c4f13b88ae749991d0797",
+          "status": "completed",
+          "message": "{\"shard\": 1, \"unpaid_cents\": 404}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-2",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "79e02cc435484890b9eb59d1ed1695f8",
+          "status": "completed",
+          "message": "{\"shard\": 2, \"unpaid_cents\": 408}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-3",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "69027d10d3804a0087b25ccea84402a9",
+          "status": "completed",
+          "message": "{\"shard\": 3, \"unpaid_cents\": 412}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-4",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "cfd00d0507c34b9e99a1bf445bc8c007",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-5",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "0e92555be82d40f0bb481ab25ae7939a",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-6",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "b504fc6b65824b858ced1cb56dbda75b",
+          "status": "completed",
+          "message": "{\"shard\": 6, \"unpaid_cents\": 424}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-7",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "6c77d3d4d6a4407e8b246c5edffd932d",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        }
+      ]
+    },
+    {
+      "ok": false,
+      "batch": 2,
+      "agents": [
+        {
+          "batch": 2,
+          "agent": "ledger-8",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "7fc7de527c434558ab7f837cc6780eea",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-9",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "1bd6f75bc3934f15a819db273472c22b",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-10",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "4d8c49a3c2f94ea5b0e75156fd77b5f5",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-11",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "eee065714d12492b84dafc2220da394b",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-12",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "66f434d8fe6c42a1b600c9a479e1c73e",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-13",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "ff6a2386086146b8a27e18cc55d2a619",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-14",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "7324c5ef3fa74f0c9830389a3c681480",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-15",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "de0ae2e33f874fffb641925a47df856e",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        }
+      ]
+    },
+    {
+      "ok": false,
+      "batch": 3,
+      "agents": [
+        {
+          "batch": 3,
+          "agent": "ledger-16",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "4493443574a54505a3971d36ca5ac0d6",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-17",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "0824476d8d144a6996f28e2c30350632",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-18",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "b2f2b4ef7da4470f8bdff5920c6d2c59",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-19",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "96670f2fddcc4642be33950792193a2b",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-20",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "99a3d644894d4140b855a820e931be22",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-21",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "8b4c0c4ff49544d39d9ff8442a1ea0a3",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-22",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "5ce1bce5c03a4a08afb14c4655c3b6cf",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-23",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "4fd615acf3584e9dbd17ee3dc4779cb5",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        }
+      ]
+    },
+    {
+      "ok": false,
+      "batch": 4,
+      "agents": [
+        {
+          "batch": 4,
+          "agent": "ledger-24",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "0d893a3a58d84fb2a478f8f6311464db",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-25",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "99c1cbc35ced47968427436ae6313df0",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-26",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "59bed1c2cdc9433d9793ec822bcaa8e4",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-27",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "dd3734c031064b4f8a7ab1beae8849cb",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-28",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "d20763db49eb4f55ab4346f709f14d08",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-29",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "7f14a6e3a71e4d138d7bd805fd307fc9",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-30",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "10cf31b15a8f43b9909b3760e9d1b24f",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-31",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "c4602b1b9f604221a72b3b2c402049fb",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        }
+      ]
+    },
+    {
+      "ok": false,
+      "batch": 5,
+      "agents": [
+        {
+          "batch": 5,
+          "agent": "ledger-32",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "2b1009404b2e47aaaaaa86699d7eb594",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-33",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "11191c6ed99847a9a3381ffd875e1894",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-34",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "c36796ed5a2e4efabece5d0b946be9b6",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-35",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "da0ca19463914e24a8058123c8dad6c6",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-36",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "abf8e9d53cf2405d9e258ccbe588f1e5",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-37",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "968783f60e144fbc80fab39202e78b8b",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-38",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "05e148d9886a43ea80cf4c9e5f19420b",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-39",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "1d5ce61c68a848f994c186313ea0e0ad",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        }
+      ]
+    },
+    {
+      "ok": false,
+      "batch": 6,
+      "agents": [
+        {
+          "batch": 6,
+          "agent": "ledger-40",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "3cd649ff034e4d81b07beb2174ed7e09",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-41",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "a566267fa6254ae6a461cc996cd84d58",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-42",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "19ec1dc6ce0b4471964980941e05e519",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-43",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "095dbb8d7b134ba8af36c5e1f70a4122",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-44",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "258dcb4e527e45d6ab35ef1a099c0408",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-45",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "d119d8ecd04e4c9e91f688427811193f",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-46",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "c9ed2494780f41649dcfa9bf2584e188",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-47",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "f472e2d3927f4dd69a0216ca88406e50",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        }
+      ]
+    },
+    {
+      "ok": false,
+      "batch": 7,
+      "agents": [
+        {
+          "batch": 7,
+          "agent": "ledger-48",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "2762c8f3a2bc42eeb573b6a922007b2d",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        },
+        {
+          "batch": 7,
+          "agent": "ledger-49",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "ce209ce797d441a5b3d3fbe07f5d64b4",
+          "status": "failed",
+          "error": "ProviderProcessError: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+        }
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "shard": 0,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 2,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 5,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 6,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 4,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 3,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 7,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 1499,
+      "compacted": false
+    },
+    {
+      "shard": 2,
+      "characters": 7564,
+      "compacted": false
+    },
+    {
+      "shard": 6,
+      "characters": 1499,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 1499,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 7864,
+      "compacted": false
+    },
+    {
+      "shard": 5,
+      "characters": 7564,
+      "compacted": false
+    },
+    {
+      "shard": 3,
+      "characters": 7564,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 14229,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 7864,
+      "compacted": false
+    },
+    {
+      "shard": 5,
+      "characters": 13929,
+      "compacted": false
+    },
+    {
+      "shard": 6,
+      "characters": 7864,
+      "compacted": false
+    },
+    {
+      "shard": 2,
+      "characters": 13929,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 8985,
+      "compacted": true
+    },
+    {
+      "shard": 5,
+      "characters": 8737,
+      "compacted": true
+    },
+    {
+      "shard": 3,
+      "characters": 13929,
+      "compacted": false
+    },
+    {
+      "shard": 2,
+      "characters": 8737,
+      "compacted": true
+    },
+    {
+      "shard": 3,
+      "characters": 8737,
+      "compacted": true
+    },
+    {
+      "shard": 6,
+      "characters": 14229,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 14229,
+      "compacted": false
+    },
+    {
+      "shard": 6,
+      "characters": 8985,
+      "compacted": true
+    },
+    {
+      "shard": 0,
+      "characters": 8985,
+      "compacted": true
+    },
+    {
+      "shard": 2,
+      "characters": 9259,
+      "compacted": true
+    },
+    {
+      "shard": 1,
+      "characters": 9507,
+      "compacted": true
+    },
+    {
+      "shard": 3,
+      "characters": 9259,
+      "compacted": true
+    },
+    {
+      "shard": 5,
+      "characters": 9259,
+      "compacted": true
+    },
+    {
+      "shard": 2,
+      "characters": 9781,
+      "compacted": true
+    },
+    {
+      "shard": 6,
+      "characters": 9507,
+      "compacted": true
+    },
+    {
+      "shard": 1,
+      "characters": 10030,
+      "compacted": true
+    },
+    {
+      "shard": 3,
+      "characters": 9781,
+      "compacted": true
+    },
+    {
+      "shard": 2,
+      "characters": 10304,
+      "compacted": true
+    },
+    {
+      "shard": 1,
+      "characters": 10552,
+      "compacted": true
+    },
+    {
+      "shard": 6,
+      "characters": 10030,
+      "compacted": true
+    },
+    {
+      "shard": 2,
+      "characters": 4989,
+      "compacted": true
+    },
+    {
+      "shard": 3,
+      "characters": 10304,
+      "compacted": true
+    },
+    {
+      "shard": 1,
+      "characters": 11074,
+      "compacted": true
+    },
+    {
+      "shard": 6,
+      "characters": 10552,
+      "compacted": true
+    },
+    {
+      "shard": 1,
+      "characters": 5759,
+      "compacted": true
+    },
+    {
+      "shard": 3,
+      "characters": 4989,
+      "compacted": true
+    },
+    {
+      "shard": 6,
+      "characters": 11074,
+      "compacted": true
+    },
+    {
+      "shard": 6,
+      "characters": 5759,
+      "compacted": true
+    },
+    {
+      "shard": 8,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 9,
+      "characters": 1199,
+      "compacted": false
+    },
+    {
+      "shard": 10,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 14,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 15,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 12,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 11,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 13,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 10,
+      "characters": 1501,
+      "compacted": false
+    },
+    {
+      "shard": 13,
+      "characters": 1501,
+      "compacted": false
+    },
+    {
+      "shard": 9,
+      "characters": 1501,
+      "compacted": false
+    },
+    {
+      "shard": 8,
+      "characters": 1499,
+      "compacted": false
+    },
+    {
+      "shard": 11,
+      "characters": 1501,
+      "compacted": false
+    },
+    {
+      "shard": 12,
+      "characters": 1564,
+      "compacted": false
+    },
+    {
+      "shard": 15,
+      "characters": 1501,
+      "compacted": false
+    },
+    {
+      "shard": 13,
+      "characters": 7866,
+      "compacted": false
+    },
+    {
+      "shard": 10,
+      "characters": 7866,
+      "compacted": false
+    },
+    {
+      "shard": 9,
+      "characters": 1857,
+      "compacted": false
+    },
+    {
+      "shard": 11,
+      "characters": 7866,
+      "compacted": false
+    },
+    {
+      "shard": 8,
+      "characters": 7864,
+      "compacted": false
+    },
+    {
+      "shard": 10,
+      "characters": 14231,
+      "compacted": false
+    },
+    {
+      "shard": 13,
+      "characters": 14231,
+      "compacted": false
+    },
+    {
+      "shard": 15,
+      "characters": 7868,
+      "compacted": false
+    },
+    {
+      "shard": 9,
+      "characters": 2157,
+      "compacted": false
+    },
+    {
+      "shard": 12,
+      "characters": 1864,
+      "compacted": false
+    },
+    {
+      "shard": 16,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 21,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 22,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 18,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 19,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 20,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 17,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 23,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 25,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 29,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 28,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 31,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 24,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 27,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 26,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 30,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 33,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 36,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 38,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 35,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 32,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 34,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 37,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 39,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 40,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 43,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 45,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 41,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 44,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 42,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 46,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 47,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 48,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": 49,
+      "characters": 1201,
+      "compacted": false
+    },
+    {
+      "shard": -1,
+      "characters": 815,
+      "compacted": false
+    }
+  ],
+  "errors": [
+    "RuntimeError: Chat response did not report a successful text completion. | last=SHARD_ID=4. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-4.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "RuntimeError: Chat response did not report a successful text completion. | last=SHARD_ID=7. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-7.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "RuntimeError: Chat response did not report a successful text completion. | last=HOST_RESULT: {\"ok\": true, \"content\": \"Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. B",
+    "RuntimeError: Chat response did not report a successful text completion. | last=HOST_RESULT: {\"ok\": true, \"content\": \"Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. B",
+    "RuntimeError: Chat response did not report a successful text completion. | last=SHARD_ID=14. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-14.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=HOST_RESULT: {\"ok\": true, \"content\": \"Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. B",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=HOST_RESULT: {\"ok\": true, \"content\": \"Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. B",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=HOST_RESULT: {\"ok\": true, \"content\": \"Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. B",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=HOST_RESULT: {\"ok\": true, \"content\": \"Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. B",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=HOST_RESULT: {\"ok\": true, \"content\": \"Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. Background reference data. B",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=HOST_RESULT: {\"ok\": false, \"error\": \"ValueError: Use a nonempty workspace-relative path.\"}",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=HOST_RESULT: {\"ok\": false, \"error\": \"ValueError: Use a nonempty workspace-relative path.\"}",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=16. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-16.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=21. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-21.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=22. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-22.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=19. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-19.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=20. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-20.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=23. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-23.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=18. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-18.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=17. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-17.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=25. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-25.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=28. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-28.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=29. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-29.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=24. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-24.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=31. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-31.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=26. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-26.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=27. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-27.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=30. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-30.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=33. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-33.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=36. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-36.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=38. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-38.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=32. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-32.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=35. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-35.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=34. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-34.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=37. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-37.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=39. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-39.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=43. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-43.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=40. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-40.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=45. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-45.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=41. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-41.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=44. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-44.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=42. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-42.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=46. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-46.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=47. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-47.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=48. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-48.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=SHARD_ID=49. Reconcile your shard of a collective invoice ledger. First read each of these reference files once in order: padding-0.txt padding-1.txt padding-2.txt padding-3.txt padding-4.txt padding-5.txt. Then read shard-49.json. Sum cents for invoices where paid is false. Finish with done whose message is only a JSON object with keys shard and unpaid_cents. Use read and done only. Each file fits one read. Never reread a completed file.",
+    "ChatAPIError: Chat API HTTP 429; check endpoint, model, key, or quota. | last=Recheck the same ledger and return the same JSON result.",
+    "Follow-up: ChatAPIError: Chat API HTTP 500; check endpoint, model, key, or quota."
+  ],
+  "rows": [
+    {
+      "shard": 1,
+      "unpaid_cents": 404
+    },
+    {
+      "shard": 2,
+      "unpaid_cents": 408
+    },
+    {
+      "shard": 3,
+      "unpaid_cents": 412
+    },
+    {
+      "shard": 6,
+      "unpaid_cents": 424
+    }
+  ],
+  "expected_total_cents": 24900,
+  "actual_total_cents": 1648,
+  "correct_shards": 0,
+  "peak_active_children": 8,
+  "completed_children": 4,
+  "child_sessions": 50,
+  "max_request_characters": 14231,
+  "compacted_requests": 25,
+  "compacted_children": 6,
+  "sequence_ordered": true,
+  "request_order_preserved": false,
+  "followup_preserved": false,
+  "passed": false,
+  "workers_stopped": true,
+  "elapsed_seconds": 38.30971837500692
+}

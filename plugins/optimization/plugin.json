@@ -1,0 +1,109 @@
+{
+  "id": "optimization",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "optimization capabilities",
+  "requires": {
+    "chat_completions": "1.0.0",
+    "context": "1.0.0",
+    "filesystem": "1.0.0",
+    "self_harness": "1.0.0",
+    "subagents": "1.0.0",
+    "workflows": "1.0.0"
+  },
+  "defaults": {
+    "upstream_tag": "v0.1.0",
+    "upstream_commit": "a79dc2922cdb0308e9de4f6a5bb9b5ec16f05a91",
+    "upstream_tree_sha256": "41298300b7fe5588afd81e50f07a4e1b49b060a317687e0a351b279a1e758c7d",
+    "upstream_file_count": 39,
+    "upstream_total_bytes": 322289,
+    "oracle_transcript_sha256": "adc7258f502b2c9a5d52c8d15220f31948414639c8160bf544675f8660ae3c29",
+    "oracle_transcript_bytes": 2029,
+    "max_evaluation_workers": 64,
+    "max_retries": 20,
+    "provider_priority": [
+      "fireworks",
+      "openrouter"
+    ],
+    "providers": {
+      "openrouter": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "nvidia/nemotron-3.5-lightning:free",
+        "key_envs": [
+          "OPENROUTER_API_KEY"
+        ],
+        "task_options": {
+          "temperature": 0,
+          "max_tokens": 4096,
+          "seed": 0,
+          "reasoning": {
+            "effort": "none"
+          }
+        },
+        "reflection_options": {
+          "temperature": 0.6,
+          "max_tokens": 8192,
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      },
+      "fireworks": {
+        "url": "https://api.fireworks.ai/inference/v1/chat/completions",
+        "model": "accounts/fireworks/models/gpt-oss-120b",
+        "key_envs": [
+          "FIREWORK_API_KEY",
+          "FIREWORKS_API_KEY"
+        ],
+        "task_options": {
+          "temperature": 0,
+          "max_tokens": 1024,
+          "reasoning_effort": "low",
+          "response_format": {
+            "type": "json_object"
+          }
+        },
+        "reflection_options": {
+          "temperature": 0.6,
+          "max_tokens": 4096,
+          "reasoning_effort": "medium"
+        }
+      }
+    },
+    "defaults": {
+      "provider": "auto",
+      "reflection_provider": null,
+      "api_timeout_seconds": 120,
+      "max_proposals": 1,
+      "workers": 4,
+      "sequential_workers": 1,
+      "seed": 0,
+      "reflection_minibatch_size": 1,
+      "cache_evaluations": true,
+      "core_cache_evaluations": false,
+      "test_repeats": 1,
+      "retries": 3,
+      "retry_base_seconds": 1,
+      "retry_max_seconds": 30,
+      "benchmark_cases": 12,
+      "benchmark_delay_ms": 25,
+      "evaluation_max_steps": 3,
+      "evaluation_timeout_seconds": 1
+    },
+    "opaque_demo": {
+      "schema_version": 1,
+      "input_path": "incident.json",
+      "output_path": "response-plan.json",
+      "done_message": "incident routed",
+      "minimum_model_turns": 3,
+      "target_score": 1,
+      "proposal_cap": 6,
+      "demo_workers": 4,
+      "live_provider": "fireworks",
+      "live_reflection_provider": "openrouter",
+      "live_test_repeats": 3
+    }
+  },
+  "instructions": "Operator commands /optimize, /incident, /benchmark-harness and /benchmark-workflows run evaluations, optimization and reports. /optimize verify checks the private stdlib GEPA port and upstream behavior parity; /benchmark-workflows --agents 50 --output report.json tests collective workflows; --live uses the configured model. These are slash commands for the operator, not model tool actions."
+}

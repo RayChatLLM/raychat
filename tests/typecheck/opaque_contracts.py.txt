@@ -1,0 +1,22 @@
+"""Incident planning and proof artifacts must preserve concrete field types."""
+from plugins.optimization.opaque_incident_demo import HostedSettings, ProofReport, ProviderRequest, ResponsePlan
+
+
+def wrong_worker_setting() -> None:
+    HostedSettings(workers="bad")  # expect-error: arg-type
+
+
+def wrong_provider_timeout() -> None:
+    ProviderRequest(provider="example", role="task", timeout="bad")  # expect-error: arg-type
+
+
+def wrong_plan_duration() -> ResponsePlan:
+    return {"owner": "operations", "priority": "high", "response_minutes": "fast"}  # expect-error: typeddict-item
+
+
+def wrong_goal_status(report: ProofReport) -> None:
+    report["goal"]["reached"] = 1  # expect-error: typeddict-item
+
+
+def misspelled_worker_setting() -> None:
+    HostedSettings(workres=2)  # expect-error: call-arg

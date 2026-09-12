@@ -1,0 +1,21 @@
+"""Shared test fixtures must retain exact chat and tool-result contracts."""
+from tests.plugin_support import ScriptedChat, registered_execute, registered_parse
+from raychat.session import AgentSession
+
+
+def wrong_chat_assignment(session: AgentSession) -> None:
+    broken = ScriptedChat([None])
+    session.chat = broken  # expect-error: assignment
+
+
+def wrong_reply_type() -> int:
+    return ScriptedChat(["text"])([])  # expect-error: return-value
+
+
+def unchecked_tool_output() -> str:
+    result = registered_execute({"action": "list", "path": "."}, ".", 1)
+    return result["entries"]  # expect-error: return-value
+
+
+def unchecked_action_field() -> str:
+    return registered_parse('{"action":"done","message":"ok"}')["message"]  # expect-error: return-value

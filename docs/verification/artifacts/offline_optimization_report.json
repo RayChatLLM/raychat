@@ -1,0 +1,104 @@
+{
+  "baseline": {
+    "bytes": 2180,
+    "sha256": "cc003d9950be35cae0ae8c4bc43f39e757ded1adcf9f12b399cc582f3091bdb2",
+    "validation_score": 0.0
+  },
+  "candidate_count": 2,
+  "evaluations": [
+    {
+      "actions": [
+        "read"
+      ],
+      "case": "read_then_done",
+      "checks": {
+        "completed": false,
+        "exact_action_sequence": false,
+        "exact_done_message": false,
+        "first_action_effect": true,
+        "no_invalid_replies": false
+      },
+      "evaluated_candidate_sha256": "cc003d9950be35cae0ae8c4bc43f39e757ded1adcf9f12b399cc582f3091bdb2",
+      "failure": "RuntimeError: Stopped at 2 model turns without a done action.",
+      "partial_score": 0.2,
+      "raw_engine_candidate_sha256": "cc003d9950be35cae0ae8c4bc43f39e757ded1adcf9f12b399cc582f3091bdb2",
+      "score": 0.0,
+      "verified_artifacts": []
+    },
+    {
+      "actions": [
+        "list"
+      ],
+      "case": "list_then_done",
+      "checks": {
+        "completed": false,
+        "exact_action_sequence": false,
+        "exact_done_message": false,
+        "first_action_effect": true,
+        "no_invalid_replies": false
+      },
+      "evaluated_candidate_sha256": "cc003d9950be35cae0ae8c4bc43f39e757ded1adcf9f12b399cc582f3091bdb2",
+      "failure": "RuntimeError: Stopped at 2 model turns without a done action.",
+      "partial_score": 0.2,
+      "raw_engine_candidate_sha256": "cc003d9950be35cae0ae8c4bc43f39e757ded1adcf9f12b399cc582f3091bdb2",
+      "score": 0.0,
+      "verified_artifacts": []
+    },
+    {
+      "actions": [
+        "list",
+        "done"
+      ],
+      "case": "list_then_done",
+      "checks": {
+        "completed": true,
+        "exact_action_sequence": true,
+        "exact_done_message": true,
+        "first_action_effect": true,
+        "no_invalid_replies": true
+      },
+      "evaluated_candidate_sha256": "a82ebdc9261656a745f740ae10883336810d1fd512f209826e525e40f5f8f617",
+      "failure": "",
+      "partial_score": 1.0,
+      "raw_engine_candidate_sha256": "08e28a9b7d331c9da1743d2e1602a73bcdd8f219c1bdc46b91384105604a69f2",
+      "score": 1.0,
+      "verified_artifacts": []
+    },
+    {
+      "actions": [
+        "read",
+        "done"
+      ],
+      "case": "read_then_done",
+      "checks": {
+        "completed": true,
+        "exact_action_sequence": true,
+        "exact_done_message": true,
+        "first_action_effect": true,
+        "no_invalid_replies": true
+      },
+      "evaluated_candidate_sha256": "a82ebdc9261656a745f740ae10883336810d1fd512f209826e525e40f5f8f617",
+      "failure": "",
+      "partial_score": 1.0,
+      "raw_engine_candidate_sha256": "08e28a9b7d331c9da1743d2e1602a73bcdd8f219c1bdc46b91384105604a69f2",
+      "score": 1.0,
+      "verified_artifacts": []
+    }
+  ],
+  "improved": true,
+  "optimized": {
+    "bytes": 2363,
+    "sha256": "a82ebdc9261656a745f740ae10883336810d1fd512f209826e525e40f5f8f617",
+    "validation_score": 1.0
+  },
+  "reflection_prompt_sha256": [
+    "da1e61c857a894de2652f548655c54cc561436b66f2beaaa4cc179fcd75a9289"
+  ],
+  "safety": {
+    "append_only_base_preserved": true,
+    "human_review_required_before_deployment": true
+  },
+  "total_metric_calls": 4,
+  "upstream_commit": "a79dc2922cdb0308e9de4f6a5bb9b5ec16f05a91",
+  "upstream_tag": "v0.1.0"
+}

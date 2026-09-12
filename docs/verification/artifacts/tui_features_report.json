@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "checks": [
+    "installed feature manifest instructions reach the model",
+    "write, UTF-8 byte pagination, SHA-256 edit and read-back agree",
+    "stale hashes reject edits and preserve file bytes",
+    "parent traversal and symlink traversal cannot escape the workspace",
+    "directory pagination follows returned cursors without omissions",
+    "memory actions save, page and delete durable entries",
+    "configured skill discovery contributes its catalog before loading",
+    "loading contributes the skill body once and retains it for a follow-up",
+    "clearing chat removes loaded skill state and retains durable memory",
+    "goal judge rejects an unverified draft and requests continuation",
+    "continuation writes and reads an artifact before a second judgment",
+    "rejected draft is suppressed; accepted result clears the active goal",
+    "fresh harness process restores durable memory and pages its contents"
+  ],
+  "terminal_restored": true,
+  "model_requests": 36,
+  "goal_judgments": 2,
+  "file_sha256": "b6a380b3818692254349310e413bbdf4b1c04675339308dc8993eb95f49d7cb7",
+  "durable_entries": 2,
+  "provider": "offline scripted provider; actual TUI and feature execution"
+}

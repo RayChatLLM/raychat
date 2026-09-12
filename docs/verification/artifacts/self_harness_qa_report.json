@@ -1,0 +1,134 @@
+{
+  "interaction": "Three actual terminal /benchmark-harness runs with identical fixture and provider settings; no plugin or session APIs called by the driver.",
+  "source_archive_sha256": "f0462bd27a36b669220f91f795548b6a6817a49c8ba87f4ddb722950c32a4904",
+  "trials": [
+    {
+      "tui_completed": true,
+      "model": "accounts/fireworks/models/glm-5p3-flash",
+      "request_options": {
+        "reasoning_effort": "low",
+        "temperature": 0,
+        "max_tokens": 8192
+      },
+      "fixture_sha256": "6d29f41da42eb0ae52b9615ab39d8d218ebb9edbe238c2ec95ff2666523c1053",
+      "accepted_candidates": 1,
+      "elapsed_seconds": 93.06891322135925,
+      "provider_calls": 81,
+      "scope": "Existing synthetic deployment-policy and data-rollup tasks; this does not establish general coding improvement.",
+      "test_before": [
+        2,
+        4
+      ],
+      "test_after": [
+        2,
+        4
+      ],
+      "training_before": [
+        0,
+        6
+      ],
+      "training_after": [
+        1,
+        6
+      ],
+      "validation_before": [
+        2,
+        4
+      ],
+      "validation_after": [
+        2,
+        4
+      ],
+      "measured_benefit": false,
+      "trial": 1,
+      "evidence": "/tmp/raychat-expanded/qa-self-harness-v1"
+    },
+    {
+      "tui_completed": true,
+      "model": "accounts/fireworks/models/glm-5p3-flash",
+      "request_options": {
+        "reasoning_effort": "low",
+        "temperature": 0,
+        "max_tokens": 8192
+      },
+      "fixture_sha256": "6d29f41da42eb0ae52b9615ab39d8d218ebb9edbe238c2ec95ff2666523c1053",
+      "accepted_candidates": 1,
+      "elapsed_seconds": 93.91342496871948,
+      "provider_calls": 84,
+      "scope": "Existing synthetic deployment-policy and data-rollup tasks; this does not establish general coding improvement.",
+      "test_before": [
+        2,
+        4
+      ],
+      "test_after": [
+        4,
+        4
+      ],
+      "training_before": [
+        0,
+        6
+      ],
+      "training_after": [
+        6,
+        6
+      ],
+      "validation_before": [
+        2,
+        4
+      ],
+      "validation_after": [
+        4,
+        4
+      ],
+      "measured_benefit": true,
+      "trial": 2,
+      "evidence": "/tmp/raychat-expanded/qa-self-harness-v2"
+    },
+    {
+      "tui_completed": true,
+      "model": "accounts/fireworks/models/glm-5p3-flash",
+      "request_options": {
+        "reasoning_effort": "low",
+        "temperature": 0,
+        "max_tokens": 8192
+      },
+      "fixture_sha256": "6d29f41da42eb0ae52b9615ab39d8d218ebb9edbe238c2ec95ff2666523c1053",
+      "accepted_candidates": 1,
+      "elapsed_seconds": 87.17037296295166,
+      "provider_calls": 85,
+      "scope": "Existing synthetic deployment-policy and data-rollup tasks; this does not establish general coding improvement.",
+      "test_before": [
+        2,
+        4
+      ],
+      "test_after": [
+        4,
+        4
+      ],
+      "training_before": [
+        0,
+        6
+      ],
+      "training_after": [
+        6,
+        6
+      ],
+      "validation_before": [
+        2,
+        4
+      ],
+      "validation_after": [
+        4,
+        4
+      ],
+      "measured_benefit": true,
+      "trial": 3,
+      "evidence": "/tmp/raychat-expanded/qa-self-harness-v3"
+    }
+  ],
+  "trials_with_post_selection_improvement": 2,
+  "total_trials": 3,
+  "provider_calls": 250,
+  "interpretation": "Two trials improved post-selection tests from 2/4 to 4/4; one remained 2/4. The plugin learned useful instructions on this small synthetic task family, but improvement was not consistent. The case set is public and has been used during development; this is not evidence of general coding gains.",
+  "first_trial_analysis": "The learned deployment-key rule was correct, but the model often wrote JSON with spaces despite the task requiring compact exact bytes. That trial improved training from 0/6 to 1/6 and did not improve validation or post-selection tests. It is retained as a non-improving run."
+}

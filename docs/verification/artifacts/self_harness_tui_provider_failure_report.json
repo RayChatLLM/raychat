@@ -1,0 +1,137 @@
+{
+  "model": "accounts/fireworks/models/glm-5p3-flash",
+  "request_options": {
+    "temperature": 0,
+    "max_tokens": 8192
+  },
+  "repetitions": 2,
+  "candidate_count": 1,
+  "started": 1789192454.918317,
+  "scope": "Existing synthetic deployment-policy and data-rollup tasks; this does not establish general coding improvement.",
+  "fixture_sha256": "6d29f41da42eb0ae52b9615ab39d8d218ebb9edbe238c2ec95ff2666523c1053",
+  "attempts": [
+    {
+      "time": 1789192575.206731,
+      "attempt": "6b6d9a6c35074238a02b5a0d1d5ee932",
+      "decision": "rejected",
+      "reason": "ValueError: Score evaluator failed, timed out or exceeded its output limit: exit=1, timed_out=False, truncated=False. Traceback (most recent call last):\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 709, in __call__\n    return self.chat(messages)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 772, in __call__\n    return self.chat(messages)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-z0t70m9j/__init__.py\", line 277, in __call__\n    raise ChatAPIError(\nraychat.sdk.ProviderError: Chat API HTTP 422; check endpoint, model, key, or quota.\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-self-harness-1ghyljwe/baseline/evaluator.py\", line 9, in <module>\n    print(json.dumps(evaluate(path.read_text() if path.exists() else '',config['url'],config['model'])))\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/self_harness_benchmark.py\", line 45, in evaluate\n    evaluation = benchmark._evaluate_case(\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 921, in _evaluate_case\n    summary = _rc_composition.run_session(\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/wintermute/Documents/chat_bot/raychat/composition.py\", line 157, in run_session\n    return session.run(prompt, **send_options)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/wintermute/Documents/chat_bot/raychat/session.py\", line 201, in run\n    return self.runtime.run(self, prompt, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/wintermute/Documents/chat_bot/raychat/plugins.py\", line 675, in run\n    result = send(prompt, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/wintermute/Documents/chat_bot/raychat/session.py\", line 357, in send\n    self._call_chat(request_messages, cancel_check)\n  File \"/Users/wintermute/Documents/chat_bot/raychat/session.py\", line 257, in _call_chat\n    return self.chat(messages)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 916, in recording_chat\n    reply = task_chat(messages)\n            ^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 713, in __call__\n    raise ProviderCallError(\n_raychat_plugin_81b553e8b6444150bf158bb1996224ef.optimize_chat_prompt.ProviderCallError: Task provider failed (ProviderError): Chat API HTTP 422; check endpoint, model, key, or quota.\n"
+    }
+  ],
+  "error": "ValueError: Score evaluator failed, timed out or exceeded its output limit: exit=1, timed_out=False, truncated=False. Traceback (most recent call last):\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 709, in __call__\n    return self.chat(messages)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 772, in __call__\n    return self.chat(messages)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-z0t70m9j/__init__.py\", line 277, in __call__\n    raise ChatAPIError(\nraychat.sdk.ProviderError: Chat API HTTP 422; check endpoint, model, key, or quota.\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-self-harness-1ghyljwe/baseline/evaluator.py\", line 9, in <module>\n    print(json.dumps(evaluate(path.read_text() if path.exists() else '',config['url'],config['model'])))\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/self_harness_benchmark.py\", line 45, in evaluate\n    evaluation = benchmark._evaluate_case(\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 921, in _evaluate_case\n    summary = _rc_composition.run_session(\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/wintermute/Documents/chat_bot/raychat/composition.py\", line 157, in run_session\n    return session.run(prompt, **send_options)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/wintermute/Documents/chat_bot/raychat/session.py\", line 201, in run\n    return self.runtime.run(self, prompt, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/wintermute/Documents/chat_bot/raychat/plugins.py\", line 675, in run\n    result = send(prompt, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/wintermute/Documents/chat_bot/raychat/session.py\", line 357, in send\n    self._call_chat(request_messages, cancel_check)\n  File \"/Users/wintermute/Documents/chat_bot/raychat/session.py\", line 257, in _call_chat\n    return self.chat(messages)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 916, in recording_chat\n    reply = task_chat(messages)\n            ^^^^^^^^^^^^^^^^^^^\n  File \"/private/var/folders/w9/dxjh3_js23ngjlxbmb_w7vwh0000gn/T/raychat-generation-5iziqw7u/optimize_chat_prompt.py\", line 713, in __call__\n    raise ProviderCallError(\n_raychat_plugin_81b553e8b6444150bf158bb1996224ef.optimize_chat_prompt.ProviderCallError: Task provider failed (ProviderError): Chat API HTTP 422; check endpoint, model, key, or quota.\n",
+  "calls": [
+    {
+      "seconds": 1.6663736250193324,
+      "ok": true,
+      "prompt_characters": 3004,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 4.722225709003396,
+      "ok": true,
+      "prompt_characters": 3350,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 3.8570211670012213,
+      "ok": true,
+      "prompt_characters": 3476,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 1.9073675000108778,
+      "ok": true,
+      "prompt_characters": 3001,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 0.5307415839924943,
+      "ok": true,
+      "prompt_characters": 3127,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 4.344390417012619,
+      "ok": true,
+      "prompt_characters": 3471,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 1.3869699579954613,
+      "ok": true,
+      "prompt_characters": 3000,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 1.8067902499751654,
+      "ok": true,
+      "prompt_characters": 3344,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 1.9513194999890402,
+      "ok": true,
+      "prompt_characters": 3470,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 1.0517334160103928,
+      "ok": true,
+      "prompt_characters": 2982,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 2.420678374997806,
+      "ok": true,
+      "prompt_characters": 3428,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 1.589869165996788,
+      "ok": true,
+      "prompt_characters": 3714,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 2.666180375003023,
+      "ok": true,
+      "prompt_characters": 3001,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 2.793641458993079,
+      "ok": true,
+      "prompt_characters": 3348,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 9.377518583001802,
+      "ok": true,
+      "prompt_characters": 3004,
+      "provider_retries": 0,
+      "proposer": false
+    },
+    {
+      "seconds": 76.79239662500913,
+      "ok": false,
+      "prompt_characters": 6538,
+      "provider_retries": 0,
+      "proposer": false,
+      "error": "RuntimeError: Chat response did not report a successful text completion."
+    }
+  ],
+  "elapsed_seconds": 120.74854707717896
+}

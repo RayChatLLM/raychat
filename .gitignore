@@ -1,0 +1,43 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.hypothesis/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local Python environments and packaging output.
+.venv/
+venv/
+env/
+build/
+*.egg-info/
+
+# Editors and operating systems.
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Runtime/user data and local credentials.
+.env
+.env.*
+!.env.example
+.chat_agent_memory.json
+*.jsonl
+*.log
+workspace/
+portable-workspace/
+
+# Reproducible release output.
+dist/

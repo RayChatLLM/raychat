@@ -1,0 +1,41 @@
+"""Provider values and worker envelopes must preserve their checked types."""
+from urllib.request import Request
+
+from plugins.chat_completions.client import ChatAPI, RequestOpener
+from raychat.sdk import ProviderClient, ProviderService, WorkerPayload
+
+
+def unchecked_option(service: ProviderService) -> float:
+    return service.validate_options({})["temperature"]  # expect-error: return-value
+
+
+def invalid_timeout(service: ProviderService) -> None:
+    service.ChatAPI("https://example.test/chat", "model", timeout="slow")  # expect-error: arg-type
+
+
+def unknown_payload_field(payload: WorkerPayload) -> None:
+    payload["souce"]  # expect-error: typeddict-item
+
+
+def wrong_payload_options(payload: WorkerPayload) -> None:
+    payload["options"] = 42  # expect-error: typeddict-item
+
+
+def wrong_source_type(client: ProviderClient) -> str:
+    return client.private_payload()["source"]  # expect-error: return-value
+
+
+def unchecked_source_field(client: ProviderClient) -> str:
+    return client.private_payload()["source"]["custom"]  # expect-error: return-value
+
+
+def wrong_transport_timeout(client: ChatAPI, request: Request) -> None:
+    client.opener.open(request, timeout="slow")  # expect-error: arg-type
+
+
+def wrong_transport_request(opener: RequestOpener) -> None:
+    opener.open("https://example.test/chat", timeout=5)  # expect-error: arg-type
+
+
+def unchecked_transport_response(opener: RequestOpener, request: Request) -> bytes:
+    return opener.open(request, timeout=5)  # expect-error: return-value

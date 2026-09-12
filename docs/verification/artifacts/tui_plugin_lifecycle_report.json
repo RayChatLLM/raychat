@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "checks": [
+    "repository lock cannot authorize plugin execution",
+    "failed rollback hooks cannot strand a generation, skip another rollback, or suppress later updates",
+    "isolated conversation constructors and snapshot failures close their plugin runtime",
+    "create, check, share, discover and install a plugin through TUI",
+    "installed manifest instructions appear in model requests",
+    "namespace helper imports and live helper edits use captured source",
+    "live code and activation changes update the same TUI process",
+    "updates protect local edits; explicit replacement activates the release",
+    "catalog and archive metadata mismatch is rejected",
+    "uninstall persists under operator-owned state",
+    "restart preserves removal and workspace trust",
+    "explicit package launch recovers disabled plugin management"
+  ],
+  "terminal_restored": true
+}

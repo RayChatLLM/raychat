@@ -1,0 +1,37 @@
+"""Invalid consumers of concrete plugin settings must fail type checking."""
+from plugins.chat_completions.configuration import ChatCompletionsSettings
+from plugins.process.configuration import ProcessSettings
+from plugins.subagents.configuration import ProfileSettings
+from raychat.sdk import PluginContext, ProviderService
+
+
+def unchecked_context_setting(ctx: PluginContext) -> str:
+    return ctx.settings["unvalidated"]  # expect-error: return-value
+
+
+def wrong_field_type(settings: ChatCompletionsSettings) -> str:
+    return settings.max_http_bytes  # expect-error: return-value
+
+
+def missing_field(settings: ProcessSettings) -> None:
+    settings.command_poll_milliseconds  # expect-error: attr-defined
+
+
+def mutate_settings(settings: ProcessSettings) -> None:
+    settings.command_read_bytes = 10  # expect-error: misc
+
+
+def ignore_missing_override(settings: ProfileSettings) -> float:
+    return settings.api_timeout  # expect-error: return-value
+
+
+def untyped_provider_settings(provider: ProviderService) -> None:
+    provider.settings  # expect-error: attr-defined
+
+
+def wrong_provider_timeout(provider: ProviderService) -> str:
+    return provider.default_timeout  # expect-error: return-value
+
+
+def mutate_provider_options(settings: ChatCompletionsSettings) -> None:
+    settings.request_options["temperature"] = 1  # expect-error: index

@@ -1,0 +1,9 @@
+{
+  "id": "features_probe",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "Offline provider for filesystem, memory, skills and goals terminal acceptance",
+  "requires": {},
+  "instructions": "FEATURE_PLUGIN_USAGE: This observable acceptance provider issues actions and verifies actual host results; no remote model is used."
+}

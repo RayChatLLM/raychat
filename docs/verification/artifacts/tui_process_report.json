@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "checks": [
+    "command and descendant stopped in 0.242s",
+    "replacement command completed",
+    "isolated main command and SIGTERM-resistant descendant stopped in 0.253s",
+    "replacement after isolated main cancellation completed",
+    "isolated threaded command and SIGTERM-resistant descendant stopped in 0.227s",
+    "replacement after isolated threaded cancellation completed"
+  ],
+  "terminal_restored": true
+}

@@ -1,0 +1,18 @@
+{
+  "reason": "Stateless compact_messages and its separate digest implementation were removed. The canonical ContextPolicy is exercised by test_plugin_sessions and actual TUI context-pressure runs.",
+  "retired": [
+    "test_digest_summarizes_action_result_pairs_atomically",
+    "base_messages",
+    "assert_strict_chat_roles",
+    "assert_one_task_digest",
+    "test_below_limit_returns_equal_defensive_copy",
+    "test_compaction_is_bounded_and_preserves_pinned_and_recent_pair",
+    "test_compaction_does_not_split_latest_action_result_block",
+    "test_growing_full_history_is_compacted_fresh_with_one_digest",
+    "test_zero_recent_turns_removes_old_raw_history",
+    "test_literal_compaction_delimiter_in_task_survives_for_all_instruction_roles",
+    "test_digest_records_stdout_and_stderr_truncation_flags",
+    "test_invalid_parameters_and_message_shapes_fail",
+    "test_too_small_for_pinned_context_fails"
+  ]
+}

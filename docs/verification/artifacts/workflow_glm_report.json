@@ -1,0 +1,1791 @@
+{
+  "agents": 50,
+  "live": true,
+  "model": "accounts/fireworks/models/glm-5p3-flash",
+  "context_chars": 16000,
+  "max_parallel": 4,
+  "padding_pages": 2,
+  "page_bytes": 6000,
+  "request_options": {
+    "reasoning_effort": "low",
+    "temperature": 0,
+    "max_tokens": 8192
+  },
+  "batches": [
+    {
+      "ok": true,
+      "batch": 1,
+      "agents": [
+        {
+          "batch": 1,
+          "agent": "ledger-0",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "126e99c78b184b2381bd1299ef02f7cc",
+          "status": "completed",
+          "message": "{\"shard\": 0, \"unpaid_cents\": 400}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-1",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "95b937e82cd143319485668c7dcbb841",
+          "status": "completed",
+          "message": "{\"shard\": 1, \"unpaid_cents\": 404}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-2",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "e71a46fc1eb245edbdf5459fef68d143",
+          "status": "completed",
+          "message": "{\"shard\": 2, \"unpaid_cents\": 408}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-3",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "1cad132e5cdb40aa9fac34910ff3d401",
+          "status": "completed",
+          "message": "{\"shard\": 3, \"unpaid_cents\": 412}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-4",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "bde2e7612d19475fb4f211f2f7823e24",
+          "status": "completed",
+          "message": "{\"shard\": 4, \"unpaid_cents\": 416}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-5",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "e91e5d1a5121466dbaac28a04556e2c6",
+          "status": "completed",
+          "message": "{\"shard\": 5, \"unpaid_cents\": 420}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-6",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "53a84f169b254d4fbb8ee81168db7873",
+          "status": "completed",
+          "message": "{\"shard\": 6, \"unpaid_cents\": 424}"
+        },
+        {
+          "batch": 1,
+          "agent": "ledger-7",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "dec824a0691349ff848889cb46d535c3",
+          "status": "completed",
+          "message": "{\"shard\": 7, \"unpaid_cents\": 428}"
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "batch": 2,
+      "agents": [
+        {
+          "batch": 2,
+          "agent": "ledger-8",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "155368d75d6a4eb78bcc8889a2c1d3e3",
+          "status": "completed",
+          "message": "{\"shard\": 8, \"unpaid_cents\": 432}"
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-9",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "7da20557f54a4b15b55e23dea857912c",
+          "status": "completed",
+          "message": "{\"shard\": 9, \"unpaid_cents\": 436}"
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-10",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "28e205192ad640f684265f3eef2a3686",
+          "status": "completed",
+          "message": "{\"shard\": 10, \"unpaid_cents\": 440}"
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-11",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "08629f0dd0ef46f5baec38c386154c4d",
+          "status": "completed",
+          "message": "{\"shard\": 11, \"unpaid_cents\": 444}"
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-12",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "abda6d0eed3740dda1cb9d9b12cbbe72",
+          "status": "completed",
+          "message": "{\"shard\": 12, \"unpaid_cents\": 448}"
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-13",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "0d237c5803b94f6e854bbf742727fda0",
+          "status": "completed",
+          "message": "{\"shard\": 13, \"unpaid_cents\": 452}"
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-14",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "f8698ef9181e430980444943cb710b1d",
+          "status": "completed",
+          "message": "{\"shard\": 14, \"unpaid_cents\": 456}"
+        },
+        {
+          "batch": 2,
+          "agent": "ledger-15",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "5e5a68ee48994c3e8653d140f7380cbf",
+          "status": "completed",
+          "message": "{\"shard\": 15, \"unpaid_cents\": 460}"
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "batch": 3,
+      "agents": [
+        {
+          "batch": 3,
+          "agent": "ledger-16",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "3c5514ad1cd44c71ae04a6097c8a5149",
+          "status": "completed",
+          "message": "{\"shard\": 16, \"unpaid_cents\": 464}"
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-17",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "0ea60d7eff07474ca93a48e5dafeab0d",
+          "status": "completed",
+          "message": "{\"shard\": 17, \"unpaid_cents\": 468}"
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-18",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "c2a528540c9a48e380226e732d934768",
+          "status": "completed",
+          "message": "{\"shard\": 18, \"unpaid_cents\": 472}"
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-19",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "c68a8e34d01f4fee976a47610903ad1d",
+          "status": "completed",
+          "message": "{\"shard\": 19, \"unpaid_cents\": 476}"
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-20",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "d097a18f57b94e999551086611c97113",
+          "status": "completed",
+          "message": "{\"shard\": 20, \"unpaid_cents\": 480}"
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-21",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "9c51bba9ebde49959ccdf9ce74515af9",
+          "status": "completed",
+          "message": "{\"shard\": 21, \"unpaid_cents\": 484}"
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-22",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "33500938ea5b4bdda74571dde40f5aa3",
+          "status": "completed",
+          "message": "{\"shard\": 22, \"unpaid_cents\": 488}"
+        },
+        {
+          "batch": 3,
+          "agent": "ledger-23",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "f7c45f4db1a64c388878dc6621fdff30",
+          "status": "completed",
+          "message": "{\"shard\": 23, \"unpaid_cents\": 492}"
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "batch": 4,
+      "agents": [
+        {
+          "batch": 4,
+          "agent": "ledger-24",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "4b20cc32b8304d8f96e393bfd3a1e1c9",
+          "status": "completed",
+          "message": "{\"shard\": 24, \"unpaid_cents\": 496}"
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-25",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "f6fcf7966f97407499610c430974dfc7",
+          "status": "completed",
+          "message": "{\"shard\": 25, \"unpaid_cents\": 500}"
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-26",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "917b040efe76471d877ede978da68ab7",
+          "status": "completed",
+          "message": "{\"shard\": 26, \"unpaid_cents\": 504}"
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-27",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "43036f8b2dc949469953a329a8e1fca7",
+          "status": "completed",
+          "message": "{\"shard\": 27, \"unpaid_cents\": 508}"
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-28",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "2244f29144c24b9abd5eedcb209ba64b",
+          "status": "completed",
+          "message": "{\"shard\": 28, \"unpaid_cents\": 512}"
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-29",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "9c7f3e8e12dd43d2be0a8b50b8667d87",
+          "status": "completed",
+          "message": "{\"shard\": 29, \"unpaid_cents\": 516}"
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-30",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "ce06027caef742f680cacd892be1c8f6",
+          "status": "completed",
+          "message": "{\"shard\": 30, \"unpaid_cents\": 520}"
+        },
+        {
+          "batch": 4,
+          "agent": "ledger-31",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "10918a3678c04252a432a2f1588f2338",
+          "status": "completed",
+          "message": "{\"shard\": 31, \"unpaid_cents\": 524}"
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "batch": 5,
+      "agents": [
+        {
+          "batch": 5,
+          "agent": "ledger-32",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "4ec5336c120047abb1f7697aa4a873d1",
+          "status": "completed",
+          "message": "{\"shard\": 32, \"unpaid_cents\": 528}"
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-33",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "50906e83e0a846ad8647d7327382776c",
+          "status": "completed",
+          "message": "{\"shard\": 33, \"unpaid_cents\": 532}"
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-34",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "ac854ffae5374564a4b9614f331a12ef",
+          "status": "completed",
+          "message": "{\"shard\": 34, \"unpaid_cents\": 536}"
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-35",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "0a2846ddd79347cfbde354c47ca3b9af",
+          "status": "completed",
+          "message": "{\"shard\": 35, \"unpaid_cents\": 540}"
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-36",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "8ac71956312442aca5d665ea3c9dc604",
+          "status": "completed",
+          "message": "{\"shard\": 36, \"unpaid_cents\": 544}"
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-37",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "90fcadafffab42d4a50f08d33252fc8a",
+          "status": "completed",
+          "message": "{\"shard\": 37, \"unpaid_cents\": 548}"
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-38",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "ba99bd1cd8a04b06bc0450781320baa3",
+          "status": "completed",
+          "message": "{\"shard\": 38, \"unpaid_cents\": 552}"
+        },
+        {
+          "batch": 5,
+          "agent": "ledger-39",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "61fd98ae53c74d1293d7063fcf49aa06",
+          "status": "completed",
+          "message": "{\"shard\": 39, \"unpaid_cents\": 556}"
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "batch": 6,
+      "agents": [
+        {
+          "batch": 6,
+          "agent": "ledger-40",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "a642a105e4ae4b2886f97ff1fb9274f3",
+          "status": "completed",
+          "message": "{\"shard\": 40, \"unpaid_cents\": 560}"
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-41",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "7fa29be2a24049848b68eef52de7d91f",
+          "status": "completed",
+          "message": "{\"shard\": 41, \"unpaid_cents\": 564}"
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-42",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "c51efdf16b5344348401b1b3fc548868",
+          "status": "completed",
+          "message": "{\"shard\": 42, \"unpaid_cents\": 568}"
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-43",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "cd690050547a4e958a47c16d3effa71f",
+          "status": "completed",
+          "message": "{\"shard\": 43, \"unpaid_cents\": 572}"
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-44",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "c202673745a94d9e8f948edbd69b3430",
+          "status": "completed",
+          "message": "{\"shard\": 44, \"unpaid_cents\": 576}"
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-45",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "1f18fb614aad46b7aa05e50abedfd160",
+          "status": "completed",
+          "message": "{\"shard\": 45, \"unpaid_cents\": 580}"
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-46",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "b6ffbb4803c344e3be67e73207c82cd6",
+          "status": "completed",
+          "message": "{\"shard\": 46, \"unpaid_cents\": 584}"
+        },
+        {
+          "batch": 6,
+          "agent": "ledger-47",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "8ba53be96b204eff8d549eedd6eabf1c",
+          "status": "completed",
+          "message": "{\"shard\": 47, \"unpaid_cents\": 588}"
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "batch": 7,
+      "agents": [
+        {
+          "batch": 7,
+          "agent": "ledger-48",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "436fceb05f554374801f58c7a5cef779",
+          "status": "completed",
+          "message": "{\"shard\": 48, \"unpaid_cents\": 592}"
+        },
+        {
+          "batch": 7,
+          "agent": "ledger-49",
+          "purpose": "review",
+          "profile": "primary",
+          "model": "ledger",
+          "session_id": "41735e2c05934598a79b46ccf87815e4",
+          "status": "completed",
+          "message": "{\"shard\": 49, \"unpaid_cents\": 596}"
+        }
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "shard": 2,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 3,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 3,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 3,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 3,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 1,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 4,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 5,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 6,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 4,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 5,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 6,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 2,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 5,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 4,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 2,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 6,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 5,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 4,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 2,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 6,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 7,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 7,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 7,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 7,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 11,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 10,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 8,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 9,
+      "characters": 1143,
+      "compacted": false
+    },
+    {
+      "shard": 10,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 8,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 9,
+      "characters": 7508,
+      "compacted": false
+    },
+    {
+      "shard": 11,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 10,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 11,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 8,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 9,
+      "characters": 13873,
+      "compacted": false
+    },
+    {
+      "shard": 9,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 8,
+      "characters": 14401,
+      "compacted": false
+    },
+    {
+      "shard": 10,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 11,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 12,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 13,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 14,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 15,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 13,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 12,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 15,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 13,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 15,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 12,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 14,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 15,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 12,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 13,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 14,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 14,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 16,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 18,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 17,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 19,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 19,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 18,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 18,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 19,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 16,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 19,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 18,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 16,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 17,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 20,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 16,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 17,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 21,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 17,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 21,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 20,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 22,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 21,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 20,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 23,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 22,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 22,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 20,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 23,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 21,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 22,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 23,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 23,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 24,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 26,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 27,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 25,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 24,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 26,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 27,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 24,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 27,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 26,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 27,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 24,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 26,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 25,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 28,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 29,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 30,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 29,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 28,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 29,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 28,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 29,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 28,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 25,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 31,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 25,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 31,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 30,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 31,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 30,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 31,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 30,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 32,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 33,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 35,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 34,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 32,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 33,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 35,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 33,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 35,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 32,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 35,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 32,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 33,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 34,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 34,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 36,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 34,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 36,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 36,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 38,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 39,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 37,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 36,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 38,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 37,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 38,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 37,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 39,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 38,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 37,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 39,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 39,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 41,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 42,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 43,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 40,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 41,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 40,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 43,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 41,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 40,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 43,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 41,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 40,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 43,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 44,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 45,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 44,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 45,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 46,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 44,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 45,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 46,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 44,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 45,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 42,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 46,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 42,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 47,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 42,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 46,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 47,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 47,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 47,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 48,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 49,
+      "characters": 1145,
+      "compacted": false
+    },
+    {
+      "shard": 49,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 48,
+      "characters": 7510,
+      "compacted": false
+    },
+    {
+      "shard": 49,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 48,
+      "characters": 13875,
+      "compacted": false
+    },
+    {
+      "shard": 49,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 48,
+      "characters": 14405,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 14603,
+      "compacted": false
+    },
+    {
+      "shard": 0,
+      "characters": 14805,
+      "compacted": false
+    }
+  ],
+  "errors": [],
+  "provider_retries": 0,
+  "rows": [
+    {
+      "shard": 0,
+      "unpaid_cents": 400
+    },
+    {
+      "shard": 1,
+      "unpaid_cents": 404
+    },
+    {
+      "shard": 2,
+      "unpaid_cents": 408
+    },
+    {
+      "shard": 3,
+      "unpaid_cents": 412
+    },
+    {
+      "shard": 4,
+      "unpaid_cents": 416
+    },
+    {
+      "shard": 5,
+      "unpaid_cents": 420
+    },
+    {
+      "shard": 6,
+      "unpaid_cents": 424
+    },
+    {
+      "shard": 7,
+      "unpaid_cents": 428
+    },
+    {
+      "shard": 8,
+      "unpaid_cents": 432
+    },
+    {
+      "shard": 9,
+      "unpaid_cents": 436
+    },
+    {
+      "shard": 10,
+      "unpaid_cents": 440
+    },
+    {
+      "shard": 11,
+      "unpaid_cents": 444
+    },
+    {
+      "shard": 12,
+      "unpaid_cents": 448
+    },
+    {
+      "shard": 13,
+      "unpaid_cents": 452
+    },
+    {
+      "shard": 14,
+      "unpaid_cents": 456
+    },
+    {
+      "shard": 15,
+      "unpaid_cents": 460
+    },
+    {
+      "shard": 16,
+      "unpaid_cents": 464
+    },
+    {
+      "shard": 17,
+      "unpaid_cents": 468
+    },
+    {
+      "shard": 18,
+      "unpaid_cents": 472
+    },
+    {
+      "shard": 19,
+      "unpaid_cents": 476
+    },
+    {
+      "shard": 20,
+      "unpaid_cents": 480
+    },
+    {
+      "shard": 21,
+      "unpaid_cents": 484
+    },
+    {
+      "shard": 22,
+      "unpaid_cents": 488
+    },
+    {
+      "shard": 23,
+      "unpaid_cents": 492
+    },
+    {
+      "shard": 24,
+      "unpaid_cents": 496
+    },
+    {
+      "shard": 25,
+      "unpaid_cents": 500
+    },
+    {
+      "shard": 26,
+      "unpaid_cents": 504
+    },
+    {
+      "shard": 27,
+      "unpaid_cents": 508
+    },
+    {
+      "shard": 28,
+      "unpaid_cents": 512
+    },
+    {
+      "shard": 29,
+      "unpaid_cents": 516
+    },
+    {
+      "shard": 30,
+      "unpaid_cents": 520
+    },
+    {
+      "shard": 31,
+      "unpaid_cents": 524
+    },
+    {
+      "shard": 32,
+      "unpaid_cents": 528
+    },
+    {
+      "shard": 33,
+      "unpaid_cents": 532
+    },
+    {
+      "shard": 34,
+      "unpaid_cents": 536
+    },
+    {
+      "shard": 35,
+      "unpaid_cents": 540
+    },
+    {
+      "shard": 36,
+      "unpaid_cents": 544
+    },
+    {
+      "shard": 37,
+      "unpaid_cents": 548
+    },
+    {
+      "shard": 38,
+      "unpaid_cents": 552
+    },
+    {
+      "shard": 39,
+      "unpaid_cents": 556
+    },
+    {
+      "shard": 40,
+      "unpaid_cents": 560
+    },
+    {
+      "shard": 41,
+      "unpaid_cents": 564
+    },
+    {
+      "shard": 42,
+      "unpaid_cents": 568
+    },
+    {
+      "shard": 43,
+      "unpaid_cents": 572
+    },
+    {
+      "shard": 44,
+      "unpaid_cents": 576
+    },
+    {
+      "shard": 45,
+      "unpaid_cents": 580
+    },
+    {
+      "shard": 46,
+      "unpaid_cents": 584
+    },
+    {
+      "shard": 47,
+      "unpaid_cents": 588
+    },
+    {
+      "shard": 48,
+      "unpaid_cents": 592
+    },
+    {
+      "shard": 49,
+      "unpaid_cents": 596
+    }
+  ],
+  "expected_total_cents": 24900,
+  "actual_total_cents": 24900,
+  "correct_shards": 50,
+  "peak_active_children": 4,
+  "completed_children": 50,
+  "child_sessions": 50,
+  "max_request_characters": 14405,
+  "compacted_requests": 0,
+  "compacted_children": 0,
+  "sequence_ordered": true,
+  "request_order_preserved": true,
+  "followup_preserved": true,
+  "oversize_rejected": true,
+  "recovered_after_oversize": true,
+  "passed": true,
+  "workers_stopped": true,
+  "elapsed_seconds": 57.27533154201228
+}

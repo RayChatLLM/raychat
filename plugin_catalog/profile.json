@@ -1,0 +1,19 @@
+{
+  "catalog": "catalog.json",
+  "id": "standard",
+  "packages": [
+    "chat_completions@1.0.0",
+    "context@1.0.0",
+    "filesystem@1.0.0",
+    "goals@1.0.0",
+    "memory@1.0.0",
+    "optimization@1.0.0",
+    "plugin_manager@1.0.0",
+    "process@1.0.0",
+    "self_harness@1.0.0",
+    "skills@1.0.0",
+    "subagents@1.0.0",
+    "workflows@1.0.0"
+  ],
+  "schema": 1
+}

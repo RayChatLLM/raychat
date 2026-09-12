@@ -1,0 +1,27 @@
+{
+  "id": "skills",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "skills capabilities",
+  "requires": {},
+  "defaults": {
+    "directories": [],
+    "max_skills": 64,
+    "max_skill_name_chars": 64,
+    "max_skill_bytes": 65536,
+    "max_total_skill_bytes": 524288,
+    "max_skill_description_chars": 240,
+    "environment": "CHAT_AGENT_SKILLS_DIRS"
+  },
+  "cli": [
+    {
+      "flags": [
+        "--skills-dir"
+      ],
+      "action": "append",
+      "setting": "directories"
+    }
+  ],
+  "instructions": "Consult the available skill catalog and load relevant instructions with {\"action\":\"skill\",\"name\":\"skill-name\"}. Loaded skill instructions apply to the current session. Skill files are not loaded merely because their names appear in the catalog."
+}

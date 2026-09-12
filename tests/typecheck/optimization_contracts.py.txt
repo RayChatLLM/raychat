@@ -1,0 +1,24 @@
+"""Optimization callers must supply concrete scores, worker counts and prompts."""
+from collections.abc import Mapping, Sequence
+
+from plugins.optimization.optimize_chat_prompt import optimize_protocol, runnable_protocol
+
+
+def evaluate(candidate: str, example: Mapping[str, object]) -> tuple[float, Mapping[str, object]]:
+    return 1.0, {}
+
+
+def reflect(prompt: str | Sequence[Mapping[str, object]]) -> str:
+    return "refined protocol"
+
+
+def wrong_target_score() -> None:
+    optimize_protocol("protocol", evaluator=evaluate, reflection_lm=reflect, dataset=[{}], valset=[{}], target_validation_score="1")  # expect-error: arg-type
+
+
+def wrong_workers() -> None:
+    optimize_protocol("protocol", evaluator=evaluate, reflection_lm=reflect, dataset=[{}], valset=[{}], workers="2")  # expect-error: arg-type
+
+
+def missing_candidate() -> None:
+    runnable_protocol(None)  # expect-error: arg-type
