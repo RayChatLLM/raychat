@@ -19,7 +19,7 @@ import unittest
 import zipfile
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -36,7 +36,15 @@ from unittest import mock
 from raychat.application import add_plugin_arguments
 from raychat.configuration import SETTINGS
 from raychat.distribution import read_distribution
-from raychat.packages import Manifest, digest, files, pack, read_manifest, unpack
+from raychat.packages import (
+    Manifest,
+    digest,
+    discover,
+    files,
+    pack,
+    read_manifest,
+    unpack,
+)
 from raychat.plugin_manager import PackageManager, scaffold
 from raychat.plugin_sources import fingerprint
 from raychat.plugins import Runtime, import_plugin
@@ -204,6 +212,42 @@ class PackageSystemFixture(PackageTestCase):
             version=version,
             entrypoint=entrypoint,
         )
+
+
+def _windows_path_less(left: Path, right: Path) -> bool:
+    return PureWindowsPath(left.as_posix()) < PureWindowsPath(right.as_posix())
+
+
+class PackageOrderingTests(PackageSystemFixture):
+    """Preserve canonical package order independently of native path comparisons."""
+
+    def test_archive_order_ignores_native_windows_path_comparison(self) -> None:
+        """Retain POSIX member order and exact bytes under Windows path comparison."""
+        source = self.external()
+        (source / "GEPA_LICENSE").write_bytes(b"retained license\n")
+        (source / "nested").mkdir()
+        (source / "nested" / "worker.py").write_bytes(b"VALUE = 1\n")
+        (source / "nested.py").write_bytes(b"VALUE = 2\n")
+        expected = files(source)
+        names = sorted(expected, key=PurePosixPath)
+        native_archive = pack(source)
+        with mock.patch.object(Path, "__lt__", new=_windows_path_less):
+            portable_members = files(source)
+            portable_archive = pack(source)
+        self.equal(list(portable_members), names)
+        self.equal(portable_members, expected)
+        self.equal(portable_archive, native_archive)
+        with zipfile.ZipFile(io.BytesIO(portable_archive)) as archive:
+            self.equal(archive.namelist(), names)
+            self.equal({name: archive.read(name) for name in names}, expected)
+
+    def test_catalog_discovery_ignores_native_windows_path_comparison(self) -> None:
+        """Keep mixed-case package discovery order identical on every platform."""
+        for name in ("alpha", "Zebra", "Beta"):
+            self.external(name)
+        with mock.patch.object(Path, "__lt__", new=_windows_path_less):
+            packages = discover(self.root / "source")
+        self.equal([path.name for path in packages], ["Beta", "Zebra", "alpha"])
 
 
 class PackageTransactionTests(PackageSystemFixture):

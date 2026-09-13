@@ -566,7 +566,6 @@ class _CollectiveRun:
             "purpose_routes": {"ledger": "ledger"},
         }
         settings["chat_completions"] = {
-            "url": endpoint,
             "model": self.selected_model,
             "request_options": {
                 "reasoning_effort": "low",
@@ -619,12 +618,18 @@ class _CollectiveRun:
                 json_text({"action": "delegate_many", "agents": tasks}),
             )
 
-    def _chat(self) -> TerminalChat:
+    def _chat(self, endpoint: str) -> TerminalChat:
         return TerminalChat(
             self.case.root,
             [
                 "--config",
                 str(self.case.config),
+                # Keep the gateway a custom endpoint. Redefining the provider's
+                # default URL would incorrectly require real credentials here.
+                "--url",
+                endpoint,
+                "--model",
+                self.selected_model,
                 "--workspace",
                 str(self.case.work),
                 "--context-chars",
@@ -810,16 +815,17 @@ class _CollectiveRun:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            self._configure(f"http://127.0.0.1:{server.server_port}/chat")
+            endpoint = f"http://127.0.0.1:{server.server_port}/chat"
+            self._configure(endpoint)
             self._write_fixtures()
-            return self._run_terminal()
+            return self._run_terminal(endpoint)
         finally:
             server.shutdown()
             server.server_close()
             thread.join(5)
 
-    def _run_terminal(self) -> dict[str, object]:
-        chat = self._chat()
+    def _run_terminal(self, endpoint: str) -> dict[str, object]:
+        chat = self._chat(endpoint)
         started = time.monotonic()
         try:
             self._drive_batches(chat)
