@@ -291,6 +291,57 @@ def _resume_command_menu(case: Case, chat: TerminalChat) -> None:
     )
 
 
+def resume_first_input(case: Case) -> None:
+    """Open saved-session menus before the worker has handled any command."""
+    for prompt in ("COLD_ALPHA", "COLD_BETA"):
+        chat = case.chat(persist=True)
+        try:
+            chat.wait("Main chat")
+            chat.command_complete(prompt, "ANSWER_" + prompt)
+        finally:
+            chat.close(case.output / (prompt + ".ansi"))
+    for launch in ("fresh", "restored"):
+        chat = case.chat(*(["--resume"] if launch == "restored" else []), persist=True)
+        try:
+            if launch == "restored":
+                chat.wait("Resume a session")
+                chat.send(b"\x1b[F\r")
+                chat.wait("ANSWER_COLD_ALPHA")
+            else:
+                chat.wait("Main chat")
+            before = {
+                path: path.read_bytes()
+                for path in (case.output / "saved").glob("*/*.jsonl")
+            }
+            # Type and press Enter twice, exactly as an operator accepting the
+            # slash completion then submitting it, without a warm-up command.
+            chat.send(b"/resume\r\r")
+            chat.wait("Resume a session")
+            chat.wait("COLD_BETA")
+            chat.send(b"\x1b")
+            deadline = time.monotonic() + 5
+            while "Resume a session" in chat.screen() and time.monotonic() < deadline:
+                chat.poll()
+            require("Resume a session" not in chat.screen())
+            require(all(path.read_bytes() == data for path, data in before.items()))
+            # Canceling selection must leave the worker uninitialized too.
+            chat.send(b"/resume\r\r")
+            chat.wait("Resume a session")
+            rows = chat.screen().splitlines()
+            target = next(i for i, row in enumerate(rows) if "COLD_BETA" in row)
+            selected = next(i for i, row in enumerate(rows) if "> " in row)
+            direction = b"\x1b[B" if target > selected else b"\x1b[A"
+            chat.send(direction * abs(target - selected) + b"\r")
+            chat.wait("ANSWER_COLD_BETA")
+            chat.command_complete("COLD_FOLLOWUP", "ANSWER_COLD_FOLLOWUP")
+            case.checks.append(
+                f"/resume as first input in {launch} chat opens a cancelable "
+                "picker and resumes usable history without a warm-up command",
+            )
+        finally:
+            chat.close(case.output / (launch + ".ansi"))
+
+
 def _process_ids(path: Path) -> list[int]:
     return [
         integer_field(item, "process ID")
@@ -745,6 +796,7 @@ def external(case: Case) -> None:
 
 SCENARIOS: dict[str, Callable[[Case], None]] = {
     "navigation": navigation,
+    "resume-first-input": resume_first_input,
     "process": process,
     "external": external,
 }

@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat.resources import AgentResources, create_resources
+from raychat.storage import SessionStore
 from raychat.type_support import override
 from raychat.ui import controller as tui
+from raychat.ui.picker import Picker
 from raychat.ui.renderer import RayTracer, Surface
 from raychat.ui.state import Phase, TuiSnapshot, TuiState
 from raychat.ui.terminal import (
@@ -249,6 +251,59 @@ class TuiSessionTests(TypedTestCase):
                 0,
             )
         return snapshots
+
+    def test_resume_first_command_selects_before_worker_initialization(self) -> None:
+        """Open the picker using launch resources before any command creates a chat."""
+        saved = SessionStore(self.root, self.root / "sessions")
+        target = saved.session_id
+        saved.close()
+        calls: list[Messages] = []
+
+        def chat(messages: Messages) -> str:
+            calls.append(messages)
+            return '{"action":"done","message":"unexpected model call"}'
+
+        with provider_fixture(chat):
+            resources = create_resources(self.args, {})
+        self.addCleanup(resources.close)
+        choices: list[str] = []
+        original_paint = Picker.paint
+
+        def paint(
+            menu: Picker,
+            surface: Surface,
+            *,
+            ascii_only: bool = True,
+        ) -> Surface:
+            self.equal(menu.title, "Resume a session")
+            self.require(resources.runtime.session is None)
+            choices[:] = [choice.id for choice in menu.choices]
+            return original_paint(menu, surface, ascii_only=ascii_only)
+
+        phase = "open"
+        deadline = time.monotonic() + 5
+
+        def drive(snapshots: list[TuiSnapshot]) -> bytes:
+            nonlocal phase
+            self.require(time.monotonic() < deadline, f"Resume stuck in {phase}")
+            if snapshots:
+                self.require(snapshots[-1].phase is not Phase.ERROR, snapshots[-1])
+            if phase == "open":
+                phase = "choose"
+                return b"/resume\r\r"
+            if phase == "choose" and choices:
+                phase = "done"
+                return b"\x1b[B" * choices.index(target) + b"\r"
+            if phase == "done" and snapshots[-1].phase is Phase.DONE:
+                return b"\x03"
+            time.sleep(0.001)
+            return b""
+
+        with mock.patch.object(Picker, "paint", new=paint):
+            self.run_ui(resources, drive)
+        self.require(target in choices)
+        self.equal(calls, [])
+        self.require(resources.runtime.session is not None)
 
     def test_goal_set_before_first_message_is_preserved_and_judged(self) -> None:
         """Check goal set before first message is preserved and judged."""
