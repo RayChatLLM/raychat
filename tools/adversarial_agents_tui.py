@@ -82,7 +82,13 @@ def include_child_plugins(case: Case, *plugin_ids: str) -> None:
 
 BACKGROUND_COMMAND_PLUGIN = """import json
 import time
+from pathlib import Path
 from raychat.sdk import CommandDefinition, PluginAPI, PluginContext
+
+def publish(path: Path, payload: object) -> None:
+    pending = path.with_name(path.name + '.pending')
+    pending.write_text(json.dumps(payload), encoding='utf-8')
+    pending.replace(path)
 
 def register(api: PluginAPI) -> None:
     def marker(arguments: str, ctx: PluginContext):
@@ -93,7 +99,7 @@ def register(api: PluginAPI) -> None:
 
     def gated(arguments: str, ctx: PluginContext) -> str:
         base = marker(arguments, ctx)
-        base.with_suffix('.started').write_text(json.dumps(ctx.session.snapshot()))
+        publish(base.with_suffix('.started'), ctx.session.snapshot())
         completed = False
         try:
             while not base.with_suffix('.release').exists():
@@ -102,8 +108,7 @@ def register(api: PluginAPI) -> None:
             completed = True
             return 'BACKGROUND_DONE_' + arguments
         finally:
-            base.with_suffix('.finished').write_text(
-                json.dumps({'completed': completed}))
+            publish(base.with_suffix('.finished'), {'completed': completed})
 
     def idle(arguments: str, ctx: PluginContext) -> str:
         marker(arguments, ctx).with_suffix('.entered').touch()

@@ -14,7 +14,7 @@ import time
 import traceback
 import unicodedata
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from raychat.validation import (
     integer_field,
@@ -127,15 +127,38 @@ def settle(chat: TerminalChat, seconds: float = 0.35) -> None:
         chat.poll()
 
 
-def paste(chat: TerminalChat, text: str, *, submit: bool = True) -> None:
-    """Send bracketed paste with chunks that can split UTF-8 sequences."""
+class _PasteTerminal(Protocol):
+    def send(self, text: str | bytes) -> None: ...
+
+    def poll(self, seconds: float = 0.04) -> None: ...
+
+    def screen(self) -> str: ...
+
+    def wait(self, text: str, seconds: float = 15) -> None: ...
+
+
+def paste(
+    chat: _PasteTerminal,
+    text: str,
+    *,
+    submit: bool = True,
+    feedback: str | None = None,
+) -> None:
+    """Stream a split UTF-8 paste and observe required transient feedback."""
     data = text.encode()
+    feedback_seen = False
     chat.send(b"\x1b[200~")
     # Split inside Unicode sequences as real terminal input can do.
     for index in range(0, len(data), 701):
         chat.send(data[index : index + 701])
         chat.poll(0.025)
+        if feedback is not None and not feedback_seen:
+            feedback_seen = feedback in chat.screen()
     chat.send(b"\x1b[201~")
+    # A rejected paste is still consumed through its terminator. Its notice may
+    # expire while a slow terminal delivers the remainder, so observe it above.
+    if feedback is not None and not feedback_seen:
+        chat.wait(feedback)
     if submit:
         chat.send(b"\r")
 
@@ -159,9 +182,13 @@ def _oversize_inputs(
     oversize += "\nMUST_NOT_SUBMIT\n/quit\n"
     chat.send("DRAFT_KEEP_")
     count = len(requests(case))
-    paste(chat, oversize, submit=False)
     paste_limit = integer_field(tui["paste_max_bytes"], "paste_max_bytes")
-    chat.wait(f"Paste rejected: exceeds {paste_limit} bytes")
+    paste(
+        chat,
+        oversize,
+        submit=False,
+        feedback=f"Paste rejected: exceeds {paste_limit} bytes",
+    )
     settle(chat)
     require(
         len(requests(case)) == count,
@@ -185,8 +212,12 @@ def _oversize_inputs(
     chat.command("/clear", "IDLE")
     chat.send("CHAR_DRAFT_")
     count = len(requests(case))
-    paste(chat, "x" * (limit + 1), submit=False)
-    chat.wait(f"Input rejected: exceeds {limit} characters")
+    paste(
+        chat,
+        "x" * (limit + 1),
+        submit=False,
+        feedback=f"Input rejected: exceeds {limit} characters",
+    )
     require(
         len(requests(case)) == count,
         "ui_stress_tui: acceptance check at original line 168",
@@ -268,13 +299,21 @@ def inputs(case: Case, report: Report) -> None:
     try:
         chat.wait("Main chat")
         chat.send("SMALL_")
-        paste(chat, "x" * 48, submit=False)
-        chat.wait("Input rejected: exceeds 48 characters")
+        paste(
+            chat,
+            "x" * 48,
+            submit=False,
+            feedback="Input rejected: exceeds 48 characters",
+        )
         chat.command("OK", expected("SMALL_OK"))
         chat.send("BYTES_")
         count = len(requests(case))
-        paste(chat, "漢" * 500 + "\n/quit\n", submit=False)
-        chat.wait("Paste rejected: exceeds 1024 bytes")
+        paste(
+            chat,
+            "漢" * 500 + "\n/quit\n",
+            submit=False,
+            feedback="Paste rejected: exceeds 1024 bytes",
+        )
         settle(chat)
         require(
             len(requests(case)) == count,

@@ -2,14 +2,78 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from unittest import mock
 
+from raychat.type_support import override
 from raychat.ui.controller import FrameComposition, compose_frame
 from raychat.ui.renderer import CellStyle, RayTracer, Surface
 from raychat.ui.state import Rect, TuiState
 from raychat.ui.terminal import LineEditor
+from tests.assertions import TypedTestCase
 from tools.terminal_screen import TerminalScreen
+
+if os.name == "posix":
+    from tools.ui_stress_tui import paste
+
+
+class _PasteOutput:
+    def __init__(self, visible_at: int | None) -> None:
+        self.visible_at = visible_at
+        self.received = bytearray()
+        self.polls: list[float] = []
+        self.waited: list[tuple[str, float]] = []
+        self.notice = "Paste rejected: exceeds 1024 bytes"
+
+    def send(self, text: str | bytes) -> None:
+        self.received.extend(text.encode() if isinstance(text, str) else text)
+
+    def poll(self, seconds: float = 0.04) -> None:
+        self.polls.append(seconds)
+
+    def screen(self) -> str:
+        return self.notice if len(self.polls) == self.visible_at else "IDLE"
+
+    def wait(self, text: str, seconds: float = 15) -> None:
+        self.waited.append((text, seconds))
+        if text not in self.screen():
+            message = f"Missing visible feedback: {text}"
+            raise AssertionError(message)
+
+
+class PasteObservationTests(TypedTestCase):
+    """Observe temporary rejection feedback throughout a streamed paste."""
+
+    @override
+    def setUp(self) -> None:
+        """Import the POSIX acceptance driver only on supported platforms."""
+        if os.name != "posix":
+            self.skipTest("The acceptance driver uses a POSIX PTY.")
+
+    def test_rejection_can_expire_before_the_paste_finishes(self) -> None:
+        """Retain a visible rejection while still delivering the entire paste."""
+        terminal = _PasteOutput(visible_at=2)
+        text = "漢🙂" * 500 + "\n/quit\n"
+        paste(terminal, text, submit=False, feedback=terminal.notice)
+        self.equal(terminal.screen(), "IDLE")
+        self.equal(terminal.waited, [])
+        self.equal(
+            terminal.received,
+            b"\x1b[200~" + text.encode() + b"\x1b[201~",
+        )
+
+    def test_missing_rejection_is_still_an_acceptance_failure(self) -> None:
+        """Reject an absent notice after consuming the complete unsafe payload."""
+        terminal = _PasteOutput(visible_at=None)
+        text = "漢🙂" * 500 + "\n/quit\n"
+        with self.rejected(AssertionError, "Missing visible feedback"):
+            paste(terminal, text, submit=False, feedback=terminal.notice)
+        self.equal(terminal.waited, [(terminal.notice, 15)])
+        self.equal(
+            terminal.received,
+            b"\x1b[200~" + text.encode() + b"\x1b[201~",
+        )
 
 
 class IncrementalRenderingTests(unittest.TestCase):
