@@ -488,6 +488,10 @@ def _read_member(item: Path, remaining: int) -> bytes:
     return data
 
 
+def _portable_path(item: Path) -> PurePosixPath:
+    return PurePosixPath(item.as_posix())
+
+
 def files(
     path: str | Path,
     *,
@@ -518,7 +522,7 @@ def files(
     result: dict[str, bytes] = {}
     remaining = MAX_BYTES
     folded: set[str] = set()
-    for item in sorted(path.rglob("*")):
+    for item in sorted(path.rglob("*"), key=_portable_path):
         relative = item.relative_to(path)
         if _ignored_member(relative, ignore_finder_metadata=ignore_finder_metadata):
             continue
@@ -669,6 +673,6 @@ def discover(directory: str | Path) -> list[Path]:
         return []
     return [
         path.resolve()
-        for path in sorted(directory.iterdir())
+        for path in sorted(directory.iterdir(), key=_portable_path)
         if path.is_dir() and not path.is_symlink() and (path / "plugin.json").is_file()
     ]
