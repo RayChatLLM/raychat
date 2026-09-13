@@ -1909,18 +1909,22 @@ class _TuiController:
         )
 
     def _open_resume_picker(self) -> bool:
-        session = self.view.worker.session
-        if (
-            not isinstance(session, AgentSession)
-            or not isinstance(session.runtime, Runtime)
-            or "resume" in session.runtime.commands
-        ):
+        runtime = self._focused_runtime()
+        if runtime is None or "resume" in runtime.commands:
             return False
-        store = session.store
+        session = self.view.worker.session
+        if isinstance(session, AgentSession):
+            workspace, store = session.root, session.store
+        elif session is None and self.view is self.views[self.root_id]:
+            # Workers create their conversation on the first job. The root's
+            # workspace and journal are already owned by the launch resources.
+            workspace, store = runtime.workspace, self.resources.store
+        else:
+            return False
         if store is not None and not isinstance(store, SessionStore):
             return False
         choices = SessionStore.choices(
-            session.root,
+            workspace,
             store.directory if store is not None else None,
         )
         if len(choices) <= 1:
