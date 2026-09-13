@@ -237,6 +237,10 @@ def _resume_navigation(case: Case) -> None:
             "accept_tui: acceptance check at original line 161",
         )
         case.checks.append("one saved session resumes directly")
+        chat.command_complete("/resume", "Already in session")
+        require("Resume a session" not in chat.screen())
+        chat.command_complete("SLASH_RESUME_ONE", "ANSWER_SLASH_RESUME_ONE")
+        case.checks.append("bare /resume keeps the only open session usable")
     finally:
         chat.close(case.output / "resume-one.ansi")
     chat = case.chat(persist=True)
@@ -254,8 +258,37 @@ def _resume_navigation(case: Case) -> None:
         chat.wait("ANSWER_AFTER_STOP")
         chat.command("AFTER_RESUME", "ANSWER_AFTER_RESUME")
         case.checks.append("resume picker selects a usable session")
+        _resume_command_menu(case, chat)
     finally:
         chat.close(case.output / "resume-menu.ansi")
+
+
+def _resume_command_menu(case: Case, chat: TerminalChat) -> None:
+    chat.command("/resume", "Resume a session")
+    chat.wait("ROOT_ALPHA")
+    chat.wait("ROOT_BETA")
+    chat.send(b"\x1b")
+    chat.command_complete("AFTER_RESUME_CANCEL", "ANSWER_AFTER_RESUME_CANCEL")
+    chat.command("/resume", "Resume a session")
+    rows = chat.screen().splitlines()
+    selected = next(i for i, row in enumerate(rows) if "> " in row and "ROOT_" in row)
+    target = next(i for i, row in enumerate(rows) if "ROOT_BETA" in row)
+    direction = b"\x1b[B" if target > selected else b"\x1b[A"
+    chat.send(direction * abs(target - selected) + b"\r")
+    chat.wait("Resumed")
+    chat.wait("ANSWER_ROOT_BETA")
+    chat.command_complete("SLASH_RESUME_BETA", "ANSWER_SLASH_RESUME_BETA")
+    chat.command("/resume", "Resume a session")
+    rows = chat.screen().splitlines()
+    target = next(i for i, row in enumerate(rows) if "ROOT_ALPHA" in row)
+    column = rows[target].index("ROOT_ALPHA")
+    chat.send(f"\x1b[<0;{column + 1};{target + 1}M")
+    chat.wait("ANSWER_AFTER_RESUME_CANCEL")
+    chat.command_complete("SLASH_RESUME_ALPHA", "ANSWER_SLASH_RESUME_ALPHA")
+    case.checks.append(
+        "bare /resume opens a cancelable saved-session menu "
+        "with keyboard and mouse selection",
+    )
 
 
 def _process_ids(path: Path) -> list[int]:

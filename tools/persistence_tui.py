@@ -329,13 +329,14 @@ def branch_state(case: Case) -> None:
     try:
         chat.wait("ANSWER_PERSIST_BRANCH", 30)
         chat.command_complete("/persist-state", "UPDATED value=35")
-        chat.command_complete("/resume " + first.stem, "active writer")
+        before_resume = first.read_bytes()
+        chat.command_complete("/resume " + first.stem, "Already in session")
+        require(first.read_bytes() == before_resume)
         chat.command_complete("/persist-state", "UPDATED value=35")
         case.checks.append(
             (
                 "checkpoint-only plugin changes survive restart; "
-                "resuming the already-open session is "
-                "recoverable"
+                "resuming the already-open session preserves its journal"
             ),
         )
     finally:

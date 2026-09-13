@@ -25,7 +25,9 @@ from raychat.configuration import SETTINGS
 from raychat.navigation import Navigation
 from raychat.plugins import Runtime
 from raychat.resources import AgentResources, create_worker
+from raychat.session import AgentSession
 from raychat.status import StatusItem, StatusRecord, StatusStore, decode_update
+from raychat.storage import SessionStore
 from raychat.ui.caching import CacheControls, cache_function
 from raychat.ui.commands import CommandCompletion, command_catalog
 from raychat.ui.feedback import ComposerPanel, PanelStyle, footer_text
@@ -1906,6 +1908,27 @@ class _TuiController:
             starmap(Choice, self.resources.runtime.menu(self.menu_name).choices),
         )
 
+    def _open_resume_picker(self) -> bool:
+        session = self.view.worker.session
+        if (
+            not isinstance(session, AgentSession)
+            or not isinstance(session.runtime, Runtime)
+            or "resume" in session.runtime.commands
+        ):
+            return False
+        store = session.store
+        if store is not None and not isinstance(store, SessionStore):
+            return False
+        choices = SessionStore.choices(
+            session.root,
+            store.directory if store is not None else None,
+        )
+        if len(choices) <= 1:
+            return False
+        self.menu_name = None
+        self.picker = Picker("Resume a session", starmap(Choice, choices))
+        return True
+
     def _handle_ui(self, kind: str, payload: Mapping[str, object]) -> None:
         if kind != "ui":
             return
@@ -2262,6 +2285,13 @@ class _TuiController:
                     target,
                     notify=self._application_notify(self.focused_id),
                 )
+            elif target is not None:
+                self.view.active_job_id = _submit(
+                    self.view.state,
+                    self.view.worker,
+                    "/resume " + target,
+                    self.args.max_steps,
+                )
         return True
 
     def _process_composer_key(self, event: KeyEvent) -> bool:
@@ -2541,6 +2571,8 @@ class _TuiController:
             self._request_quit()
         elif command == "/system":
             self.show_system = not self.show_system
+        elif command == "/resume" and self._open_resume_picker():
+            return
         elif command.startswith("/") and command not in {"/clear", "/quit", "/exit"}:
             self.view.active_job_id = _submit(
                 self.view.state,
@@ -2782,7 +2814,8 @@ class _TuiController:
             # distance that must later be unwound.
             self.view.scroll_offset = rendered_scroll
         if self.picker is not None:
-            self.picker.replace(self._menu_choices())
+            if self.menu_name is not None:
+                self.picker.replace(self._menu_choices())
             self.picker.paint(surface, ascii_only=self.args.ascii)
         frame = surface.to_ansi(
             home=False,

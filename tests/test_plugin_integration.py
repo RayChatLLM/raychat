@@ -696,6 +696,55 @@ class DurablePluginStateTests(TypedTestCase):
             store=store,
         )
 
+    def test_resume_current_session_keeps_its_writer_and_history(self) -> None:
+        """Treat explicit and omitted current identifiers as an idempotent resume."""
+        session = self.session([DONE])
+        self.addCleanup(session.close)
+        session.send("keep this conversation", event_callback=lambda *_: None)
+        store = session.store
+        if not isinstance(store, SessionStore):
+            self.fail("Expected a saved session.")
+        before = store.path.read_bytes()
+        snapshot = session.export_snapshot()
+        for command in ("/resume", "/resume   ", "/resume " + store.session_id):
+            with self.subTest(command=command):
+                self.equal(
+                    dispatch_command(session, command),
+                    "Already in session " + store.session_id,
+                )
+                self.require(session.store is store)
+                self.equal(session.export_snapshot(), snapshot)
+                self.equal(store.path.read_bytes(), before)
+                self.require(not store.stream.closed)
+
+    def test_resume_without_id_requires_a_selection_when_not_interactive(self) -> None:
+        """Preserve the current session when a noninteractive command is ambiguous."""
+        first = self.session()
+        first.close()
+        session = self.session()
+        self.addCleanup(session.close)
+        before = session.export_snapshot()
+        with self.rejected(ValueError, "Several sessions exist.*SESSION_ID"):
+            dispatch_command(session, "/resume")
+        self.equal(session.export_snapshot(), before)
+
+    def test_resume_without_id_restores_only_saved_session_or_reports_none(
+        self,
+    ) -> None:
+        """Resolve saved sessions before opening storage without a current log."""
+        session = AgentSession(ScriptedChat([]), self.root, runtime=Runtime(self.root))
+        self.addCleanup(session.close)
+        with mock.patch("raychat.storage.Path.home", return_value=self.root):
+            with self.rejected(ValueError, "No saved sessions exist"):
+                dispatch_command(session, "/resume")
+            saved = SessionStore(self.root)
+            identifier = saved.session_id
+            saved.close()
+            self.equal(dispatch_command(session, "/resume"), "Resumed " + identifier)
+            if not isinstance(session.store, SessionStore):
+                self.fail("Resume must attach the saved journal.")
+            self.equal(session.store.session_id, identifier)
+
     def test_resume_fork_reconstructs_state_without_replaying_tools(self) -> None:
         """Check resume fork reconstructs state without replaying tools."""
         session = self.session(['{"action":"count"}', DONE, '{"action":"count"}', DONE])

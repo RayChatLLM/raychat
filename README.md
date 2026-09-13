@@ -73,7 +73,9 @@ python3 -B -S raychat.py --workspace ./workspace --resume SESSION_ID
 `--session-dir PATH` changes the storage location; `--no-session` disables
 persistence. `/sessions` lists saved
 IDs. `/tree` lists completed turns and `/fork ENTRY_ID` selects a conversation
-branch. `/resume ID` changes saved conversations from inside chat.
+branch. `/resume` opens the only saved session or shows the same picker inside
+chat when several exist. `/resume ID` opens a specific saved conversation.
+Selecting the current conversation keeps its history and writer open.
 
 Only completed turns become reusable context. Resuming does not replay tools or
 goal loops. An active writer lock prevents two processes from modifying the

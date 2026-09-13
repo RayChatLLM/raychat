@@ -473,6 +473,25 @@ class SessionStore:
         return [identifier for _, identifier in ordered]
 
     @classmethod
+    def choices(
+        cls,
+        workspace: str | Path,
+        directory: str | Path | None = None,
+    ) -> list[tuple[str, str]]:
+        """Read saved session identifiers and bounded labels for either picker.
+
+        Returns
+        -------
+        list[tuple[str, str]]
+            Newest-first identifiers paired with their preview labels.
+
+        """
+        return [
+            (identifier, cls.describe(workspace, directory, identifier))
+            for identifier in cls.list_sessions(workspace, directory)
+        ]
+
+    @classmethod
     def describe(
         cls,
         workspace: str | Path,
