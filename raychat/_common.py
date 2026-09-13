@@ -1,29 +1,24 @@
+"""Shared protocol defaults and checked value helpers used by the host."""
+
 from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 from raychat.configuration import SETTINGS
+from raychat.validation import object_field
 
 from .sdk import (
-    Action as Action,
-)
-from .sdk import (
-    ApprovalCallback as ApprovalCallback,
-)
-from .sdk import (
-    CancelCheck as CancelCheck,
-)
-from .sdk import (
-    Chat as Chat,
-)
-from .sdk import (
-    EventCallback as EventCallback,
-)
-from .sdk import (
-    Messages as Messages,
+    Action,
+    ApprovalCallback,
+    CancelCheck,
+    Chat,
+    EventCallback,
+    Messages,
 )
 
 DEFAULT_CONTEXT_CHARS = SETTINGS.chat.context_chars
@@ -85,6 +80,12 @@ def _is_positive_finite_number(value: object) -> bool:
 
     ``bool`` is intentionally excluded even though it subclasses ``int``.
     Converting very large integers can overflow, so treat those as invalid too.
+
+    Returns
+    -------
+    bool
+        Whether the value is a finite positive duration within the host limit.
+
     """
     if type(value) is not int and type(value) is not float:
         return False
@@ -107,6 +108,34 @@ def _is_valid_utf8_text(value: str) -> bool:
     return True
 
 
-def _detached_callback_payload(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a JSON-detached callback value that cannot mutate agent state."""
-    return cast("dict[str, Any]", json.loads(json.dumps(value, ensure_ascii=False)))
+def _detached_callback_payload(value: Mapping[str, object]) -> dict[str, object]:
+    """Return a JSON-detached callback value that cannot mutate agent state.
+
+    Returns
+    -------
+    dict[str, object]
+        A fresh JSON object whose values must be checked by their consumers.
+
+    """
+    detached: object = json.loads(json.dumps(value, ensure_ascii=False))
+    return object_field(detached, "callback payload")
+
+
+__all__ = [
+    "DEFAULT_CONTEXT_CHARS",
+    "DEFAULT_INSTRUCTION_ROLE",
+    "DEFAULT_KEEP_RECENT_TURNS",
+    "DEFAULT_WORKSPACE",
+    "INSTRUCTION_ROLES",
+    "MAX_PROTOCOL_BYTES",
+    "MAX_REPLY_CHARS",
+    "MAX_TIMEOUT_SECONDS",
+    "MESSAGE_ROLES",
+    "RESULT_PREFIX",
+    "Action",
+    "ApprovalCallback",
+    "CancelCheck",
+    "Chat",
+    "EventCallback",
+    "Messages",
+]

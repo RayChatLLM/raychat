@@ -1,4 +1,3 @@
-# Copyright 2026
 """Immutable settings owned and validated by this plugin."""
 
 from __future__ import annotations

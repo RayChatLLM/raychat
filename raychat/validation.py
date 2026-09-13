@@ -1,4 +1,3 @@
-# Copyright 2026
 """Validate unknown JSON values before exposing concrete field types."""
 
 from __future__ import annotations
@@ -15,6 +14,10 @@ if TYPE_CHECKING:
 
 class ConfigurationError(RuntimeError):
     """Identify a malformed configuration field with its schema path."""
+
+
+class ProviderResponseError(RuntimeError):
+    """Identify an unusable assistant response without exposing its contents."""
 
 
 def array_field(value: object, path: str) -> list[object]:
@@ -398,24 +401,24 @@ def assistant_text(value: object, *, maximum_chars: int) -> str:
 
     Raises
     ------
-    RuntimeError
+    ProviderResponseError
         If the provider returns empty, oversized, non-text or invalid Unicode data.
 
     """
     if not isinstance(value, str):
         error_message = "The chat provider did not return assistant text."
-        raise RuntimeError(error_message)
+        raise ProviderResponseError(error_message)
     if not value.strip():
         error_message = "The chat provider did not return nonempty assistant text."
-        raise RuntimeError(error_message)
+        raise ProviderResponseError(error_message)
     if len(value) > maximum_chars:
         error_message = "The chat provider returned assistant text over the size limit."
-        raise RuntimeError(
+        raise ProviderResponseError(
             error_message,
         )
     try:
         value.encode("utf-8")
     except UnicodeEncodeError:
         error_message = "The chat provider returned invalid Unicode text."
-        raise RuntimeError(error_message) from None
+        raise ProviderResponseError(error_message) from None
     return value

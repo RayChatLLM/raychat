@@ -1,3 +1,5 @@
+"""Validate checked application defaults and reject malformed configuration."""
+
 from __future__ import annotations
 
 import copy
@@ -7,13 +9,19 @@ import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
-import raychat._common as _rc__common
 import raychat.ui.renderer as ray_renderer
 import raychat.ui.terminal as terminal_runtime
 from raychat import configuration, sdk
 from raychat.ui import controller as ray_chat_tui
-from raychat.validation import array_field, json_object, object_field
-from tests.plugin_support import distribution_ids, plugin_module
+from raychat.validation import array_field, json_object, object_field, text_field
+from tests.assertions import TypedTestCase
+from tests.plugin_support import (
+    ScriptedChat,
+    create_runtime,
+    distribution_ids,
+    plugin_module,
+    registered_session,
+)
 from tools import build_portable
 
 
@@ -37,73 +45,71 @@ def _changed(
     return result
 
 
-class AppConfigurationTests(unittest.TestCase):
+class AppConfigurationTests(TypedTestCase):
+    """Check AppConfiguration behavior and failure boundaries."""
+
     def test_default_configuration_is_complete_and_immutable(self) -> None:
+        """Check default configuration is complete and immutable."""
         config = configuration.load_config()
 
-        self.assertEqual(config.schema_version, 1)
-        self.assertEqual(
+        self.equal(config.schema_version, 1)
+        self.equal(
             config.plugins.settings["chat_completions"]["model"],
             "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
         )
-        self.assertEqual(config.chat.instruction_role, "system")
-        self.assertIn("raychat/configuration.py", config.release.source_files)
-        self.assertIn("raychat.json", config.release.source_files)
-        self.assertIn("raychat/session.py", config.release.source_files)
-        self.assertIsInstance(
-            config.plugins.settings["chat_completions"]["api_key_envs"],
-            tuple,
+        self.equal(config.chat.instruction_role, "system")
+        self.require(("raychat/configuration.py") in (config.release.source_files))
+        self.require(("raychat.json") in (config.release.source_files))
+        self.require(("raychat/session.py") in (config.release.source_files))
+        self.require(
+            isinstance(
+                config.plugins.settings["chat_completions"]["api_key_envs"],
+                tuple,
+            ),
         )
 
         def mutate_workspace(name: str) -> None:
             setattr(config.chat, name, "elsewhere")
 
-        self.assertRaises(FrozenInstanceError, mutate_workspace, "workspace")
+        self.reject_unchecked_call(FrozenInstanceError, mutate_workspace, "workspace")
 
     def test_host_settings_have_required_typed_attributes(self) -> None:
-        self.assertEqual(configuration.SETTINGS.tui.target_fps, 120)
+        """Check host settings have required typed attributes."""
+        self.equal(configuration.SETTINGS.tui.target_fps, 120)
 
         def missing_field(name: str) -> object:
             value: object = getattr(configuration.SETTINGS.chat, name)
             return value
 
-        self.assertRaises(AttributeError, missing_field, "missing")
-        self.assertFalse(hasattr(configuration, "setting"))
+        self.reject_unchecked_call(AttributeError, missing_field, "missing")
+        self.require(not (hasattr(configuration, "setting")))
 
     def test_runtime_defaults_and_protocol_limits_come_from_one_tree(self) -> None:
+        """Check runtime defaults and protocol limits come from one tree."""
         config = configuration.SETTINGS
 
         provider = plugin_module("chat_completions")
         default_url: object = provider.DEFAULT_API_URL
         default_model: object = provider.DEFAULT_MODEL
-        self.assertEqual(
-            default_url,
-            config.plugins.settings["chat_completions"]["url"],
-        )
-        self.assertEqual(
-            default_model,
-            config.plugins.settings["chat_completions"]["model"],
-        )
-        self.assertEqual(
-            _rc__common.DEFAULT_INSTRUCTION_ROLE,
-            config.chat.instruction_role,
-        )
-        self.assertEqual(ray_chat_tui.TARGET_FPS, config.tui.target_fps)
-        self.assertEqual(
-            terminal_runtime.MAX_PASTE_BYTES,
-            config.terminal.max_paste_bytes,
-        )
-        self.assertEqual(ray_renderer.BLACK, config.renderer.black)
+        self.equal(default_url, config.plugins.settings["chat_completions"]["url"])
+        self.equal(default_model, config.plugins.settings["chat_completions"]["model"])
+        with tempfile.TemporaryDirectory() as directory:
+            session = registered_session(ScriptedChat[str]([]), Path(directory))
+            try:
+                self.equal(session.instruction_role, config.chat.instruction_role)
+            finally:
+                session.close()
+        self.equal(ray_chat_tui.TARGET_FPS, config.tui.target_fps)
+        self.equal(terminal_runtime.MAX_PASTE_BYTES, config.terminal.max_paste_bytes)
+        self.equal(ray_renderer.BLACK, config.renderer.black)
         installed = set(distribution_ids())
         configured = set(config.plugins.settings)
-        self.assertEqual(installed, configured)
-        self.assertEqual(sdk.API_VERSION, 4)
-        self.assertEqual(
-            build_portable.SOURCE_FILES,
-            config.release.source_files,
-        )
+        self.equal(installed, configured)
+        self.equal(sdk.API_VERSION, 4)
+        self.equal(build_portable.SOURCE_FILES, config.release.source_files)
 
     def test_provider_identity_is_not_duplicated_in_python_sources(self) -> None:
+        """Check provider identity is not duplicated in python sources."""
         config = configuration.SETTINGS
         forbidden = (
             config.plugins.settings["chat_completions"]["url"],
@@ -120,11 +126,12 @@ class AppConfigurationTests(unittest.TestCase):
             text = source.read_text(encoding="utf-8")
             for value in forbidden:
                 with self.subTest(source=source, value=value):
-                    self.assertNotIn(value, text)
+                    self.require(text_field(value, "provider identity") not in text)
 
     def test_loader_rejects_duplicate_keys_nonobjects_and_nonfinite_numbers(
         self,
     ) -> None:
+        """Check loader rejects duplicate keys nonobjects and nonfinite numbers."""
         invalid = (
             '{"schema_version":1,"schema_version":1}',
             "[]",
@@ -135,13 +142,15 @@ class AppConfigurationTests(unittest.TestCase):
             for index, content in enumerate(invalid):
                 path = Path(directory) / f"invalid-{index}.json"
                 path.write_text(content, encoding="utf-8")
-                with self.subTest(content=content), self.assertRaises(RuntimeError):
+                with self.subTest(content=content), self.rejected(RuntimeError):
                     configuration.load_config(path)
 
     def test_loader_rejects_missing_extra_and_oversized_configuration(self) -> None:
+        """Check loader rejects missing extra and oversized configuration."""
         source = Path(configuration.__file__).resolve().parents[1] / "raychat.json"
         original = object_field(
-            json_object(source.read_text(encoding="utf-8")), "configuration"
+            json_object(source.read_text(encoding="utf-8")),
+            "configuration",
         )
         variants = []
         missing = dict(original)
@@ -157,13 +166,15 @@ class AppConfigurationTests(unittest.TestCase):
             for index, value in enumerate(variants):
                 path = Path(directory) / f"invalid-{index}.json"
                 path.write_text(json.dumps(value), encoding="utf-8")
-                with self.subTest(index=index), self.assertRaises(RuntimeError):
+                with self.subTest(index=index), self.rejected(RuntimeError):
                     configuration.load_config(path)
 
     def test_loader_rejects_invalid_runtime_parameter_types_and_ranges(self) -> None:
+        """Check loader rejects invalid runtime parameter types and ranges."""
         source = Path(configuration.__file__).resolve().parents[1] / "raychat.json"
         original = object_field(
-            json_object(source.read_text(encoding="utf-8")), "configuration"
+            json_object(source.read_text(encoding="utf-8")),
+            "configuration",
         )
         changes: tuple[tuple[tuple[str | int, ...], object], ...] = (
             (("tui", "target_fps"), 0),
@@ -187,21 +198,21 @@ class AppConfigurationTests(unittest.TestCase):
             for index, value in enumerate(variants):
                 path = Path(directory) / f"bad-parameter-{index}.json"
                 path.write_text(json.dumps(value), encoding="utf-8")
-                with self.subTest(index=index), self.assertRaises(RuntimeError):
+                with self.subTest(index=index), self.rejected(RuntimeError):
                     configuration.load_config(path)
 
     def test_plugin_owns_its_configuration_validation(self) -> None:
-        from tests.plugin_support import create_runtime
-
+        """Check plugin owns its configuration validation."""
         plugins = ["optimization"]
         overrides = {"optimization": {"provider_priority": ["fireworks"]}}
-        with self.assertRaisesRegex(RuntimeError, "provider_priority"):
+        with self.rejected(RuntimeError, "provider_priority"):
             create_runtime(plugins=plugins, plugin_settings=overrides)
 
     def test_loader_requires_a_regular_non_symlink_file(self) -> None:
+        """Check loader requires a regular non symlink file."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with self.assertRaises(RuntimeError):
+            with self.rejected(RuntimeError):
                 configuration.load_config(root)
             target = root / "target.json"
             target.write_text("{}", encoding="utf-8")
@@ -210,7 +221,7 @@ class AppConfigurationTests(unittest.TestCase):
                 link.symlink_to(target)
             except (OSError, NotImplementedError):
                 self.skipTest("symlinks are unavailable")
-            with self.assertRaisesRegex(RuntimeError, "regular file"):
+            with self.rejected(RuntimeError, "regular file"):
                 configuration.load_config(link)
 
 

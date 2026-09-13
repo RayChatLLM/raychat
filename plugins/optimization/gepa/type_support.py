@@ -1,4 +1,3 @@
-# Copyright 2026
 """Expose override checking without adding a runtime dependency to GEPA."""
 
 from typing import TYPE_CHECKING, TypeVar

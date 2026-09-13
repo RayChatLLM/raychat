@@ -53,8 +53,25 @@ generations. `ServiceKey` currently accepts a concrete adapter class; its runtim
 check does not inspect method signatures or recursively validate field values.
 Mypy checks those when typed implementations construct the adapter.
 
-The `chat_completions`, `subagents`, and `optimization` plugins use this key.
-Provider option values now have type `object` and must be validated before use.
+Shared adapters now cover the bundled cross-plugin capabilities in
+`raychat.service_contracts`; `HTTP_PROVIDER` remains in the SDK:
+
+| Key | Checked capability |
+| --- | --- |
+| `CHAT` | Active `Chat` and its fresh-client factory, published together. |
+| `MEMORY` | Optional durable `MemoryStoreProtocol` and a concrete context limit. |
+| `PROCESS_RUNNER` | Cancellable, bounded process execution returning `CommandResult`, including exit, timeout, truncation and decoding evidence. |
+| `ATOMIC_WRITE` | Atomic byte replacement returning the exact byte count and digest. |
+| `DELEGATION` | Optional `DelegationExecution`: prepare a typed request, execute its `DelegatedJob`, and receive an `AgentResult`. |
+| `OPTIMIZATION` | Lazy loading within the captured generation; each component exposes a checked `OptimizationComponent` with typed entrypoint and binding callbacks. |
+
+These records keep service identity stable across plugin generations. Disabled
+memory and delegation are explicit `None` values that consumers must handle.
+Delegation consumers use planned jobs instead of reaching into another plugin's
+coordinator. `OptimizationBindings` supplies the typed provider, captured source
+accessor and protocol to a component before it runs.
+
+Provider option values have type `object` and must be validated before use.
 `ProviderService.parse_options` accepts JSON text; request option parsing rejects
 reserved fields, invalid keys, non-finite values, and oversized documents.
 `ProviderSpec` detaches and freezes nested options before sharing them.
@@ -64,15 +81,17 @@ source, options, and redaction secrets. Provider clients return this contract,
 so misspelled envelope fields and incorrect field types fail mypy. The worker
 factory validates required option names and concrete values before constructing
 its client. HTTP responses are decoded as unknown data and checked before any
-field is consumed. The provider package passes the unrestricted mypy and Ruff
-checks; legacy string services elsewhere still need concrete contracts.
+field is consumed. Registry storage and module discovery retain `object` because
+entries are heterogeneous; their checked adapters establish the specific
+capability before a consumer invokes it. An unknown stored value cannot be used
+as a provider, worker or service merely by annotating a variable.
 
 The HTTP client uses a `RequestOpener` Protocol: it accepts a concrete urllib
 `Request` and numeric timeout, and returns an unknown response for validation.
 Provider tests use a typed request recorder and bind static imports to the same
 captured implementation at runtime. Their registered factory fixture checks the
-returned class before exposing it. These tests and fixtures also pass the
-unrestricted checks; they contain no `Any` or unchecked implementation casts.
+returned class before exposing it. These fixtures contain no `Any` or unchecked
+implementation casts.
 Negative fixtures reject invalid transport arguments and use of an unchecked
 response as bytes.
 
@@ -96,6 +115,23 @@ code objects through the standard import machinery. Relative imports stay within
 the generation; source inspection honors Python encoding declarations. Exported
 snapshot settings are detached from the live generation.
 
+## Pushed status and composer state
+
+SDK 4 status uses immutable `StatusItem` values with concrete text, level and
+priority fields. Plugins call `ctx.set_status(key, item, scope=..., ttl_seconds=...)`
+to publish or replace a value, and pass `None` to remove it. Scope and level are
+literal types; optional expiry is numeric. `Runtime.status_items()` returns a
+tuple of `StatusRecord` values. It reads the current status store without
+refreshing source, invoking plugin callbacks or waiting for generation activation.
+The former `register_status` callback API has been removed.
+
+Queued prompts use `MessageQueue` and immutable `QueuedMessage` records. Editing
+preserves the separate composer draft; saving updates queued text while taking
+items remains FIFO. Command completion exposes immutable `CommandChoice` records
+and returns an explicit acceptance result. Typed fixtures reject wrong queue
+indices, edit controls, status payloads and completion choices; positive fixtures
+check the exact snapshot and optional queued-text types.
+
 ## Settings and external data
 
 Parse unknown input into a schema once. `MemorySettings.parse(value: object)`
@@ -115,10 +151,12 @@ return checked values with concrete types. Numeric overflow is reported as a
 `ConfigurationError` with the offending field path. The host configuration's
 cross-field comparisons now use these checked values.
 
-The narrow casts inside these shared validators establish checked container
-shapes. Every field remains unknown until validated. Do not
-replace that validation with `cast(MemorySettings, raw)` or a typed assignment
-from `json.loads`: neither checks runtime data.
+The narrow casts inside shared validators establish container shapes only after
+checking the container and its keys or elements. They do not prove an arbitrary
+nested document matches a domain schema. Every unvalidated field remains
+`object`; consumers must narrow it before indexing, arithmetic or method calls.
+Do not replace that validation with `cast(MemorySettings, raw)` or a typed
+assignment from `json.loads`: neither checks runtime data.
 
 Apply the same pattern to each plugin's settings, persisted state, tool input,
 and provider response. Use a dataclass for internal records or `TypedDict` for a
@@ -128,11 +166,18 @@ relationships.
 
 ## Events
 
-SDK 4 uses `EventKey[Payload, Result]` contracts for lifecycle hooks. Import the
-shared keys and immutable payload classes from `raychat.event_types`, then
-register a handler with `api.on(AFTER_TOOL, handler)`. An `AfterTool` handler reads
-`event.action` and `event.result`; it returns `None`. String hook names and the
-old dictionary event wrapper are no longer supported.
+SDK 4 uses `EventKey[Payload, Result]` contracts for every plugin lifecycle hook.
+The general bus's legacy string-handler and dictionary-wrapper compatibility
+path has been removed. Import the shared keys and immutable payload classes from
+`raychat.event_types`, then register with `api.on(AFTER_TOOL, handler)`.
+An `AfterTool` handler reads `event.action` and `event.result` and returns `None`.
+
+Hooks without additional fields use the empty frozen `Lifecycle` record:
+`CONFIGURE`, `SESSION_CLOSE`, `SESSION_START`, `SESSION_RESTORE`, `SESSION_RESET`
+and `TURN_ABORT`. `TURN_START` and `TURN_END` have their own concrete records.
+An unchecked caller cannot substitute the former dictionary payload. Handler
+registration preserves each key's invariant payload and result types, while the
+heterogeneous registry stores only an adapter that checks both sides of a call.
 
 `CONTEXT` handlers accept `Context` and return `Context | None`; `BEFORE_TOOL`
 handlers accept `BeforeTool` and return `Block | None`. The session separately
@@ -141,14 +186,18 @@ dispatch validates payloads and results, and key identity prevents a different
 contract from impersonating an existing event by reusing its name. Static
 consumer fixtures reject incompatible producer values and handler signatures.
 
-All bundled manifests now declare `"sdk": 4`. SDK v2 manifests are rejected
+All bundled manifests now declare `"sdk": 4`. Older SDK manifests are rejected
 before plugin code executes; there is no compatibility adapter for old handlers.
 Custom hooks can define an `EventKey` with a concrete payload class and result
 validator. Producers and handlers must import the same shared key declaration.
 
-UI notifications remain a separate callback channel: `ctx.notify(text)` displays
-a notice, and `ctx.emit("ui", payload)` requests a registered menu or session.
-For communication between plugins, expose a documented service through the SDK.
+UI notifications use a separate diagnostic callback channel with
+`Mapping[str, object]` payloads. `ctx.notify(text)` displays a notice, and
+`ctx.emit("ui", payload)` requests a registered menu or session. The UI validates
+fields before consuming them; arbitrary dictionary fields do not become typed
+application events. Worker event records preserve concrete job identifiers and
+checked payloads through cancellation and queue dispatch. For communication
+between plugins, expose a documented service through the SDK.
 
 ## Enforcement
 
@@ -165,48 +214,74 @@ python3 -m venv .venv
 .venv/bin/python -m ruff format --check .
 ```
 
-`tools/verify_quality.py` is the completion gate. It uses an isolated mypy
-configuration with every `Any` restriction and additional optional checks. Ruff
-runs with `ALL`, preview rules and `--ignore-noqa`, without the project's
-exceptions. The verifier also checks formatting, rejects mypy suppression
-directives, and records source hashes before and after checking. It passes every
-Python source explicitly to the tools; installed virtual environments,
-checker caches, generated release folders and application workspace data are
-listed separately. It does not use lint configuration or `.gitignore` to skip
-project sources. A changed source inventory makes the run
-fail. Full diagnostics and a JSON report default to `build/quality/`; pass another
-directory as the sole argument to keep a separate record.
+The project mypy configuration applies the maximum type policy to every module;
+there is no incremental list of specially protected plugins. `strict = true`
+enables untyped-call, untyped-definition, generic-`Any` and subclassing-`Any`
+checks. Global `disallow_any_expr`, `disallow_any_explicit`,
+`disallow_any_unimported` and `disallow_any_decorated` close the remaining `Any`
+escape routes. Together these enforce all six `Any` restrictions.
 
-CI runs these checks. `tools/check_types.py` also checks all source files, checks the
-same-name launcher separately, and verifies that deliberately invalid consumer
-fixtures produce the expected errors. Positive fixtures use `assert_type` to
-verify inference, so an accidental regression back to `Any` fails checking.
-UI boundary tests invoke malformed calls through unittest's callable assertion
-API; matching negative type fixtures prove the direct calls remain invalid.
-This retains runtime failure coverage without mypy suppression directives.
+The policy also enables unreachable-code and incomplete-stub warnings, strict
+`None` equality, and optional diagnostics for truthiness, unused awaitables,
+possibly undefined names, redundant expressions, explicit overrides, mutable
+overrides, deprecated APIs, redundant `self`, unimported `reveal_type`, exhaustive
+matches and unused or unspecified ignores. Do not add broad ignores, skip plugin
+imports or replace a checked contract with an annotation to make a check pass.
 
-Project mypy uses strict mode plus unimported/decorated-Any checks, unreachable
-code checks and additional optional error codes. The new service-key, context
-payload, shared validators and every plugin settings module reject explicit `Any` and
-expressions containing `Any`. Expand that per-module list as boundaries migrate;
-do not add broad ignores or skip plugin imports to make CI green.
+`tools/verify_quality.py` is the completion gate. It supplies an isolated maximum
+mypy configuration, then runs Ruff with `ALL`, preview rules and
+`--ignore-noqa`. `CPY001` is the only global exception: repository policy does
+not require per-file copyright headers. An explicit `S311` exception covers
+four deterministic optimization files listed below. The gate applies these
+exceptions directly and does not inherit other project lint exceptions.
 
-Ruff selects `ALL` with documented project exceptions in `pyproject.toml`,
-including formatter conflicts, documentation policy, unittest conventions, and
-existing API/complexity conventions. Function annotation rules remain enabled.
-Some legacy dynamic boundaries retain local `ANN401` exceptions with reasons.
+The verifier also checks formatting, rejects mypy suppression directives, and
+records source hashes before and after checking. It passes every Python source
+explicitly to the tools; installed virtual environments, checker caches,
+generated release folders and application workspace data are listed separately.
+It does not use lint configuration or `.gitignore` to skip project sources.
+A changed source inventory makes the run fail. Full diagnostics and a JSON
+report default to `build/quality/`; pass another directory as the sole argument
+to keep a separate record.
 
-For an intentionally stricter audit of the remaining work:
+CI runs these checks. `tools/check_types.py` checks all source files and the
+same-name launcher separately, then verifies **115 expected negative contract
+diagnostics**. The fixture check compares exact files, lines and error codes;
+a missing rejection or an unexpected extra error fails it. Positive fixtures use
+`assert_type` to verify inference, so a regression back to `Any` also fails.
+
+Runtime boundary tests deliberately call checked interfaces through an explicit
+`object` plus callable-validation seam. Matching negative fixtures prove the
+equivalent direct calls remain invalid statically. This preserves malformed-call
+coverage without mypy suppression directives. Runtime tests also exercise real
+worker processes, terminal restoration, dependency enforcement, hot replacement,
+cancellation identity and rollback; static checks cannot validate arbitrary
+values supplied by unchecked Python or external JSON.
+
+The four `S311` exceptions are confined to `plugins/optimization/gepa/`:
+`optimize_anything.py`, `batch_sampler.py`, `candidate_selector.py` and
+`merge.py`. Their `random.Random` calls preserve the original seeded search
+behavior for candidates, minibatches and merges. These draws are not used for
+credentials or security tokens. `S311` remains enabled everywhere else, and all
+other rules remain enabled in these files. See [the sampling contract](GEPA_PORT.md#reproducible-sampling)
+for reproducibility and checkpoint limits.
+
+To run the independent Ruff audit directly with the same explicit policy:
 
 ```bash
-.venv/bin/python -m mypy --strict --disallow-any-explicit --disallow-any-expr
-.venv/bin/python -m ruff check --isolated --preview --select ALL --target-version py310 .
+.venv/bin/python -m ruff check --isolated --preview --select ALL \
+  --ignore CPY001 --ignore-noqa --target-version py310 \
+  --per-file-ignores plugins/optimization/gepa/optimize_anything.py:S311 \
+  --per-file-ignores plugins/optimization/gepa/batch_sampler.py:S311 \
+  --per-file-ignores plugins/optimization/gepa/candidate_selector.py:S311 \
+  --per-file-ignores plugins/optimization/gepa/merge.py:S311 .
 ```
 
-These repository-wide audits are not clean yet. Passing configured strict mypy
-does not mean the entire repository is free of `Any`. Runtime tests must also
-exercise malformed external inputs, dependency enforcement, and replacement:
-static checking cannot validate arbitrary values supplied by unchecked Python.
+The verifier records these paths in `ruff_file_rule_exceptions` and explains
+why in `ruff_seeded_sampling_reason`. Removing the four file exceptions exposes
+the intentional `S311` findings; they are not unresolved typing errors.
+The independent maximum audit, formatting check and runtime acceptance remain
+separate gates; passing project lint alone does not establish that all pass.
 
 ## Additional useful tools
 
@@ -220,7 +295,8 @@ static checking cannot validate arbitrary values supplied by unchecked Python.
 
 These complement the strict completion gate and behavioral suite. Ruff
 automatically resolves two mutually exclusive docstring-style rule pairs when
-`ALL` is selected; the verifier adds no rule exceptions. See
+`ALL` is selected; the verifier records the global `CPY001` and four-file `S311`
+exceptions. See
 [Ruff's rule-selection documentation](https://docs.astral.sh/ruff/linter/).
 
 References: [mypy strict and Any flags](https://mypy.readthedocs.io/en/stable/command_line.html),

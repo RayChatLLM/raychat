@@ -1,12 +1,9 @@
-# Copyright 2026
 """Concrete records exchanged by evaluation, refinement and optimization state."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TypeAlias, TypedDict, TypeVar
-
-if TYPE_CHECKING:
-    from .optimize_anything import OptimizationState
+from dataclasses import dataclass
+from typing import Protocol, TypeAlias, TypedDict, TypeVar
 
 Candidate: TypeAlias = dict[str, str]
 SideInfo: TypeAlias = dict[str, object]
@@ -18,6 +15,17 @@ class BestExampleEval(TypedDict):
 
     score: float
     side_info: SideInfo
+
+
+@dataclass
+class OptimizationState:
+    """Best completed evaluations supplied explicitly to the current evaluator.
+
+    Results are ordered by descending score. The configured best-example limit
+    bounds the retained history independently for each dataset example.
+    """
+
+    best_example_evals: list[BestExampleEval]
 
 
 class _AttemptScore(TypedDict):

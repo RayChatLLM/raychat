@@ -1,4 +1,3 @@
-# Copyright 2026
 """Verify incremental terminal output against independently interpreted frames."""
 
 from __future__ import annotations
@@ -6,9 +5,9 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from raychat.ui.controller import compose_frame
-from raychat.ui.renderer import RayTracer, Surface
-from raychat.ui.state import TuiState
+from raychat.ui.controller import FrameComposition, compose_frame
+from raychat.ui.renderer import CellStyle, RayTracer, Surface
+from raychat.ui.state import Rect, TuiState
 from raychat.ui.terminal import LineEditor
 from tools.terminal_screen import TerminalScreen
 
@@ -33,12 +32,14 @@ class IncrementalRenderingTests(unittest.TestCase):
                 tracer,
                 TuiState(),
                 LineEditor(),
-                100,
-                30,
-                1.0,
-                model="probe",
-                workspace="probe",
-                show_system=False,
+                FrameComposition(
+                    width=100,
+                    height=30,
+                    moment=1.0,
+                    model="probe",
+                    workspace="probe",
+                    show_system=False,
+                ),
             )
         if "Start a conversation" not in frame.to_plain():
             self.fail("The normal chat view was not composed.")
@@ -54,7 +55,7 @@ class IncrementalRenderingTests(unittest.TestCase):
         previous = Surface(200, 60)
         previous.text(3, 4, "Static transcript")
         surface = previous.copy()
-        surface.set(4, 58, "x", bold=True)
+        surface.set(4, 58, "x", style=CellStyle(bold=True))
         update = surface.to_ansi(previous=previous)
         maximum_edit_bytes = 100
         if len(update.encode()) >= maximum_edit_bytes:
@@ -78,9 +79,18 @@ class IncrementalRenderingTests(unittest.TestCase):
                 x, y = (step * 7) % 20, (step * 3) % 8
                 color = ((step * 11) % 256, (step * 13) % 256, (step * 17) % 256)
                 glyph = ("界", "A", " ", "e\u0301")[step % 4]
-                surface.set(x, y, glyph, color, (11, 22, 33), bold=step % 3 == 0)
+                surface.set(
+                    x,
+                    y,
+                    glyph,
+                    style=CellStyle(
+                        foreground=color,
+                        background=(11, 22, 33),
+                        bold=step % 3 == 0,
+                    ),
+                )
                 if step % 5 == 0:
-                    surface.fill_rect(x - 1, y, 3, 1, color)
+                    surface.fill_rect(Rect(x - 1, y, 3, 1), color)
                 screen.feed(
                     surface.to_ansi(previous=previous, truecolor=truecolor).encode(),
                 )
@@ -107,13 +117,14 @@ class IncrementalRenderingTests(unittest.TestCase):
         self.check_equal(screen.text(), surface.to_plain())
 
     def test_console_wrap_scroll_and_application_no_wrap(self) -> None:
+        """Wrap console output and overwrite the last cell in application mode."""
         screen = TerminalScreen(6, 2)
         screen.feed(b"hello world!")
         self.check_equal(screen.text(), "hello \nworld!")
         screen.feed(b"more")
         self.check_equal(screen.text(), "world!\nmore  ")
         screen.feed(b"\x1b[?7l\x1b[Habcdefgh")
-        self.check_equal(screen.text().splitlines()[0], "abcdef")
+        self.check_equal(screen.text().splitlines()[0], "abcdeh")
         screen.feed(b"\x1b[?7h\x1b[Habcdefgh")
         self.check_equal(screen.text().splitlines()[1][:2], "gh")
 
@@ -121,10 +132,63 @@ class IncrementalRenderingTests(unittest.TestCase):
         """Update foreground, background and bold without requiring new text."""
         previous = Surface(10, 3)
         surface = previous.copy()
-        surface.set(3, 1, " ", (10, 20, 30), (40, 50, 60), bold=True)
+        surface.set(
+            3,
+            1,
+            " ",
+            style=CellStyle(
+                foreground=(10, 20, 30),
+                background=(40, 50, 60),
+                bold=True,
+            ),
+        )
         screen = TerminalScreen(10, 3)
         screen.feed(previous.to_ansi().encode())
         screen.feed(surface.to_ansi(previous=previous).encode())
         expected = TerminalScreen(10, 3)
         expected.feed(surface.to_ansi().encode())
         self.check_equal(screen.styles, expected.styles)
+
+    def test_initial_screen_wraps_startup_diagnostics(self) -> None:
+        """Preserve diagnostic text emitted before application terminal setup."""
+        screen = TerminalScreen(20, 4)
+        screen.feed(b"Startup compilation failed. Repair the plugin before retrying.")
+        self.check_equal(
+            screen.text(),
+            "Startup compilation \n"
+            "failed. Repair the p\n"
+            "lugin before retryin\n"
+            "g.                  ",
+        )
+
+    def test_autowrap_waits_for_printable_text_after_the_right_margin(self) -> None:
+        """Keep combining marks, SGR and CRLF from adding a spurious wrapped line."""
+        screen = TerminalScreen(5, 3)
+        screen.feed("abcde\u0301".encode())
+        self.check_equal(screen.row, 0)
+        self.check_equal(screen.cells[0][-1], "e\u0301")
+        screen.feed(b"\x1b[31m\r\nx")
+        self.check_equal(screen.text(), "abcde\u0301\nx    \n     ")
+        screen.feed(b"\x1b[1;5H!\x1b[32my")
+        self.check_equal(screen.text(), "abcd!\ny    \n     ")
+        self.check_equal(screen.styles[1][0], "32")
+
+    def test_private_wrap_modes_support_split_reads(self) -> None:
+        """Honor the application's no-wrap mode and ordinary mode restoration."""
+        screen = TerminalScreen(5, 3)
+        screen.feed(b"\x1b[?7")
+        screen.feed(b"labcdef")
+        self.check_equal(screen.text(), "abcdf\n     \n     ")
+        screen.feed(b"\x1b[?7hXY")
+        self.check_equal(screen.text(), "abcdX\nY    \n     ")
+
+    def test_wide_glyph_wrap_and_bottom_line_scroll(self) -> None:
+        """Preserve wide glyphs and scroll output below the viewport."""
+        screen = TerminalScreen(5, 2)
+        screen.feed("abcd界e\u0301".encode())
+        self.check_equal(
+            screen.cells,
+            [["a", "b", "c", "d", " "], ["界", "", "e\u0301", " ", " "]],
+        )
+        screen.feed(b"\r\n12345\r\nZ")
+        self.check_equal(screen.text(), "12345\nZ    ")

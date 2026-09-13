@@ -1,4 +1,3 @@
-# Copyright 2026
 """Verify captured imports, transport validation and generation cleanup."""
 
 from __future__ import annotations

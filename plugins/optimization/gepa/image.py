@@ -1,4 +1,3 @@
-# Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
 # https://github.com/gepa-ai/gepa
 
 """Image wrapper for passing visual data through side_info to reflection VLMs."""

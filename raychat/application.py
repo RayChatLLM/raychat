@@ -2,33 +2,59 @@
 
 from __future__ import annotations
 
-import argparse
-import json
-from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, NoReturn
 
 from raychat.configuration import SETTINGS
 
+from .composition import PluginSelection, create_runtime, package_manager
+from .packages import read_manifest
+from .plugin_arguments import add_plugin_arguments
 from .plugin_manager import atomic_json as _write_json
 from .plugin_manager import read_json as _read_json
 from .plugins import Runtime
 from .sdk import Action, CancelCheck, EventCallback, PluginError, SessionLifecycle
 from .session import AgentSession
+from .session_options import names, paths
 from .storage import SessionStore
+from .validation import (
+    boolean_field,
+    configuration_fields,
+    string_list_field,
+    text_field,
+)
+
+if TYPE_CHECKING:
+    import argparse
+    from collections.abc import Mapping
+
+__all__ = [
+    "SESSION_COMMANDS",
+    "add_arguments",
+    "add_plugin_arguments",
+    "build_runtime",
+    "command_names",
+    "dispatch_command",
+    "is_registered_tool",
+    "open_store",
+    "options_from_args",
+]
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare host plugin-selection and saved-session command-line options."""
+    empty_plugins: list[str] = []
     parser.add_argument(
         "--plugin",
         action="append",
-        default=[],
+        default=empty_plugins,
         help="Load a trusted SDK v4 plugin package",
     )
     parser.add_argument(
         "--disable-plugin",
         action="append",
-        default=[],
+        default=empty_plugins,
         help="Disable a plugin (dependencies must also be disabled)",
     )
     parser.add_argument(
@@ -60,141 +86,101 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_plugin_arguments(
-    parser: argparse.ArgumentParser,
-    environ: Mapping[str, str],
-    argv: Sequence[str] | None = None,
-) -> None:
-    """Read package metadata without executing registration during argument parsing."""
-    import argparse
+def options_from_args(
+    args: argparse.Namespace,
+    *,
+    interactive: bool,
+) -> dict[str, object]:
+    """Detach host launch options from a dynamic command-line namespace.
 
-    from .composition import package_manager
-    from .packages import read_manifest
-    from .validation import array_field, plain
+    Returns
+    -------
+    dict[str, object]
+        Host selection and persistence fields checked by their consumers.
 
-    probe = argparse.ArgumentParser(add_help=False)
-    probe.add_argument("--workspace", default=SETTINGS.chat.workspace)
-    probe.add_argument("--plugin", action="append", default=[])
-    probe.add_argument("--trust-workspace")
-    probe.add_argument("--no-plugins", action="store_true")
-    known, _ = probe.parse_known_args([] if argv is None else argv)
-    home = Path.home() / SETTINGS.storage.home_directory
-    trusted = _read_json(home / SETTINGS.storage.trust_filename, [])
-    manager = package_manager(
-        known.workspace,
-        trusted=known.trust_workspace == "grant"
-        or str(Path(known.workspace).resolve()) in trusted,
-        install_profile=not known.no_plugins,
-    )
-    paths = manager.paths(include_disabled=True)
-    for value in [*SETTINGS.plugins.paths, *known.plugin]:
-        path = Path(value).expanduser().resolve()
-        identifier = read_manifest(path).id
-        if identifier in paths and paths[identifier] != path:
-            raise PluginError("Ambiguous plugin ID: " + identifier)
-        paths[identifier] = path
-    groups: dict[tuple[str, str], argparse._MutuallyExclusiveGroup] = {}
-    for path in paths.values():
-        manifest = read_manifest(path, require_current_sdk=False)
-        settings = {
-            **manifest.defaults,
-            **plain(SETTINGS.plugins.settings.get(manifest.id, {})),
-        }
-        for item in manifest.cli:
-            default = (
-                settings[item["setting"]] if "setting" in item else item.get("default")
-            )
-            if item.get("invert"):
-                default = not default
-            if item.get("json"):
-                default = json.dumps(default)
-            if item.get("environment"):
-                default = environ.get(item["environment"]) or default
-            kwargs: dict[str, Any] = {"default": default}
-            for flag in item["flags"]:
-                if flag in parser._option_string_actions:
-                    raise PluginError(
-                        "Plugin CLI flag conflicts with another option: " + flag,
-                    )
-            action = item.get("action", "store")
-            if action != "store":
-                kwargs["action"] = action
-            if action != "store_true":
-                convert = {"str": str, "int": int, "float": float, "path": Path}[
-                    item.get("type", "str")
-                ]
-                kwargs["type"] = convert
-                if default is not None and not item.get("json"):
-                    try:
-                        kwargs["default"] = (
-                            [
-                                convert(v)
-                                for v in array_field(default, "CLI append default")
-                            ]
-                            if action == "append"
-                            else convert(default)
-                        )
-                    except (TypeError, ValueError):
-                        raise PluginError(
-                            "Invalid default for " + item["flags"][0],
-                        ) from None
-            if item.get("help"):
-                kwargs["help"] = item["help"]
-            target: argparse._ActionsContainer = parser
-            if item.get("group"):
-                key = (manifest.id, item["group"])
-                if key not in groups:
-                    groups[key] = parser.add_mutually_exclusive_group()
-                target = groups[key]
-            target.add_argument(*item["flags"], **kwargs)
-
-
-def options_from_args(args: argparse.Namespace, *, interactive: bool) -> dict[str, Any]:
+    """
+    raw: object = vars(args)
+    fields = configuration_fields(raw, "host launch options")
     return {
-        "paths": getattr(args, "plugin", []),
-        "disabled": getattr(args, "disable_plugin", []),
-        "no_plugins": getattr(args, "no_plugins", False),
-        "trust": getattr(args, "trust_workspace", None),
-        "resume": getattr(args, "resume", None),
-        "persist": interactive and not getattr(args, "no_session", False),
-        "no_session": getattr(args, "no_session", False),
-        "directory": getattr(args, "session_dir", None),
+        "paths": fields.get("plugin", ()),
+        "disabled": fields.get("disable_plugin", ()),
+        "no_plugins": fields.get("no_plugins", False),
+        "trust": fields.get("trust_workspace"),
+        "resume": fields.get("resume"),
+        "persist": interactive and not fields.get("no_session", False),
+        "no_session": fields.get("no_session", False),
+        "directory": fields.get("session_dir"),
     }
+
+
+@dataclass(frozen=True, kw_only=True)
+class _RuntimeOptions:
+    paths: tuple[str | Path, ...]
+    disabled: tuple[str, ...]
+    no_plugins: bool
+    trust: str | None
+
+
+def _runtime_options(options: Mapping[str, object]) -> _RuntimeOptions:
+    return _RuntimeOptions(
+        paths=paths(options.get("paths", ())) or (),
+        disabled=names(options.get("disabled", ()), "disabled"),
+        no_plugins=boolean_field(options.get("no_plugins", False), "no_plugins"),
+        trust=text_field(options.get("trust"), "trust", nullable=True),
+    )
+
+
+def _workspace_trust(workspace: str | Path, choice: str | None) -> bool:
+    home = Path.home() / SETTINGS.storage.home_directory
+    trust_path = home / SETTINGS.storage.trust_filename
+    trusted = string_list_field(
+        _read_json(trust_path, []),
+        "trusted workspaces",
+        allow_empty=True,
+    )
+    identity = str(Path(workspace).resolve())
+    if choice:
+        trusted = [path for path in trusted if path != identity]
+        if choice == "grant":
+            trusted.append(identity)
+        _write_json(trust_path, sorted(trusted))
+    return identity in trusted
 
 
 def build_runtime(
     workspace: str | Path,
-    options: Mapping[str, Any],
-    resources: Mapping[str, Any],
+    options: Mapping[str, object],
+    resources: Mapping[str, object],
 ) -> Runtime:
-    from .composition import create_runtime, package_manager
+    """Load selected packages after applying explicit workspace trust choices.
 
-    home = Path.home() / SETTINGS.storage.home_directory
-    trust_path = home / SETTINGS.storage.trust_filename
-    trusted = _read_json(trust_path, [])
-    if not isinstance(trusted, list) or not all(isinstance(v, str) for v in trusted):
-        error_message = "Workspace trust configuration must be a list of paths."
-        raise ValueError(error_message)
-    identity = str(Path(workspace).resolve())
-    if options.get("trust"):
-        trusted = [p for p in trusted if p != identity]
-        if options["trust"] == "grant":
-            trusted.append(identity)
-        _write_json(trust_path, sorted(trusted))
+    Returns
+    -------
+    Runtime
+        A configured registry watching the trusted plugin directories.
+
+    Raises
+    ------
+    PluginError
+        When two selected packages declare the same identity.
+    ValueError
+        When a disabled package is unknown.
+
+    """
+    selected_options = _runtime_options(options)
+    trusted_workspace = _workspace_trust(workspace, selected_options.trust)
     manager = package_manager(
         workspace,
-        trusted=identity in trusted,
-        install_profile=not options.get("no_plugins"),
+        trusted=trusted_workspace,
+        install_profile=not selected_options.no_plugins,
     )
-    requested_disabled = set(options.get("disabled", [])) | set(
+    requested_disabled = set(selected_options.disabled) | set(
         SETTINGS.plugins.disabled,
     )
     available = manager.paths(include_disabled=True)
     explicitly_enabled = set()
-    for value in [*SETTINGS.plugins.paths, *options.get("paths", [])]:
+    for value in [*SETTINGS.plugins.paths, *selected_options.paths]:
         path = Path(value).expanduser().resolve()
-        from .packages import read_manifest
-
         name = read_manifest(path).id
         if name in available and path != available[name]:
             raise PluginError("Ambiguous plugin ID: " + name)
@@ -208,44 +194,67 @@ def build_runtime(
     disabled = requested_disabled | (manager.disabled - explicitly_enabled)
     selected = (
         []
-        if options.get("no_plugins")
+        if selected_options.no_plugins
         else [p for n, p in available.items() if n not in disabled]
     )
+    remaining = dict(resources)
+    raw_source = remaining.pop("source", None)
+    source = None if raw_source is None else configuration_fields(raw_source, "source")
     runtime = create_runtime(
         workspace,
+        source=source,
         plugins=selected,
-        disabled=disabled,
-        enabled=explicitly_enabled,
+        selection=PluginSelection(disabled=disabled, enabled=explicitly_enabled),
         manager=manager,
-        **resources,
+        **remaining,
     )
-    directories = (
-        [manager.roots["workspace"] / "plugins"] if identity in trusted else []
-    )
+    directories = [manager.roots["workspace"] / "plugins"] if trusted_workspace else []
     runtime.watch(
         directories,
-        enabled=SETTINGS.plugins.auto_reload and not options.get("no_plugins"),
+        enabled=SETTINGS.plugins.auto_reload and not selected_options.no_plugins,
     )
     return runtime
 
 
 def open_store(
     workspace: str | Path,
-    options: Mapping[str, Any],
+    options: Mapping[str, object],
 ) -> SessionStore | None:
-    resume = options.get("resume")
+    """Open persistent history when selected by launch options.
+
+    Returns
+    -------
+    SessionStore | None
+        The selected journal, or None for an in-memory session.
+
+    Raises
+    ------
+    ValueError
+        When resume and disabled persistence are requested together.
+
+    """
+    resume = text_field(options.get("resume"), "resume", nullable=True)
     if options.get("no_session") and resume is not None:
         error_message = "--no-session cannot be combined with resume options."
         raise ValueError(error_message)
     if options.get("persist") or resume:
-        return SessionStore(workspace, options.get("directory"), resume)
+        directory = options.get("directory")
+        if directory is not None and not isinstance(directory, (str, Path)):
+            _invalid("Session directory must be a path.")
+        return SessionStore(workspace, directory, resume)
     return None
 
 
 def is_registered_tool(session: SessionLifecycle, action: Action) -> bool:
-    from .plugins import Runtime
+    """Check whether an action is registered on a session's concrete host.
 
-    runtime = getattr(session, "runtime", None)
+    Returns
+    -------
+    bool
+        Whether the active host exposes the action name.
+
+    """
+    runtime: object = getattr(session, "runtime", None)
     return isinstance(runtime, Runtime) and action.get("action") in runtime.tools
 
 
@@ -258,6 +267,14 @@ SESSION_COMMANDS = {
 
 
 def command_names(runtime: Runtime | None = None) -> set[str]:
+    """Collect host and active-plugin commands.
+
+    Returns
+    -------
+    set[str]
+        Names accepted by the command dispatcher.
+
+    """
     return set(SESSION_COMMANDS) | (set(runtime.commands) if runtime else set())
 
 
@@ -269,11 +286,25 @@ def dispatch_command(
     notify: EventCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ) -> str:
+    """Dispatch a plugin command or an idle saved-session operation.
+
+    Returns
+    -------
+    str
+        Human-readable command results.
+
+    Raises
+    ------
+    RuntimeError
+        When saved-session navigation is requested during an active turn.
+    ValueError
+        When the command or its required host is unavailable.
+
+    """
     name, _, argument = text.lstrip("/").partition(" ")
-    runtime = getattr(session, "runtime", None)
+    runtime: object = getattr(session, "runtime", None)
     if not isinstance(runtime, Runtime):
-        error_message = "Commands require a plugin runtime."
-        raise ValueError(error_message)
+        _invalid("Commands require a plugin runtime.")
     if not running:
         runtime.refresh(notify=notify)
     if name in runtime.commands:
@@ -293,55 +324,72 @@ def dispatch_command(
         error_message = f"/{name} requires an idle session."
         raise RuntimeError(error_message)
     if not isinstance(session, AgentSession):
-        error_message = "Saved-session commands require a local chat session."
-        raise ValueError(error_message)
+        _invalid("Saved-session commands require a local chat session.")
+    return _session_command(session, name, argument, notify)
+
+
+def _invalid(message: str) -> NoReturn:
+    raise ValueError(message)
+
+
+def _resume(session: AgentSession, argument: str, notify: EventCallback | None) -> str:
+    store = session.store
+    directory = store.directory if isinstance(store, SessionStore) else None
+    replacement = SessionStore(session.root, directory, argument.strip())
+    try:
+        session.store = replacement
+        session.restore()
+    except BaseException:
+        session.store = store
+        replacement.close()
+        raise
+    if store is not None:
+        store.close()
+    if notify is not None:
+        notify("session_restored", replacement.snapshot())
+    return "Resumed " + replacement.session_id
+
+
+def _fork(
+    session: AgentSession,
+    store: SessionStore,
+    argument: str,
+    notify: EventCallback | None,
+) -> str:
+    target = argument.strip()
+    proposed = store.snapshot(at=target)
+    previous_snapshot = session.export_snapshot()
+    # Validate restore hooks before changing the durable branch selection.
+    session.restore_snapshot(proposed)
+    try:
+        store.fork(target)
+    except BaseException:
+        session.restore_snapshot(previous_snapshot)
+        raise
+    if notify is not None:
+        notify("session_restored", store.snapshot())
+    return "Forked at " + target
+
+
+def _session_command(
+    session: AgentSession,
+    name: str,
+    argument: str,
+    notify: EventCallback | None,
+) -> str:
     store = session.store
     if store is not None and not isinstance(store, SessionStore):
-        error_message = (
-            "Saved-session navigation is unavailable for this storage backend."
-        )
-        raise ValueError(
-            error_message,
-        )
-    directory = store.directory if store else None
+        _invalid("Saved-session navigation is unavailable for this storage backend.")
+    directory = store.directory if store is not None else None
     if name == "sessions":
         return (
             "\n".join(SessionStore.list_sessions(session.root, directory))
             or "No saved sessions."
         )
     if name == "resume":
-        replacement = SessionStore(session.root, directory, argument.strip())
-        previous = session.store
-        try:
-            session.store = replacement
-            session.restore()
-        except BaseException:
-            session.store = previous
-            replacement.close()
-            raise
-        if previous:
-            previous.close()
-        if notify:
-            notify("session_restored", replacement.snapshot())
-        return "Resumed " + replacement.session_id
+        return _resume(session, argument, notify)
     if store is None:
-        error_message = "Session persistence is disabled."
-        raise ValueError(error_message)
+        _invalid("Session persistence is disabled.")
     if name == "tree":
         return store.tree()
-    if name == "fork":
-        target = argument.strip()
-        proposed = store.snapshot(at=target)
-        previous_snapshot = session.export_snapshot()
-        # Restore hooks can reject a historical state. Validate that state
-        # before changing the durable branch selection.
-        session.restore_snapshot(proposed)
-        try:
-            store.fork(target)
-        except BaseException:
-            session.restore_snapshot(previous_snapshot)
-            raise
-        if notify:
-            notify("session_restored", store.snapshot())
-        return "Forked at " + target
-    raise ValueError("Unknown command: /" + name)
+    return _fork(session, store, argument, notify)

@@ -1,0 +1,40 @@
+"""Reject invalid memory inputs, worker tasks and session callbacks statically."""
+
+from plugins.memory.store import MemoryStore
+from raychat.session import AgentSession
+from raychat.workers import AgentWorker, WorkerEvent, WorkerExecution
+
+
+def invalid_memory_inputs(store: MemoryStore) -> None:
+    store.add(None)  # expect-error: arg-type
+    store.add(1)  # expect-error: arg-type
+    store.page(1)  # expect-error: arg-type
+    store.remove(None)  # expect-error: arg-type
+    store.remove(1.0)  # expect-error: arg-type
+
+
+def unchecked_worker_payload(event: WorkerEvent) -> object:
+    return event.payload["job_id"] + 1  # expect-error: operator
+
+
+def invalid_worker_factory() -> None:
+    WorkerExecution(factory=lambda: object())  # expect-error: arg-type, return-value
+
+
+def invalid_worker_task() -> None:
+    WorkerExecution(task=lambda task, cancel, emit: 1)  # expect-error: arg-type, return-value
+
+
+def invalid_approval(worker: AgentWorker) -> None:
+    worker.respond_approval(1, approved="yes")  # expect-error: arg-type
+
+
+def invalid_send_callbacks(session: AgentSession) -> None:
+    session.send("task", event_callback=7)  # expect-error: arg-type
+    session.send("task", approval_callback=7)  # expect-error: arg-type
+    session.send("task", cancel_check=7)  # expect-error: arg-type
+    session.send("task", approval_callback=lambda action: "NO")  # expect-error: arg-type, return-value
+
+
+def invalid_chat() -> None:
+    AgentSession(None)  # expect-error: arg-type

@@ -24,6 +24,12 @@ Stop conditions and optimizer logging remain active. The remaining
 implementation lives inside the optimization package. There is no global import
 guard or separate top-level GEPA runtime.
 
+Implementation modules use a flat layout with sibling relative imports, keeping
+each captured generation independent. Evaluators have a declared generic example
+type and accept explicit `example` and `opt_state` arguments. Saved state uses
+versioned, validated JSON data with caller-supplied output decoders; executable
+pickle checkpoints and legacy checkpoint migration are no longer supported.
+
 `/optimize verify` reports these distinct checks:
 
 | Report field | Meaning |
@@ -40,13 +46,53 @@ The current hash is calculated from the active engine and license bytes on each
 verification run. The aggregate hashes include relative paths, NUL separators,
 and file contents.
 
-The four prompt templates and the 2,029-byte transcript oracle remain unchanged.
-The expected transcript SHA-256 is
+The four prompt templates are checked against their retained upstream bytes.
+The retained transcript oracle expects 2,029 bytes and SHA-256
 `adc7258f502b2c9a5d52c8d15220f31948414639c8160bf544675f8660ae3c29`.
-The oracle uses a canned reflection response and canonical JSON to check one
+It uses a canned reflection response and canonical JSON to check one
 proposal/selection trajectory, evaluator order, score accounting, lineage, and
-result serialization. Preserving that trajectory and the templates does not
-establish equivalence for every possible optimizer input.
+result serialization. Verification continues to enforce that exact fixture.
+This single case does not establish equivalence for other optimizer inputs or
+for the general sampling sequence.
+
+## Reproducible sampling
+
+The active engine uses the standard library's `random.Random` for candidate,
+minibatch and merge selection. The original seeded sampling behavior is
+restored; there is no custom hash-based sampler. Each optimization run creates
+an explicit generator from its configured integer seed and passes it through
+its search strategies. Helpers that construct their own default generator use
+seed zero, without changing Python's global generator state.
+
+Reproducing a search requires the same seed, ordered inputs, call sequence,
+Python sampling implementation and evaluator/proposer responses. Changing any of
+these can change the trajectory. A saved engine state records search history;
+resuming initializes fresh strategy and sampling state. It is not an exact
+continuation of an uninterrupted random stream, and the checkpoint format does
+not promise that behavior.
+
+Ruff's `S311` rule warns about generators unsuitable for security-sensitive
+randomness. These calls select search candidates and evaluation batches; they
+do not create credentials or security tokens. The project and independent
+quality gate therefore permit `S311` only in these four files under
+`plugins/optimization/gepa/`:
+
+- `optimize_anything.py`
+- `batch_sampler.py`
+- `candidate_selector.py`
+- `merge.py`
+
+All other Ruff rules remain active in those files. The exception preserves the
+original standard-library algorithm and is recorded explicitly in quality
+reports; it does not weaken any mypy check. See [the type and lint policy](TYPING.md#enforcement).
+
+Historical verification reports retain their original source hashes, seed values,
+transcripts and measured scores. They remain evidence for their recorded version.
+A passing canned transcript oracle establishes only that specific trajectory;
+it does not establish identical results for every optimizer input or hosted run.
+Current acceptance separately checks repeatable seeded search and checkpoint
+reuse, rejection of NaN proposals, offline improvement, held-out outcomes and
+sequential/parallel equivalence.
 
 ## Standard-library execution
 

@@ -1,28 +1,111 @@
 """The single CLI composes plugins for both interactive and explicit jobs."""
 
+from __future__ import annotations
+
+import asyncio
 import io
 import json
-import subprocess
 import sys
 import tempfile
-import unittest
-from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat import composition, entrypoint
+from raychat.plugins import Runtime
 from raychat.resources import AgentResources, create_resources
-from raychat.sdk import Chat, Messages
+from raychat.service_contracts import DELEGATION
+from raychat.session import AgentSession
 from raychat.storage import SessionStore
 from raychat.type_support import override
-from tests.plugin_support import ScriptedChat, distribution_ids, package, plugin_module
+from raychat.ui.terminal import InteractiveTerminal, TerminalSession
+from raychat.validation import array_field, json_object, object_field
+from tests.assertions import TypedTestCase
+from tests.plugin_support import (
+    ScriptedChat,
+    distribution_ids,
+    package,
+    require_agent_sessions,
+)
+from tests.transport_support import captured
 from tests.tui_support import provider_fixture
 
-chat_completions = plugin_module("chat_completions")
+if TYPE_CHECKING:
+    from argparse import Namespace
+    from collections.abc import Awaitable, Iterable, Sequence
+
+    from raychat.sdk import Chat, Messages
+    from raychat.ui.picker import Choice
 
 
-class EntrypointTests(unittest.TestCase):
+@dataclass(frozen=True)
+class _LaunchResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+async def _launch(arguments: list[str], cwd: Path) -> _LaunchResult:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        *arguments,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        completion: Awaitable[tuple[bytes, bytes]] = process.communicate()
+        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(completion, 5)
+        stdout, stderr = await bounded
+        status = process.returncode
+        if status is None:
+            message = "The isolated configuration probe was not reaped."
+            raise AssertionError(message)
+        return _LaunchResult(status, stdout.decode(), stderr.decode())
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await asyncio.wait_for(process.wait(), 5)
+
+
+def _json_dump(value: object) -> str:
+    return json.dumps(value)
+
+
+class _FailingRuntime(Runtime):
+    close_calls = 0
+
+    @override
+    def close(self) -> None:
+        self.close_calls += 1
+        message = "plugin close failed"
+        raise RuntimeError(message)
+
+
+class _ObservedStore(SessionStore):
+    closes = 0
+
+    @override
+    def close(self) -> None:
+        self.closes += 1
+        super().close()
+
+
+class _ObservedLog(io.StringIO):
+    closes = 0
+
+    @override
+    def close(self) -> None:
+        self.closes += 1
+        super().close()
+
+
+class _EntrypointFixture(TypedTestCase):
+    """Check Entrypoint behavior and failure boundaries."""
+
     @override
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -48,17 +131,18 @@ class EntrypointTests(unittest.TestCase):
         chat: Chat | None = None,
         tty: bool = False,
     ) -> int:
+        terminal = TerminalSession(io.StringIO(), io.StringIO())
+        terminal.is_tty = tty
         with (
             redirect_stdout(self.out),
             redirect_stderr(self.err),
-            mock.patch("raychat.ui.terminal.TerminalSession") as terminal,
+            mock.patch("raychat.ui.terminal.TerminalSession", return_value=terminal),
+            provider_fixture(chat or ScriptedChat[str]([])),
         ):
-            terminal.return_value.is_tty = tty
-            with provider_fixture(chat or ScriptedChat[str]([])):
-                return entrypoint.main(
-                    self.flags + list(flags),
-                    {"TERM": "xterm-256color"},
-                )
+            return entrypoint.main(
+                self.flags + list(flags),
+                {"TERM": "xterm-256color"},
+            )
 
     def saved(
         self,
@@ -67,7 +151,7 @@ class EntrypointTests(unittest.TestCase):
     ) -> str:
         store = SessionStore(self.root, self.directory)
         session = composition.create_session(
-            ScriptedChat([json.dumps({"action": "done", "message": answer})]),
+            ScriptedChat([_json_dump({"action": "done", "message": answer})]),
             self.root,
             store=store,
         )
@@ -76,70 +160,80 @@ class EntrypointTests(unittest.TestCase):
         session.close()
         return identifier
 
+
+class EntrypointTests(_EntrypointFixture):
+    """Check explicit jobs, startup validation and cleanup reporting."""
+
     def test_exec_returns_only_sanitized_final_response(self) -> None:
+        """Check exec returns only sanitized final response."""
         chat = ScriptedChat(
             [
                 '{"action":"list","path":"."}',
-                json.dumps({"action": "done", "message": "first\nsecond\x1b\u202e"}),
+                _json_dump({"action": "done", "message": "first\nsecond\x1b\u202e"}),
             ],
         )
         with mock.patch(
             "builtins.input",
             side_effect=AssertionError("No stdin prompts"),
         ):
-            self.assertEqual(self.main(["--exec", "inspect"], chat=chat), 0)
-        self.assertEqual(self.out.getvalue(), "first\nsecond\n")
-        self.assertEqual(self.err.getvalue(), "")
+            self.equal(self.main(["--exec", "inspect"], chat=chat), 0)
+        self.equal(self.out.getvalue(), "first\nsecond\n")
+        self.equal(self.err.getvalue(), "")
 
     def test_exec_denies_mutation_without_yes(self) -> None:
+        """Check exec denies mutation without yes."""
         chat = ScriptedChat(
             [
                 '{"action":"write","path":"denied","content":"no"}',
                 '{"action":"done","message":"denied"}',
             ],
         )
-        self.assertEqual(self.main(["--exec", "write"], chat=chat), 0)
-        self.assertFalse((self.root / "denied").exists())
-        self.assertIn("denied", chat.calls[1][-1]["content"].lower())
+        self.equal(self.main(["--exec", "write"], chat=chat), 0)
+        self.require(not ((self.root / "denied").exists()))
+        self.require(("denied") in (chat.calls[1][-1]["content"].lower()))
 
     def test_exec_yes_uses_registered_filesystem(self) -> None:
+        """Check exec yes uses registered filesystem."""
         chat = ScriptedChat(
             [
                 '{"action":"write","path":"allowed","content":"yes"}',
                 '{"action":"done","message":"saved"}',
             ],
         )
-        self.assertEqual(self.main(["--exec", "write", "--yes"], chat=chat), 0)
-        self.assertEqual((self.root / "allowed").read_text(), "yes")
+        self.equal(self.main(["--exec", "write", "--yes"], chat=chat), 0)
+        self.equal((self.root / "allowed").read_text(), "yes")
 
     def test_plugin_command_works_without_credentials(self) -> None:
-        self.assertEqual(self.main(["--exec", "/plugins"]), 0)
+        """Check plugin command works without credentials."""
+        self.equal(self.main(["--exec", "/plugins"]), 0)
         for name in distribution_ids():
-            self.assertIn(name, self.out.getvalue())
+            self.require((name) in (self.out.getvalue()))
 
     def test_disabled_plugins_are_not_recreated_by_resources(self) -> None:
-        self.assertEqual(
-            self.main(["--exec", "/plugins", "--disable-plugin", "memory"]),
-            0,
-        )
-        self.assertNotIn("memory (API", self.out.getvalue())
+        """Check disabled plugins are not recreated by resources."""
+        self.equal(self.main(["--exec", "/plugins", "--disable-plugin", "memory"]), 0)
+        self.require(("memory (API") not in (self.out.getvalue()))
 
     def test_failure_is_stderr_and_nonzero(self) -> None:
-        def failed(messages: Messages) -> str:
+        """Check failure is stderr and nonzero."""
+
+        def failed(_messages: Messages) -> str:
             error_message = "provider failed"
             raise ValueError(error_message)
 
-        self.assertEqual(self.main(["--exec", "try"], chat=failed), 1)
-        self.assertEqual(self.out.getvalue(), "")
-        self.assertIn("provider failed", self.err.getvalue())
+        self.equal(self.main(["--exec", "try"], chat=failed), 1)
+        self.equal(self.out.getvalue(), "")
+        self.require(("provider failed") in (self.err.getvalue()))
 
     def test_interactive_requires_terminal_and_legacy_cli_is_rejected(self) -> None:
+        """Check interactive requires terminal and legacy cli is rejected."""
         for flags in ([], ["positional task"], ["--plain"], ["--exit-on-done"]):
-            with self.subTest(flags=flags), self.assertRaises(SystemExit) as exc:
-                self.main(flags)
-            self.assertEqual(exc.exception.code, 2)
+            with self.subTest(flags=flags):
+                error = captured(SystemExit, partial(self.main, flags))
+            self.equal(error.code, 2)
 
     def test_invalid_options_fail_before_resources(self) -> None:
+        """Check invalid options fail before resources."""
         for flags in (
             ["--fps", "nan"],
             ["--timeout", "inf"],
@@ -153,180 +247,244 @@ class EntrypointTests(unittest.TestCase):
             with (
                 self.subTest(flags=flags),
                 mock.patch.object(entrypoint, "create_resources") as create,
-                self.assertRaises(SystemExit),
+                self.rejected(SystemExit),
             ):
                 self.main(flags)
             create.assert_not_called()
 
     def test_custom_http_endpoint_requires_an_explicit_model(self) -> None:
+        """Check custom http endpoint requires an explicit model."""
         result = entrypoint.main(
             [*self.flags, "--url", "https://example.invalid/chat", "--exec", "test"],
             {},
         )
-        self.assertEqual(result, 1)
+        self.equal(result, 1)
+
+
+class ResumeTests(_EntrypointFixture):
+    """Check saved-session selection and durable resource ownership."""
 
     def test_resume_one_opens_directly_and_preserves_history(self) -> None:
+        """Check resume one opens directly and preserves history."""
         identifier = self.saved()
         chat = ScriptedChat(['{"action":"done","message":"follow-up"}'])
         with mock.patch("raychat.ui.picker.choose") as picker:
-            self.assertEqual(
-                self.main(["--resume", "--exec", "continue"], chat=chat),
-                0,
-            )
+            self.equal(self.main(["--resume", "--exec", "continue"], chat=chat), 0)
         picker.assert_not_called()
-        self.assertIn("previous prompt", [m["content"] for m in chat.calls[0]])
+        self.require(("previous prompt") in ([m["content"] for m in chat.calls[0]]))
         with_history = SessionStore(self.root, self.directory, identifier)
         self.addCleanup(with_history.close)
-        self.assertEqual(len(with_history.snapshot()["history"]), 4)
+        self.equal(len(array_field(with_history.snapshot()["history"], "history")), 4)
 
     def test_resume_multiple_opens_menu_and_uses_selected_session(self) -> None:
+        """Check resume multiple opens menu and uses selected session."""
         first = self.saved("alpha prompt")
         second = self.saved("beta prompt")
+        choices: list[Choice] = []
+        picker_options: list[tuple[bool, bool]] = []
+
+        def choose(
+            _terminal: InteractiveTerminal,
+            _title: str,
+            offered: Iterable[Choice],
+            *,
+            ascii_only: bool = True,
+            truecolor: bool = True,
+        ) -> str:
+            choices.extend(offered)
+            picker_options.append((ascii_only, truecolor))
+            return first
+
+        def run(
+            _args: Namespace,
+            resources: AgentResources,
+            _terminal: InteractiveTerminal,
+        ) -> int:
+            store = resources.store
+            if store is None:
+                self.fail("A resumed session must retain its store.")
+            self.equal(store.session_id, first)
+            history = array_field(store.snapshot()["history"], "history")
+            self.equal(object_field(history[0], "message")["content"], "alpha prompt")
+            return 0
+
         with (
-            mock.patch("raychat.ui.picker.choose", return_value=first) as picker,
-            mock.patch("raychat.ui.controller.run_tui", return_value=0) as run,
+            mock.patch("raychat.ui.picker.choose", side_effect=choose),
+            mock.patch("raychat.ui.controller.run_tui", side_effect=run),
         ):
-            self.assertEqual(self.main(["--resume"], tty=True), 0)
-            resources = run.call_args.args[1]
-            self.assertEqual(resources.store.session_id, first)
-            self.assertEqual(
-                resources.store.snapshot()["history"][0]["content"],
-                "alpha prompt",
-            )
-        choices = picker.call_args.args[2]
-        self.assertEqual({c.id for c in choices}, {first, second})
-        self.assertTrue(any("alpha prompt" in c.label for c in choices))
+            self.equal(self.main(["--resume"], tty=True), 0)
+        self.equal(len(picker_options), 1)
+        self.equal({choice.id for choice in choices}, {first, second})
+        self.require(any("alpha prompt" in choice.label for choice in choices))
 
     def test_resume_menu_escape_does_not_open_resources(self) -> None:
+        """Check resume menu escape does not open resources."""
         self.saved("one")
         self.saved("two")
         with (
             mock.patch("raychat.ui.picker.choose", return_value=None),
             mock.patch.object(entrypoint, "create_resources") as create,
         ):
-            self.assertEqual(self.main(["--resume"], tty=True), 0)
+            self.equal(self.main(["--resume"], tty=True), 0)
         create.assert_not_called()
 
     def test_resume_many_with_exec_requires_an_id(self) -> None:
+        """Check resume many with exec requires an id."""
         first = self.saved("one")
         self.saved("two")
-        self.assertEqual(self.main(["--resume", "--exec", "/plugins"]), 1)
-        self.assertIn("--resume SESSION_ID", self.err.getvalue())
-        self.assertEqual(self.main(["--resume", first, "--exec", "/plugins"]), 0)
+        self.equal(self.main(["--resume", "--exec", "/plugins"]), 1)
+        self.require(("--resume SESSION_ID") in (self.err.getvalue()))
+        self.equal(self.main(["--resume", first, "--exec", "/plugins"]), 0)
 
     def test_resume_without_sessions_is_actionable(self) -> None:
-        self.assertEqual(self.main(["--resume", "--exec", "/plugins"]), 1)
-        self.assertIn("No saved sessions", self.err.getvalue())
+        """Check resume without sessions is actionable."""
+        self.equal(self.main(["--resume", "--exec", "/plugins"]), 1)
+        self.require(("No saved sessions") in (self.err.getvalue()))
 
     def test_resume_without_persistence_fails_before_showing_menu(self) -> None:
+        """Check resume without persistence fails before showing menu."""
         with (
             mock.patch("raychat.ui.picker.choose") as picker,
-            self.assertRaises(SystemExit),
+            self.rejected(SystemExit),
         ):
             self.main(["--resume", "--no-session"], tty=True)
         picker.assert_not_called()
 
     def test_config_is_loaded_before_plugins_in_isolated_launch(self) -> None:
+        """Check config is loaded before plugins in isolated launch."""
         source = Path(entrypoint.__file__).resolve().parents[1]
-        config = json.loads((source / "raychat.json").read_text())
-        config["plugins"]["profile"] = str(source / "plugin_catalog/profile.json")
-        config["storage"]["home_directory"] = str(self.root / "configured-home")
-        config["plugins"]["disabled"] = list(distribution_ids())
-        config["tui"]["picker"]["max_rows"] = 7
+        config = object_field(
+            json_object((source / "raychat.json").read_text()),
+            "configuration",
+        )
+        object_field(config["plugins"], "plugins")["profile"] = str(
+            source / "plugin_catalog/profile.json",
+        )
+        object_field(config["storage"], "storage")["home_directory"] = str(
+            self.root / "configured-home",
+        )
+        object_field(config["plugins"], "plugins")["disabled"] = list(
+            distribution_ids(),
+        )
+        object_field(object_field(config["tui"], "tui")["picker"], "picker")[
+            "max_rows"
+        ] = 7
         path = self.root / "custom.json"
-        path.write_text(json.dumps(config))
+        path.write_text(_json_dump(config))
         plugin = self.root / "config_probe"
         package(
             plugin,
-            "from raychat.configuration import SETTINGS\nfrom raychat.sdk import CommandDefinition\ndef register(api):\n    api.register_command(CommandDefinition('config-status', lambda args,ctx: str(SETTINGS.tui.picker.max_rows)))\n",
+            "from raychat.configuration import SETTINGS\n"
+            "from raychat.sdk import CommandDefinition\n"
+            "def register(api):\n"
+            "    api.register_command(CommandDefinition(\n"
+            "        'config-status', \n"
+            "        lambda args,ctx: str(SETTINGS.tui.picker.max_rows)))\n",
         )
-        result = subprocess.run(  # noqa: S603 - argument arrays only; caller controls execution and checks the result
-            [
-                sys.executable,
-                "-I",
-                "-B",
-                "-S",
-                str(source / "raychat.py"),
-                "--config",
-                str(path),
-                "--plugin",
-                str(plugin),
-                "--workspace",
-                str(self.root),
-                "--exec",
-                "/config-status",
-            ],
-            cwd=self.root,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
+        result = asyncio.run(
+            _launch(
+                [
+                    "-I",
+                    "-B",
+                    "-S",
+                    str(source / "raychat.py"),
+                    "--config",
+                    str(path),
+                    "--plugin",
+                    str(plugin),
+                    "--workspace",
+                    str(self.root),
+                    "--exec",
+                    "/config-status",
+                ],
+                self.root,
+            ),
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "7\n")
+        self.equal(result.returncode, 0, result.stderr)
+        self.equal(result.stdout, "7\n")
 
     def test_locked_session_is_not_stolen(self) -> None:
+        """Check locked session is not stolen."""
         identifier = self.saved()
         locked = SessionStore(self.root, self.directory, identifier)
         self.addCleanup(locked.close)
-        self.assertEqual(self.main(["--resume", identifier, "--exec", "/plugins"]), 1)
-        self.assertIn("active writer", self.err.getvalue())
+        self.equal(self.main(["--resume", identifier, "--exec", "/plugins"]), 1)
+        self.require(("active writer") in (self.err.getvalue()))
 
     def test_reviewed_protocol_reaches_navigable_child_session(self) -> None:
+        """Check reviewed protocol reaches navigable child session."""
         protocol = "Reviewed custom instructions for every agent."
         path = self.root / "protocol.txt"
         path.write_text(protocol)
-        args = entrypoint._build_parser({}).parse_args(
+        args = entrypoint.build_parser({}).parse_args(
             [*self.flags, "--protocol-file", str(path), "--model", "test"],
         )
         chat = ScriptedChat(['{"action":"done","message":"reviewed"}'])
         with provider_fixture(chat):
             resources = create_resources(args, {})
             self.addCleanup(resources.close)
-            coordinator = resources.runtime.services["delegation"]
-            profile = coordinator.router.resolve("review")
-            entry, completion = resources.runtime.services[
-                "chat_sessions"
-            ].create_child("review", profile, coordinator, "inspect")
-            self.assertEqual(completion.result(2), "reviewed")
-        self.assertEqual(coordinator.protocol, protocol)
-        self.assertIn(protocol, chat.calls[0][0]["content"])
-        self.assertEqual(entry.worker.session.protocol, protocol)
+            execution = DELEGATION.validate(
+                resources.runtime.services[DELEGATION.name],
+            ).execution
+            if execution is None:
+                self.fail("The configured provider must permit child execution.")
+            job = execution.prepare({
+                "agent": "review",
+                "purpose": "review",
+                "task": "inspect",
+            })
+            result = job.execute(execution.next_batch(), None, None)
+            self.equal(result["status"], "completed")
+            self.equal(result.get("message"), "reviewed")
+            entry = require_agent_sessions(resources.runtime).get(result["session_id"])
+        self.require(protocol in chat.calls[0][0]["content"])
+        session = entry.worker.session
+        if not isinstance(session, AgentSession):
+            self.fail("The navigable child must retain its actual conversation.")
+        self.equal(session.protocol, protocol)
 
     def test_resource_cleanup_releases_store_and_log_after_plugin_failure(self) -> None:
-        runtime, store, log = mock.Mock(), mock.Mock(), mock.Mock()
-        runtime.session = None
-        runtime.close.side_effect = RuntimeError("plugin close failed")
+        """Check resource cleanup releases store and log after plugin failure."""
+        runtime = _FailingRuntime(self.root)
+        store = _ObservedStore(self.root, self.directory)
+        log = _ObservedLog()
         resources = AgentResources(runtime, None, log, store)
-        with self.assertRaisesRegex(RuntimeError, "plugin close failed"):
+        with self.rejected(RuntimeError, "plugin close failed"):
             resources.close()
-        store.close.assert_called_once_with()
-        log.close.assert_called_once_with()
+        self.equal(store.closes, 1)
+        self.equal(log.closes, 1)
+        self.require(log.closed)
+        reopened = SessionStore(self.root, self.directory, store.session_id)
+        reopened.close()
 
     def test_main_reports_cleanup_errors_without_traceback(self) -> None:
-        resources = mock.Mock()
-        resources.close.side_effect = RuntimeError("plugin close failed")
+        """Check main reports cleanup errors without traceback."""
+        resources = AgentResources(_FailingRuntime(self.root), None)
         with (
             mock.patch.object(entrypoint, "create_resources", return_value=resources),
             mock.patch.object(entrypoint, "run_exec", return_value=0),
         ):
-            self.assertEqual(self.main(["--exec", "/plugins"]), 1)
-        self.assertEqual(self.err.getvalue(), "Error: plugin close failed\n")
+            self.equal(self.main(["--exec", "/plugins"]), 1)
+        self.equal(self.err.getvalue(), "Error: plugin close failed\n")
 
     def test_plugin_cleanup_failure_reaches_cli_and_releases_session_lock(self) -> None:
+        """Check plugin cleanup failure reaches cli and releases session lock."""
         plugin = self.root / "broken_cleanup"
         package(
             plugin,
-            "def register(api):\n    def close():\n        raise RuntimeError('plugin close failed')\n    api.on_close(close)\n",
+            "def register(api):\n"
+            "    def close():\n"
+            "        raise RuntimeError('plugin close failed')\n"
+            "    api.on_close(close)\n",
         )
         identifier = self.saved()
-        self.assertEqual(
+        self.equal(
             self.main(
                 ["--plugin", str(plugin), "--resume", identifier, "--exec", "/plugins"],
             ),
             1,
         )
-        self.assertIn("plugin close failed", self.err.getvalue())
-        self.assertNotIn("Traceback", self.err.getvalue())
+        self.require(("plugin close failed") in (self.err.getvalue()))
+        self.require(("Traceback") not in (self.err.getvalue()))
         reopened = SessionStore(self.root, self.directory, identifier)
         reopened.close()

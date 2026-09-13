@@ -1,4 +1,3 @@
-# Copyright 2026
 """Tests for the opaque, target-driven Task A prompt optimization."""
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ if TYPE_CHECKING:
 
     from plugins.optimization import opaque_incident_demo as incident
     from plugins.optimization import optimize_chat_prompt as port
-    from plugins.optimization.gepa.strategies.instruction_proposal import (
+    from plugins.optimization.gepa.instruction_proposal import (
         InstructionProposalSignature,
     )
     from raychat.sdk import Chat, Messages

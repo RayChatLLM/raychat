@@ -27,7 +27,7 @@ jobs:
       - name: Verify development dependency compatibility
         run: python -m pip check
 
-      - name: Check all sources without lint or type suppressions
+      - name: Check all sources with the approved lint policy
         run: python tools/verify_quality.py build/quality
 
       - name: Check every source with strict mypy
@@ -40,7 +40,31 @@ jobs:
         run: python -m ruff format --check .
 
       - name: Run the complete standard-library test suite
-        run: python -B -S -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          set -o pipefail
+          python -B -S -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/raychat-tests.log"
+
+      - name: Publish static failure diagnostics
+        if: failure()
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          paths = [*Path("build/quality").glob("*.txt"), Path(os.environ["RUNNER_TEMP"]) / "raychat-tests.log"]
+          for path in paths:
+              if path.is_file():
+                  detail = path.read_text(encoding="utf-8", errors="replace")[-16000:]
+                  detail = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title={path.name}::{detail}")
+
+      - name: Retain complete quality diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-quality
+          path: build/quality
+          if-no-files-found: warn
 
   portable:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
@@ -73,28 +97,45 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Build and verify the exact release
-        run: >-
-          python -B -S -m tools.build_portable
-          --output ci-output/raychat.zip
-          --folder ci-output/raychat
-          --smoke
-          --smoke-output ci-output/acceptance
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p ci-output
+          python -B -S -m tools.build_portable \
+            --output ci-output/raychat.zip \
+            --folder ci-output/raychat \
+            --smoke \
+            --smoke-output ci-output/acceptance 2>&1 | tee ci-output/build.log
         # POSIX: actual TUI navigation/cancellation/plugin lifecycle, feature
         # documented external plugins, startup/upgrade recovery, hostile paste/Unicode, independent
         # child queues, 50-child workflow/context stress, and offline optimization.
         # Windows: archive/package integrity and compilation only. No TUI claim.
 
       - name: Independently rebuild and compare every release byte
-        run: >-
-          python -B -S -m tools.build_portable
-          --output ci-output/raychat.zip
-          --folder ci-output/raychat
-          --check --no-smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          python -B -S -m tools.build_portable \
+            --output ci-output/raychat.zip \
+            --folder ci-output/raychat \
+            --check --no-smoke 2>&1 | tee ci-output/rebuild.log
+
+      - name: Publish release failure diagnostics
+        if: failure()
+        shell: python
+        run: |
+          from pathlib import Path
+          for path in Path("ci-output").glob("*.log"):
+              detail = path.read_text(encoding="utf-8", errors="replace")[-16000:]
+              detail = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title={path.name}::{detail}")
 
       - name: Retain acceptance reports and terminal transcripts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: acceptance-${{ matrix.os }}-python-${{ matrix.python }}
-          path: ci-output/acceptance
+          path: |
+            ci-output/acceptance
+            ci-output/*.log
           if-no-files-found: warn

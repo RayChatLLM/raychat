@@ -19,3 +19,7 @@ def unchecked_tool_output() -> str:
 
 def unchecked_action_field() -> str:
     return registered_parse('{"action":"done","message":"ok"}')["message"]  # expect-error: return-value
+
+
+def nontext_action_input() -> None:
+    registered_parse(None)  # expect-error: arg-type

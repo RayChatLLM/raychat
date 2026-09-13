@@ -1,4 +1,3 @@
-# Copyright 2026
 """Load immutable typed host configuration and capture plugin settings."""
 
 from __future__ import annotations

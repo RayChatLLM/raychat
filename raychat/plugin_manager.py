@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextvars
 import copy
 import hashlib
@@ -9,24 +10,24 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from http.client import HTTPMessage
+from dataclasses import dataclass, field
+from http import HTTPStatus
+from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
-from typing import IO, Any, TypedDict, cast
-from urllib.parse import ParseResult, quote, urljoin, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from typing import TYPE_CHECKING, TypedDict
+from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunparse
+from urllib.request import getproxies, proxy_bypass
 
 from raychat.event_types import CONFIGURE, Lifecycle
-from raychat.type_support import override
 
-from .distribution import Distribution
 from .file_lock import FileLock
 from .packages import (
     MAX_BYTES,
     NAME,
     VERSION,
     Manifest,
+    ManifestDocument,
     dependency_order,
     digest,
     discover,
@@ -35,16 +36,33 @@ from .packages import (
     read_manifest,
     unpack,
 )
+from .plugin_sources import SourceTree
 from .plugins import Runtime
-from .sdk import API_VERSION, CancelCheck, PluginContext, PluginError
-from .validation import json_object, text_field
+from .sdk import API_VERSION, CancelCheck, PluginContext, PluginError, ServiceKey
+from .transport import ProviderProcessError, run_child
+from .validation import (
+    ConfigurationError,
+    array_field,
+    boolean_field,
+    json_object,
+    object_field,
+    text_field,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping
+
+    from .distribution import Distribution
 
 _DOWNLOAD_CANCEL: contextvars.ContextVar[CancelCheck | None] = contextvars.ContextVar(
-    "package_download_cancel", default=None
+    "package_download_cancel",
+    default=None,
 )
 
 
 class InstalledRelease(TypedDict):
+    """Record the source and identity of an installed package release."""
+
     source: str
     version: str
     digest: str
@@ -52,6 +70,8 @@ class InstalledRelease(TypedDict):
 
 
 class PackageRecord(InstalledRelease, total=False):
+    """Attach resolved sources and catalog receipts to a staged release."""
+
     path: str
     resolved: str
     archive_sha256: str
@@ -59,6 +79,8 @@ class PackageRecord(InstalledRelease, total=False):
 
 
 class InstallationState(TypedDict):
+    """Persist installation receipts, operator choices and catalog locations."""
+
     schema: int
     packages: dict[str, PackageRecord]
     disabled: list[str]
@@ -66,10 +88,270 @@ class InstallationState(TypedDict):
 
 
 class PackageState(InstallationState, total=False):
+    """Record optional profile installation history with the package state."""
+
     profiles: list[str]
 
 
+_DIGEST_LENGTH = 64
+_COMMIT_LENGTH = 40
+_MAX_REDIRECTS = 10
+_MAX_REPEATS = 4
+_REPOSITORY_COMPONENTS = 2
+
+
+class CatalogRecord(ManifestDocument):
+    """Pin a validated package manifest to a location and exact archive bytes."""
+
+    url: str
+    sha256: str
+
+
+class SearchResult(CatalogRecord):
+    """Identify a matching catalog release and whether its metadata is cached."""
+
+    catalog: str
+    cached: bool
+
+
+class InventoryItem(ManifestDocument):
+    """Describe a checked package's installation and live activation status."""
+
+    path: str
+    scope: str
+    enabled: bool
+    loaded: bool
+    modified: bool
+    source: str
+
+
+class InstallResult(TypedDict):
+    """Report an immediate or deferred package transaction."""
+
+    applied: bool
+    packages: list[str]
+    removed: list[str]
+
+
+class CheckResult(TypedDict):
+    """Describe registrations observed from a checked dependency generation."""
+
+    id: str
+    version: str
+    sdk: int
+    tools: list[str]
+    commands: list[str]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _InstallRequest:
+    sources: list[str]
+    scope: str
+    force: bool = False
+    linked: bool = False
+    ctx: PluginContext | None = None
+    preserve_disabled: bool = False
+
+
+@dataclass(kw_only=True)
+class _Staging:
+    request: _InstallRequest
+    temporary: tempfile.TemporaryDirectory[str]
+    available: dict[str, Path]
+    staged: dict[str, Path] = field(default_factory=dict)
+    records: dict[str, PackageRecord] = field(default_factory=dict)
+    manifests: dict[str, Manifest] = field(default_factory=dict)
+    visiting: set[str] = field(default_factory=set)
+    complete: set[str] = field(default_factory=set)
+
+
+@dataclass(kw_only=True)
+class _PackageChange:
+    scope: str
+    temporary: tempfile.TemporaryDirectory[str]
+    ctx: PluginContext | None = None
+    staged: Mapping[str, Path] = field(default_factory=dict)
+    records: Mapping[str, PackageRecord] = field(default_factory=dict)
+    removed: list[str] = field(default_factory=list)
+    expected_sources: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(kw_only=True)
+class _TransactionState:
+    change: _PackageChange
+    before: PackageState
+    state: PackageState
+    backups: dict[Path, Path] = field(default_factory=dict)
+    written: list[Path] = field(default_factory=list)
+    held: list[FileLock] = field(default_factory=list)
+
+    def release(self) -> None:
+        """Release each acquired installation lock exactly once."""
+        while self.held:
+            self.held.pop().close()
+
+    def cleanup(self) -> None:
+        """Remove staging files before releasing transaction ownership."""
+        try:
+            self.change.temporary.cleanup()
+        finally:
+            self.release()
+
+
+def _apply_enabled(runtime: Runtime, identifier: str, *, enabled: bool) -> None:
+    if enabled:
+        runtime.disabled.discard(identifier)
+    else:
+        runtime.disabled.add(identifier)
+
+
+def _release_key(item: SearchResult) -> tuple[str, tuple[int, ...]]:
+    return item["id"], tuple(map(int, item["version"].split(".")))
+
+
+def _require_version(owner: str, manifest: Manifest, expected: str) -> None:
+    if manifest.version != expected:
+        message = f"Dependency conflict: {owner} requires {manifest.id}@{expected}."
+        raise PluginError(message)
+
+
+def _identifier(value: object, path: str) -> str:
+    result = text_field(value, path)
+    if NAME.fullmatch(result) is None:
+        raise PluginError("Invalid " + path + ": " + result)
+    return result
+
+
+def _version(value: object) -> str:
+    result = text_field(value, "package version")
+    if VERSION.fullmatch(result) is None:
+        message = "Invalid installed package version."
+        raise PluginError(message)
+    return result
+
+
+def _sha256(value: object, path: str) -> str:
+    result = text_field(value, path)
+    if len(result) != _DIGEST_LENGTH or any(
+        char not in "0123456789abcdef" for char in result
+    ):
+        raise PluginError("Invalid " + path + ".")
+    return result
+
+
+def _schema_one(fields: Mapping[str, object], path: str) -> None:
+    schema = fields.get("schema")
+    if type(schema) is not int or schema != 1:
+        raise PluginError("Invalid " + path + " schema.")
+
+
+def _package_record(value: object, identifier: str, root: Path) -> PackageRecord:
+    fields = object_field(value, "installed package record")
+    allowed = {
+        "path",
+        "linked",
+        "source",
+        "version",
+        "digest",
+        "catalog",
+        "resolved",
+        "archive_sha256",
+    }
+    if fields.keys() - allowed:
+        message = "Invalid installed package record fields."
+        raise PluginError(message)
+    path = Path(text_field(fields.get("path"), "installed package path"))
+    if not path.is_absolute():
+        message = "Installed package path must be absolute."
+        raise PluginError(message)
+    linked = boolean_field(fields.get("linked"), "installed package linked")
+    if not linked and path != root / "plugins" / identifier:
+        message = "Installed package path is outside its owned directory."
+        raise PluginError(message)
+    result: PackageRecord = {
+        "path": str(path),
+        "linked": linked,
+        "source": text_field(fields.get("source"), "installed package source"),
+        "version": _version(fields.get("version")),
+        "digest": _sha256(fields.get("digest"), "installed package digest"),
+    }
+    if "catalog" in fields:
+        result["catalog"] = _identifier(fields["catalog"], "catalog identifier")
+    if "resolved" in fields:
+        result["resolved"] = text_field(fields["resolved"], "resolved package source")
+    if "archive_sha256" in fields:
+        result["archive_sha256"] = _sha256(fields["archive_sha256"], "archive digest")
+    return result
+
+
+def _package_state(value: object, root: Path) -> PackageState:
+    fields = object_field(value, "plugin installation lock file")
+    allowed = {"schema", "packages", "disabled", "catalogs", "profiles"}
+    if fields.keys() - allowed:
+        message = "Invalid plugin installation lock file fields."
+        raise PluginError(message)
+    _schema_one(fields, "plugin installation lock file")
+    result: PackageState = {
+        "schema": 1,
+        "packages": {
+            _identifier(name, "installed package identifier"): _package_record(
+                item,
+                name,
+                root,
+            )
+            for name, item in object_field(
+                fields.get("packages"),
+                "installed packages",
+            ).items()
+        },
+        "disabled": [
+            _identifier(item, "disabled plugin")
+            for item in array_field(fields.get("disabled"), "disabled plugins")
+        ],
+        "catalogs": {
+            _identifier(name, "catalog identifier"): text_field(url, "catalog URL")
+            for name, url in object_field(fields.get("catalogs"), "catalogs").items()
+        },
+    }
+    if "profiles" in fields:
+        result["profiles"] = [
+            _identifier(item, "profile identifier")
+            for item in array_field(fields["profiles"], "profiles")
+        ]
+    return result
+
+
+def _catalog_records(value: object) -> list[CatalogRecord]:
+    fields = object_field(value, "catalog")
+    _schema_one(fields, "catalog")
+    results: list[CatalogRecord] = []
+    versions: set[tuple[str, str]] = set()
+    for entry in array_field(fields.get("plugins"), "catalog plugins"):
+        item = object_field(entry, "catalog package")
+        location = text_field(item.get("url"), "catalog package URL")
+        archive_digest = _sha256(item.get("sha256"), "catalog SHA-256 digest")
+        manifest = Manifest.parse({
+            key: field for key, field in item.items() if key not in {"url", "sha256"}
+        })
+        key = (manifest.id, manifest.version)
+        if key in versions:
+            raise PluginError(
+                "Duplicate catalog package version: "
+                + manifest.id
+                + "@"
+                + manifest.version,
+            )
+        versions.add(key)
+        results.append({
+            **manifest.document(),
+            "url": location,
+            "sha256": archive_digest,
+        })
+    return results
+
+
 def atomic_json(path: str | Path, value: object) -> None:
+    """Persist finite JSON with flush, fsync and atomic replacement."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".plugins-", dir=path.parent)
@@ -78,12 +360,25 @@ def atomic_json(path: str | Path, value: object) -> None:
             json.dump(value, stream, sort_keys=True, allow_nan=False, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        Path(temporary).replace(path)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
 
-def read_json(path: str | Path, default: object) -> Any:  # noqa: ANN401 - JSON file schemas are validated by the consuming operation
+def read_json(path: str | Path, default: object) -> object:
+    """Read bounded regular JSON while retaining unknown field values.
+
+    Returns
+    -------
+    object
+        The validated result described by this operation.
+
+    Raises
+    ------
+    PluginError
+        If the file is linked, non-regular or exceeds the package limit.
+
+    """
     path = Path(path)
     if not path.exists():
         return default
@@ -102,8 +397,7 @@ def _validate_url(url: str) -> ParseResult:
     if (
         parsed.scheme not in {"https", "http"}
         or not parsed.hostname
-        or parsed.username
-        or parsed.password
+        or bool(parsed.username or parsed.password)
         or (
             parsed.scheme == "http"
             and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
@@ -114,69 +408,194 @@ def _validate_url(url: str) -> ParseResult:
     return parsed
 
 
-class PackageRedirects(HTTPRedirectHandler):
-    @override
-    def redirect_request(
-        self,
-        req: Request,
-        fp: IO[bytes],
-        code: int,
-        msg: str,
-        headers: HTTPMessage,
-        newurl: str,
-    ) -> Request | None:
-        parsed = _validate_url(newurl)
-        if urlparse(req.full_url).scheme == "https" and parsed.scheme != "https":
-            error_message = "HTTPS downloads cannot redirect to HTTP."
-            raise PluginError(error_message)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+@dataclass(frozen=True)
+class _HTTPRoute:
+    connection: HTTPConnection
+    target: str
+    headers: dict[str, str]
+
+
+def _proxy_location(parsed: ParseResult) -> str | None:
+    proxy = getproxies().get(parsed.scheme)
+    if proxy is None:
+        return None
+    raw_bypass: object = proxy_bypass(parsed.netloc)
+    if type(raw_bypass) is bool:
+        bypass = raw_bypass
+    elif type(raw_bypass) is int and raw_bypass in {0, 1}:
+        bypass = bool(raw_bypass)
+    else:
+        message = "System proxy bypass did not return a boolean decision."
+        raise PluginError(message)
+    return None if bypass else proxy
+
+
+def _request_target(parsed: ParseResult) -> str:
+    path = parsed.path or "/"
+    if parsed.params:
+        path += ";" + parsed.params
+    if parsed.query:
+        path += "?" + parsed.query
+    return path
+
+
+def _proxy_route(parsed: ParseResult, proxy: str) -> _HTTPRoute:
+    address = urlparse(proxy if "://" in proxy else parsed.scheme + "://" + proxy)
+    hostname = address.hostname
+    if address.scheme not in {"http", "https"} or hostname is None:
+        message = "Package proxies require an HTTP or HTTPS endpoint."
+        raise PluginError(message)
+    headers = {"User-Agent": "RayChat-plugins/2"}
+    proxy_headers: dict[str, str] = {}
+    if address.username and address.password:
+        credentials = unquote(address.username) + ":" + unquote(address.password)
+        proxy_headers["Proxy-Authorization"] = "Basic " + base64.b64encode(
+            credentials.encode(),
+        ).decode("ascii")
+    proxy_host = unquote(hostname)
+    if parsed.scheme == "https":
+        origin = parsed.hostname
+        if origin is None:
+            message = "Package URL must name a host."
+            raise PluginError(message)
+        # urllib tunnels HTTPS origins using CONNECT before the target TLS
+        # handshake; proxy credentials belong only to that CONNECT request.
+        connection = HTTPSConnection(proxy_host, address.port, timeout=30)
+        connection.set_tunnel(origin, parsed.port or 443, headers=proxy_headers)
+        return _HTTPRoute(connection, _request_target(parsed), headers)
+    direct = (
+        HTTPSConnection(proxy_host, address.port, timeout=30)
+        if address.scheme == "https"
+        else HTTPConnection(proxy_host, address.port, timeout=30)
+    )
+    headers.update(proxy_headers)
+    target = urlunparse((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        parsed.params,
+        parsed.query,
+        "",
+    ))
+    return _HTTPRoute(direct, target, headers)
+
+
+def _http_route(url: str) -> _HTTPRoute:
+    parsed = _validate_url(url)
+    host = parsed.hostname
+    if host is None:
+        message = "Package URL must name a host."
+        raise PluginError(message)
+    proxy = _proxy_location(parsed)
+    if proxy is not None:
+        return _proxy_route(parsed, proxy)
+    connection = (
+        HTTPSConnection(host, parsed.port, timeout=30)
+        if parsed.scheme == "https"
+        else HTTPConnection(host, parsed.port, timeout=30)
+    )
+    return _HTTPRoute(
+        connection,
+        _request_target(parsed),
+        {"User-Agent": "RayChat-plugins/2"},
+    )
+
+
+def _http_response(url: str) -> tuple[int, str | None, bytes]:
+    route = _http_route(url)
+    try:
+        route.connection.request("GET", route.target, headers=route.headers)
+        response = route.connection.getresponse()
+        return (
+            response.status,
+            response.getheader("Location") or response.getheader("URI"),
+            response.read(MAX_BYTES + 1),
+        )
+    finally:
+        route.connection.close()
+
+
+def _download_http(url: str) -> bytes:
+    visits: dict[str, int] = {}
+    current = url
+    while True:
+        status, location, data = _http_response(current)
+        if status in {301, 302, 303, 307, 308} and location is not None:
+            target = urljoin(current, location)
+            parsed = _validate_url(target)
+            if urlparse(current).scheme == "https" and parsed.scheme != "https":
+                message = "HTTPS downloads cannot redirect to HTTP."
+                raise PluginError(message)
+            visits[target] = visits.get(target, 0) + 1
+            if visits[target] > _MAX_REPEATS or sum(visits.values()) > _MAX_REDIRECTS:
+                message = "Package download exceeded its redirect limit."
+                raise OSError(message)
+            current = target
+            continue
+        if not HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
+            message = f"Package download failed with HTTP status {status}: {current}"
+            raise OSError(message)
+        if len(data) > MAX_BYTES:
+            message = "Download exceeds the package byte limit."
+            raise PluginError(message)
+        return data
+
+
+def _download_isolated(url: str, cancel_check: CancelCheck) -> bytes:
+    cancel_check()
+    with tempfile.TemporaryDirectory(prefix="raychat-package-download-") as directory:
+        destination = Path(directory) / "response"
+        request: dict[str, object] = {
+            "mode": "package_download",
+            "url": url,
+            "destination": str(destination),
+        }
+        try:
+            count = run_child(None, request, cancel_check)
+        except ProviderProcessError as error:
+            if error.os_error:
+                raise OSError(str(error)) from error
+            raise PluginError(str(error)) from error
+        cancel_check()
+        data = read_bytes(destination)
+        if count != str(len(data)):
+            message = "Downloaded package size does not match its receipt."
+            raise PluginError(message)
+        return data
 
 
 def download(url: str) -> bytes:
+    """Download bounded bytes through validated HTTP endpoints and redirects.
+
+    Returns
+    -------
+    bytes
+        The complete package or catalog body.
+
+    """
     _validate_url(url)
     cancel_check = _DOWNLOAD_CANCEL.get()
-    if cancel_check is not None:
-        from .transport import ProviderProcessError, run_child
-
-        cancel_check()
-        with tempfile.TemporaryDirectory(
-            prefix="raychat-package-download-"
-        ) as directory:
-            destination = Path(directory) / "response"
-            try:
-                count = run_child(
-                    None,
-                    {
-                        "mode": "package_download",
-                        "url": url,
-                        "destination": str(destination),
-                    },
-                    cancel_check,
-                )
-            except ProviderProcessError as exc:
-                if exc.os_error:
-                    raise OSError(str(exc)) from exc
-                raise PluginError(str(exc)) from exc
-            cancel_check()
-            data = read_bytes(destination)
-            if count != str(len(data)):
-                raise PluginError("Downloaded package size does not match its receipt.")
-            return data
-    with build_opener(PackageRedirects()).open(
-        Request(url, headers={"User-Agent": "RayChat-plugins/2"}),  # noqa: S310 - HTTP(S) endpoint validated before opening the request
-        timeout=30,
-    ) as response:
-        data = response.read(MAX_BYTES + 1)
-    if not isinstance(data, bytes):
-        error_message = "Download did not return bytes."
-        raise PluginError(error_message)
-    if len(data) > MAX_BYTES:
-        error_message = "Download exceeds the package byte limit."
-        raise PluginError(error_message)
-    return data
+    return (
+        _download_http(url)
+        if cancel_check is None
+        else _download_isolated(url, cancel_check)
+    )
 
 
 def read_bytes(path: str | Path) -> bytes:
+    """Read a bounded package file before archive validation.
+
+    Returns
+    -------
+    bytes
+        The validated result described by this operation.
+
+    Raises
+    ------
+    PluginError
+        If the file exceeds the package byte limit.
+
+    """
     with Path(path).open("rb") as stream:
         data = stream.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
@@ -186,8 +605,11 @@ def read_bytes(path: str | Path) -> bytes:
 
 
 class PackageManager:
+    """Manage pinned package releases and atomic plugin generation updates."""
+
+    @staticmethod
     @contextmanager
-    def cancellable(self, check: CancelCheck) -> Iterator[None]:
+    def cancellable(check: CancelCheck) -> Iterator[None]:
         """Bind package I/O to this calling operation, independently per thread."""
         token = _DOWNLOAD_CANCEL.set(check)
         try:
@@ -204,6 +626,7 @@ class PackageManager:
         *,
         trusted: bool = False,
     ) -> None:
+        """Load operator-owned installation receipts for both package scopes."""
         self.workspace = Path(workspace).resolve()
         self.home = Path(home).resolve()
         self.trusted = trusted
@@ -223,64 +646,45 @@ class PackageManager:
         return FileLock(self.state_roots[scope] / "plugins.mutex")
 
     def state_file(self, scope: str) -> Path:
+        """Locate a scope receipt outside the untrusted workspace.
+
+        Returns
+        -------
+        Path
+            The validated result described by this operation.
+
+        """
         return self.state_roots[scope] / "plugins.lock.json"
 
     def _read(self, scope: str) -> PackageState:
-        value = read_json(
-            self.state_file(scope),
-            {"schema": 1, "packages": {}, "disabled": [], "catalogs": {}},
-        )
-        if (
-            not isinstance(value, dict)
-            or value.get("schema") != 1
-            or not isinstance(value.get("packages"), dict)
-            or not isinstance(value.get("catalogs"), dict)
-            or not isinstance(value.get("disabled"), list)
-        ):
-            error_message = "Invalid plugin installation lock file."
-            raise PluginError(error_message)
-        for identifier, item in value["packages"].items():
-            if (
-                not isinstance(identifier, str)
-                or not NAME.fullmatch(identifier)
-                or not isinstance(item, dict)
-                or not isinstance(item.get("path"), str)
-                or not Path(item["path"]).is_absolute()
-                or type(item.get("linked")) is not bool
-                or not isinstance(item.get("source"), str)
-                or not isinstance(item.get("version"), str)
-                or not VERSION.fullmatch(item["version"])
-                or not isinstance(item.get("digest"), str)
-                or len(item["digest"]) != 64
-                or (
-                    "catalog" in item
-                    and (
-                        not isinstance(item["catalog"], str)
-                        or not NAME.fullmatch(item["catalog"])
-                    )
-                )
-            ):
-                error_message = "Invalid installed package record."
-                raise PluginError(error_message)
-            if (
-                not item["linked"]
-                and Path(item["path"]) != self.roots[scope] / "plugins" / identifier
-            ):
-                error_message = "Installed package path is outside its owned directory."
-                raise PluginError(
-                    error_message,
-                )
-        if not all(
-            isinstance(v, str) and NAME.fullmatch(v) for v in value["disabled"]
-        ) or not all(
-            isinstance(k, str) and NAME.fullmatch(k) and isinstance(v, str)
-            for k, v in value["catalogs"].items()
-        ):
-            error_message = "Invalid disabled plugin or catalog entry."
-            raise PluginError(error_message)
-        return cast("PackageState", value)
+        default: PackageState = {
+            "schema": 1,
+            "packages": {},
+            "disabled": [],
+            "catalogs": {},
+        }
+        try:
+            return _package_state(
+                read_json(self.state_file(scope), default),
+                self.roots[scope],
+            )
+        except ConfigurationError as error:
+            raise PluginError(str(error)) from error
 
     def paths(self, *, include_disabled: bool = False) -> dict[str, Path]:
+        """Resolve installed packages while retaining scope and ambiguity checks.
+
+        Returns
+        -------
+        dict[str, Path]
+            The validated result described by this operation.
+
+        Raises
+        ------
+        PluginError
+            If more than one source claims a plugin identifier.
+
+        """
         disabled = self.disabled
         result: dict[str, Path] = {}
         candidates = []
@@ -308,14 +712,37 @@ class PackageManager:
 
     @property
     def disabled(self) -> set[str]:
+        """Collect the operator-disabled plugin identifiers across scopes.
+
+        Returns
+        -------
+        set[str]
+            The validated result described by this operation.
+
+        """
         return {name for state in self._states.values() for name in state["disabled"]}
 
     def attach(self, runtime: Runtime) -> None:
+        """Bind installation and discovery to a live plugin runtime."""
         self.runtime = runtime
-        runtime.services["plugin_manager"] = self
+        raw_services: object = runtime.services
+        object_field(raw_services, "runtime services")[PLUGIN_MANAGER.name] = self
         runtime.disabled.update(self.disabled)
 
     def new_paths(self) -> list[str]:
+        """Find installed package sources absent from the current generation.
+
+        Returns
+        -------
+        list[str]
+            The validated result described by this operation.
+
+        Raises
+        ------
+        PluginError
+            If no runtime has been attached.
+
+        """
         if self.runtime is None:
             error_message = "Plugin discovery requires an attached runtime."
             raise PluginError(error_message)
@@ -324,8 +751,16 @@ class PackageManager:
         }
         return [str(path) for path in self.paths().values() if str(path) not in known]
 
-    def inventory(self) -> list[dict[str, Any]]:
-        result = []
+    def inventory(self) -> list[InventoryItem]:
+        """Describe installed metadata and detect source edits without executing it.
+
+        Returns
+        -------
+        list[InventoryItem]
+            The validated result described by this operation.
+
+        """
+        result: list[InventoryItem] = []
         for identifier, path in sorted(self.paths(include_disabled=True).items()):
             manifest = read_manifest(path, require_current_sdk=False)
             scope, record = "workspace", None
@@ -352,6 +787,12 @@ class PackageManager:
         Earlier receipts included Finder metadata. Accept that exact recorded
         byte set too; never infer that a changed source file is an operator edit
         we may discard merely because metadata is present.
+
+        Returns
+        -------
+        bool
+            Whether current bytes match the exact stored receipt.
+
         """
         if digest(files(path, validate_manifest=False)) == record["digest"]:
             return True
@@ -372,6 +813,12 @@ class PackageManager:
         Archive identities detect changed releases even when versions stay equal.
         User edits, other package sources and removal/disable choices are retained.
         No registration runs during installation or CLI metadata discovery.
+
+        Raises
+        ------
+        PluginError
+            If a runtime is attached or locked installation state changed.
+
         """
         if self.runtime is not None:
             error_message = "Install a startup profile before attaching a runtime."
@@ -380,29 +827,7 @@ class PackageManager:
         state = self._states[scope]
         catalog_name = profile.id
         previous_catalog = state["catalogs"].get(catalog_name)
-        previous = (
-            read_json(self._catalog_cache(previous_catalog), {})
-            if previous_catalog is not None
-            else {}
-        )
-        previous_records = previous.get("plugins", [])
-        if not isinstance(previous_records, list):
-            error_message = "Invalid cached profile catalog."
-            raise PluginError(error_message)
-        # Earlier dependency receipts used unqualified names. Only an exact
-        # archived catalog receipt establishes their origin; IDs alone do not.
-        prior_releases = {
-            (
-                item.get("id"),
-                item.get("version"),
-                self._catalog_url(previous_catalog, item["url"]),
-                item.get("sha256"),
-            )
-            for item in previous_records
-            if previous_catalog is not None
-            and isinstance(item, dict)
-            and isinstance(item.get("url"), str)
-        }
+        prior_releases = self._prior_releases(previous_catalog)
         origins = copy.deepcopy(state)
         for identifier, origin in origins["packages"].items():
             if "catalog" not in origin and (
@@ -435,6 +860,26 @@ class PackageManager:
             item["id"] + "@" + item["version"]: item
             for item in self._catalog_records(str(profile.catalog))
         }
+        sources = self._profile_sources(profile, state, releases)
+        if sources:
+            self._install_sources(
+                _InstallRequest(sources=sources, scope=scope, preserve_disabled=True),
+            )
+        with self._scope_lock(scope):
+            state = self._read(scope)
+            profiles = state.setdefault("profiles", [])
+            if profile.id not in profiles:
+                profiles.append(profile.id)
+                atomic_json(self.state_file(scope), state)
+                self._states[scope] = state
+
+    def _profile_sources(
+        self,
+        profile: Distribution,
+        state: PackageState,
+        releases: Mapping[str, CatalogRecord],
+    ) -> list[str]:
+        catalog_name = profile.id
         available = self.paths(include_disabled=True)
         sources = []
         for spec in profile.packages:
@@ -452,17 +897,17 @@ class PackageManager:
                 ):
                     continue
             sources.append(catalog_name + "/" + spec)
-        if sources:
-            self._install_sources(sources, scope=scope, preserve_disabled=True)
-        with self._scope_lock(scope):
-            state = self._read(scope)
-            profiles = state.setdefault("profiles", [])
-            if profile.id not in profiles:
-                profiles.append(profile.id)
-                atomic_json(self.state_file(scope), state)
-                self._states[scope] = state
+        return sources
 
     def catalogs(self) -> dict[str, str]:
+        """Collect configured catalog locations in scope precedence order.
+
+        Returns
+        -------
+        dict[str, str]
+            The validated result described by this operation.
+
+        """
         result = {}
         for state in self._states.values():
             result.update(state["catalogs"])
@@ -476,6 +921,19 @@ class PackageManager:
         *,
         scope: str = "workspace",
     ) -> dict[str, str]:
+        """Validate and atomically persist a catalog addition or removal.
+
+        Returns
+        -------
+        dict[str, str]
+            The validated result described by this operation.
+
+        Raises
+        ------
+        PluginError
+            If the operation, catalog name or locked state is invalid.
+
+        """
         if operation == "list":
             return self.catalogs()
         if not NAME.fullmatch(name):
@@ -517,7 +975,27 @@ class PackageManager:
             else str(Path(catalog).parent / location)
         )
 
-    def _catalog_records(self, url: str) -> list[dict[str, Any]]:
+    def _prior_releases(self, catalog: str | None) -> set[tuple[str, str, str, str]]:
+        if catalog is None:
+            return set()
+        value = read_json(self._catalog_cache(catalog), {"schema": 1, "plugins": []})
+        try:
+            records = _catalog_records(value)
+        except ConfigurationError as error:
+            raise PluginError(
+                "Invalid cached profile catalog: " + str(error),
+            ) from error
+        return {
+            (
+                item["id"],
+                item["version"],
+                self._catalog_url(catalog, item["url"]),
+                item["sha256"],
+            )
+            for item in records
+        }
+
+    def _catalog_records(self, url: str) -> list[CatalogRecord]:
         cache = self._catalog_cache(url)
         try:
             data = download(url) if urlparse(url).scheme else read_bytes(url)
@@ -528,66 +1006,50 @@ class PackageManager:
             value = read_json(cache, None)
             if value is None:
                 raise
-        if (
-            not isinstance(value, dict)
-            or value.get("schema") != 1
-            or not isinstance(value.get("plugins"), list)
-        ):
-            error_message = "Catalog must contain schema=1 and a plugins array."
-            raise PluginError(error_message)
-        versions = set()
-        for item in value["plugins"]:
-            if (
-                not isinstance(item, dict)
-                or not isinstance(item.get("url"), str)
-                or not isinstance(item.get("sha256"), str)
-            ):
-                error_message = "Catalog package requires a URL and SHA-256 digest."
-                raise PluginError(error_message)
-            if len(item["sha256"]) != 64 or any(
-                c not in "0123456789abcdef" for c in item["sha256"]
-            ):
-                error_message = "Invalid catalog SHA-256 digest."
-                raise PluginError(error_message)
-            manifest = Manifest.parse(
-                {k: v for k, v in item.items() if k not in {"url", "sha256"}},
-            )
-            key = (manifest.id, manifest.version)
-            if key in versions:
-                raise PluginError(
-                    "Duplicate catalog package version: "
-                    + manifest.id
-                    + "@"
-                    + manifest.version,
-                )
-            versions.add(key)
-        atomic_json(cache, value)
-        return cast("list[dict[str, Any]]", value["plugins"])
+        try:
+            records = _catalog_records(value)
+        except ConfigurationError as error:
+            raise PluginError(str(error)) from error
+        document: dict[str, object] = {"schema": 1, "plugins": records}
+        atomic_json(cache, document)
+        return records
 
-    def search(self, query: str = "") -> list[dict[str, Any]]:
-        results = []
-        for name, url in self.catalogs().items():
-            for item in self._catalog_records(url):
-                if (
-                    query.casefold()
-                    in (item["id"] + " " + item["description"]).casefold()
-                ):
-                    resolved = dict(item)
-                    resolved["url"] = self._catalog_url(url, item["url"])
-                    results.append(
-                        {
-                            **resolved,
-                            "catalog": name,
-                            "cached": url in self._stale_catalogs,
-                        },
-                    )
-        return sorted(
-            results,
-            key=lambda item: (item["id"], tuple(map(int, item["version"].split(".")))),
-            reverse=True,
-        )
+    def search(self, query: str = "") -> list[SearchResult]:
+        """Search validated catalog metadata in descending release order.
 
-    def resolve_source(self, source: str) -> tuple[str, dict[str, object] | None]:
+        Returns
+        -------
+        list[SearchResult]
+            The validated result described by this operation.
+
+        """
+        results: list[SearchResult] = [
+            {
+                **item,
+                "url": self._catalog_url(url, item["url"]),
+                "catalog": name,
+                "cached": url in self._stale_catalogs,
+            }
+            for name, url in self.catalogs().items()
+            for item in self._catalog_records(url)
+            if query.casefold() in (item["id"] + " " + item["description"]).casefold()
+        ]
+        return sorted(results, key=_release_key, reverse=True)
+
+    def resolve_source(self, source: str) -> tuple[str, SearchResult | None]:
+        """Resolve a local source, immutable GitHub revision or catalog release.
+
+        Returns
+        -------
+        tuple[str, SearchResult | None]
+            The validated result described by this operation.
+
+        Raises
+        ------
+        PluginError
+            If the source cannot be resolved to an unambiguous release.
+
+        """
         path = Path(source).expanduser()
         if path.exists():
             return str(path.resolve()), None
@@ -602,7 +1064,9 @@ class PackageManager:
             if "/tree/" in repo:
                 repo, ref = repo.split("/tree/", 1)
             owner_repo = repo.removesuffix(".git").split("/")
-            if len(owner_repo) != 2 or not all(NAME.fullmatch(v) for v in owner_repo):
+            if len(owner_repo) != _REPOSITORY_COMPONENTS or not all(
+                NAME.fullmatch(v) for v in owner_repo
+            ):
                 error_message = "Use github:OWNER/REPOSITORY@REF."
                 raise PluginError(error_message)
             commit_record = json_object(
@@ -613,12 +1077,10 @@ class PackageManager:
                     + quote(ref or "HEAD", safe=""),
                 ),
             )
-            commit = (
-                commit_record.get("sha") if isinstance(commit_record, dict) else None
-            )
+            commit = object_field(commit_record, "GitHub commit").get("sha")
             if (
                 not isinstance(commit, str)
-                or len(commit) != 40
+                or len(commit) != _COMMIT_LENGTH
                 or any(c not in "0123456789abcdef" for c in commit)
             ):
                 error_message = "GitHub did not resolve an immutable commit."
@@ -704,306 +1166,311 @@ class PackageManager:
         force: bool = False,
         linked: bool = False,
         ctx: PluginContext | None = None,
-    ) -> dict[str, Any]:
+    ) -> InstallResult:
+        """Stage a package and its dependencies before queuing one transaction.
+
+        Returns
+        -------
+        InstallResult
+            The validated result described by this operation.
+
+        """
         return self._install_sources(
-            [source],
-            scope=scope,
-            force=force,
-            linked=linked,
-            ctx=ctx,
+            _InstallRequest(
+                sources=[source],
+                scope=scope,
+                force=force,
+                linked=linked,
+                ctx=ctx,
+            ),
         )
 
-    def _install_sources(
+    def _stage_install(
         self,
-        sources: list[str],
-        *,
-        scope: str,
-        force: bool = False,
-        linked: bool = False,
-        ctx: PluginContext | None = None,
-        preserve_disabled: bool = False,
-    ) -> dict[str, Any]:
-        temporary = tempfile.TemporaryDirectory(prefix="raychat-install-")
-        staging = Path(temporary.name)
-        staged: dict[str, Path] = {}
-        records: dict[str, PackageRecord] = {}
-        manifests: dict[str, Manifest] = {}
-        available = self.paths(include_disabled=True)
-        visiting: set[str] = set()
-        complete: set[str] = set()
-        try:
-
-            def stage(spec: str, expected: tuple[str, str] | None = None) -> Manifest:
-                target = staging / ("package-" + str(len(staged)))
-                manifest, record = self._stage(spec, target)
-                if expected is not None and (manifest.id, manifest.version) != expected:
-                    error_message = "Dependency resolved to an unexpected version."
-                    raise PluginError(error_message)
-                if preserve_disabled and manifest.id in self.disabled:
-                    raise PluginError(
-                        "Profile requires a disabled or removed plugin; enable or "
-                        "install it explicitly first: " + manifest.id,
-                    )
-                if manifest.id in staged:
-                    if records[manifest.id]["version"] != manifest.version:
-                        raise PluginError(
-                            "Conflicting dependency versions: " + manifest.id,
-                        )
-                    return manifest
-                staged[manifest.id], records[manifest.id] = target, record
-                manifests[manifest.id] = manifest
-                return manifest
-
-            def collect(identifier: str) -> None:
-                if identifier in complete:
-                    return
-                if identifier in visiting:
-                    raise PluginError("Plugin dependency cycle: " + identifier)
-                visiting.add(identifier)
-                manifest = manifests[identifier]
-                for dependency, version in manifest.requires.items():
-                    if dependency in staged:
-                        if manifests[dependency].version != version:
-                            error_message = f"Dependency conflict: {identifier} requires {dependency}@{version}."
-                            raise PluginError(
-                                error_message,
-                            )
-                        collect(dependency)
-                    elif dependency in available:
-                        if read_manifest(available[dependency]).version != version:
-                            error_message = f"Dependency conflict: {manifest.id} requires {dependency}@{version}."
-                            raise PluginError(
-                                error_message,
-                            )
-                    else:
-                        catalog = records[identifier].get("catalog")
-                        spec = (
-                            (catalog + "/" if catalog else "")
-                            + dependency
-                            + "@"
-                            + version
-                        )
-                        stage(spec, (dependency, version))
-                        collect(dependency)
-                visiting.remove(identifier)
-                complete.add(identifier)
-
-            primary = stage(sources[0])
-            # Stage every requested root before resolving dependencies so the
-            # transaction sees the complete profile, including version upgrades.
-            for source in sources[1:]:
-                stage(source)
-            for identifier in list(staged):
-                collect(identifier)
-            expected_sources = {}
-            for identifier in staged:
-                old = next(
-                    (item for item in self.inventory() if item["id"] == identifier),
-                    None,
-                )
-                if old and old["scope"] != scope:
-                    raise PluginError(
-                        "Plugin ID already exists in another scope: " + identifier,
-                    )
-                if old:
-                    expected_sources[old["path"]] = digest(
-                        files(old["path"], validate_manifest=False),
-                    )
-                if old and old["modified"] and not force:
-                    raise PluginError(
-                        "Plugin has local edits; use --force to replace: " + identifier,
-                    )
-            if linked:
-                if (
-                    len(staged) != 1
-                    or len(sources) != 1
-                    or not Path(sources[0]).expanduser().is_dir()
-                ):
-                    error_message = (
-                        "link requires a local package with installed dependencies."
-                    )
-                    raise PluginError(
-                        error_message,
-                    )
-                records[primary.id]["linked"] = True
-                records[primary.id]["path"] = str(
-                    Path(sources[0]).expanduser().resolve(),
-                )
-            return self._transaction(
-                scope,
-                staged,
-                records,
-                [],
-                temporary,
-                ctx,
-                expected_sources,
+        spec: str,
+        plan: _Staging,
+        expected: tuple[str, str] | None = None,
+    ) -> Manifest:
+        target = Path(plan.temporary.name) / ("package-" + str(len(plan.staged)))
+        manifest, record = self._stage(spec, target)
+        if expected is not None and (manifest.id, manifest.version) != expected:
+            message = "Dependency resolved to an unexpected version."
+            raise PluginError(message)
+        if plan.request.preserve_disabled and manifest.id in self.disabled:
+            raise PluginError(
+                "Profile requires a disabled or removed plugin; "
+                "enable or install it explicitly first: " + manifest.id,
             )
+        if manifest.id in plan.staged:
+            if plan.records[manifest.id]["version"] != manifest.version:
+                raise PluginError("Conflicting dependency versions: " + manifest.id)
+            return manifest
+        plan.staged[manifest.id], plan.records[manifest.id] = target, record
+        plan.manifests[manifest.id] = manifest
+        return manifest
+
+    def _collect_install(self, identifier: str, plan: _Staging) -> None:
+        if identifier in plan.complete:
+            return
+        if identifier in plan.visiting:
+            raise PluginError("Plugin dependency cycle: " + identifier)
+        plan.visiting.add(identifier)
+        manifest = plan.manifests[identifier]
+        for dependency, version in manifest.requires.items():
+            if dependency in plan.staged:
+                _require_version(identifier, plan.manifests[dependency], version)
+                self._collect_install(dependency, plan)
+            elif dependency in plan.available:
+                _require_version(
+                    identifier,
+                    read_manifest(plan.available[dependency]),
+                    version,
+                )
+            else:
+                catalog = plan.records[identifier].get("catalog")
+                spec = (catalog + "/" if catalog else "") + dependency + "@" + version
+                self._stage_install(spec, plan, (dependency, version))
+                self._collect_install(dependency, plan)
+        plan.visiting.remove(identifier)
+        plan.complete.add(identifier)
+
+    def _replacement_sources(self, plan: _Staging) -> dict[str, str]:
+        expected_sources: dict[str, str] = {}
+        inventory = {item["id"]: item for item in self.inventory()}
+        for identifier in plan.staged:
+            old = inventory.get(identifier)
+            if old is None:
+                continue
+            if old["scope"] != plan.request.scope:
+                raise PluginError(
+                    "Plugin ID already exists in another scope: " + identifier,
+                )
+            expected_sources[old["path"]] = digest(
+                files(old["path"], validate_manifest=False),
+            )
+            if old["modified"] and not plan.request.force:
+                raise PluginError(
+                    "Plugin has local edits; use --force to replace: " + identifier,
+                )
+        return expected_sources
+
+    @staticmethod
+    def _link_primary(plan: _Staging, primary: str) -> None:
+        if not plan.request.linked:
+            return
+        sources = plan.request.sources
+        if (
+            len(plan.staged) != 1
+            or len(sources) != 1
+            or not Path(sources[0]).expanduser().is_dir()
+        ):
+            message = "link requires a local package with installed dependencies."
+            raise PluginError(message)
+        plan.records[primary]["linked"] = True
+        plan.records[primary]["path"] = str(Path(sources[0]).expanduser().resolve())
+
+    def _stage_roots(self, plan: _Staging) -> _PackageChange:
+        primary = self._stage_install(plan.request.sources[0], plan)
+        # Stage every requested root before collecting dependencies so an entire
+        # profile upgrade is checked as one candidate generation.
+        for source in plan.request.sources[1:]:
+            self._stage_install(source, plan)
+        for identifier in list(plan.staged):
+            self._collect_install(identifier, plan)
+        expected_sources = self._replacement_sources(plan)
+        self._link_primary(plan, primary.id)
+        return _PackageChange(
+            scope=plan.request.scope,
+            staged=plan.staged,
+            records=plan.records,
+            temporary=plan.temporary,
+            ctx=plan.request.ctx,
+            expected_sources=expected_sources,
+        )
+
+    def _install_sources(self, request: _InstallRequest) -> InstallResult:
+        temporary = tempfile.TemporaryDirectory(prefix="raychat-install-")
+        try:
+            plan = _Staging(
+                request=request,
+                temporary=temporary,
+                available=self.paths(include_disabled=True),
+            )
+            return self._transaction(self._stage_roots(plan))
         except BaseException:
             temporary.cleanup()
             raise
 
-    def _transaction(
-        self,
-        scope: str,
-        staged: Mapping[str, Path],
-        records: Mapping[str, PackageRecord],
-        removed: list[str],
-        temporary: tempfile.TemporaryDirectory[str],
-        ctx: PluginContext | None,
-        expected_sources: Mapping[str, str] | None = None,
-    ) -> dict[str, Any]:
-        state = copy.deepcopy(self._states[scope])
-        before = self._read(scope)
-        backups: dict[Path, Path] = {}
-        written: list[Path] = []
-        base = self.roots[scope]
-        for identifier, record in records.items():
+    def _transaction(self, change: _PackageChange) -> InstallResult:
+        state = copy.deepcopy(self._states[change.scope])
+        before = self._read(change.scope)
+        base = self.roots[change.scope]
+        for identifier, record in change.records.items():
             record.setdefault("path", str(base / "plugins" / identifier))
             state["packages"][identifier] = record
-            state["disabled"] = [v for v in state["disabled"] if v != identifier]
-        for identifier in removed:
+            state["disabled"] = [
+                value for value in state["disabled"] if value != identifier
+            ]
+        for identifier in change.removed:
             state["packages"].pop(identifier, None)
             if identifier not in state["disabled"]:
                 state["disabled"].append(identifier)
+        plan = _TransactionState(change=change, before=before, state=state)
+        return self._apply_transaction(plan)
 
-        held: list[FileLock] = []
-
-        def release() -> None:
-            while held:
-                held.pop().close()
-
-        def prepare() -> None:
-            lock = self._scope_lock(scope)
-            lock.acquire()
-            held.append(lock)
-            if self._read(scope) != before:
-                error_message = "Installation state changed; retry the operation."
-                raise PluginError(error_message)
-            for path, expected in (expected_sources or {}).items():
-                if digest(files(path, validate_manifest=False)) != expected:
-                    raise PluginError(
-                        "Installed source changed while the update was queued: " + path,
-                    )
-            for identifier, source in staged.items():
-                record = records[identifier]
-                if record["linked"]:
-                    continue
-                target = Path(record["path"])
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.exists():
-                    backup = target.parent / (
-                        ".backup-" + identifier + "-" + os.urandom(8).hex()
-                    )
-                    backups[target] = backup
-                    os.replace(target, backup)
-                written.append(target)
-                incoming = target.parent / (
-                    ".incoming-" + identifier + "-" + os.urandom(8).hex()
+    def _prepare_transaction(self, plan: _TransactionState) -> None:
+        lock = self._scope_lock(plan.change.scope)
+        lock.acquire()
+        plan.held.append(lock)
+        if self._read(plan.change.scope) != plan.before:
+            message = "Installation state changed; retry the operation."
+            raise PluginError(message)
+        for path, expected in plan.change.expected_sources.items():
+            if digest(files(path, validate_manifest=False)) != expected:
+                raise PluginError(
+                    "Installed source changed while the update was queued: " + path,
                 )
-                try:
-                    shutil.copytree(source, incoming)
-                    os.replace(incoming, target)
-                finally:
-                    shutil.rmtree(incoming, ignore_errors=True)
-            atomic_json(self.state_file(scope), state)
+        self._write_transaction_files(plan)
+        atomic_json(self.state_file(plan.change.scope), plan.state)
 
-        def rollback(error: BaseException) -> None:
+    @staticmethod
+    def _write_transaction_files(plan: _TransactionState) -> None:
+        for identifier, source in plan.change.staged.items():
+            record = plan.change.records[identifier]
+            if record["linked"]:
+                continue
+            target = Path(record["path"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                backup = target.parent / (
+                    ".backup-" + identifier + "-" + os.urandom(8).hex()
+                )
+                plan.backups[target] = backup
+                target.replace(backup)
+            plan.written.append(target)
+            incoming = target.parent / (
+                ".incoming-" + identifier + "-" + os.urandom(8).hex()
+            )
             try:
-                if not held:
-                    return
-                for target in reversed(written):
-                    shutil.rmtree(target, ignore_errors=True)
-                    if target in backups:
-                        os.replace(backups[target], target)
-                if self._read(scope) == state:
-                    atomic_json(self.state_file(scope), before)
+                shutil.copytree(source, incoming)
+                incoming.replace(target)
             finally:
-                try:
-                    temporary.cleanup()
-                finally:
-                    release()
+                shutil.rmtree(incoming, ignore_errors=True)
 
-        def commit() -> None:
-            try:
-                self._states[scope] = state
-                for backup in backups.values():
-                    shutil.rmtree(backup, ignore_errors=True)
-                if self.runtime is not None:
-                    self.runtime.disabled.update(self.disabled)
-                for identifier in removed:
-                    old = before["packages"].get(identifier)
-                    if old and not old.get("linked"):
-                        path = Path(old["path"])
-                        if path.parent == base / "plugins":
-                            shutil.rmtree(path, ignore_errors=True)
-            finally:
-                try:
-                    temporary.cleanup()
-                finally:
-                    release()
+    def _rollback_transaction(self, plan: _TransactionState) -> None:
+        try:
+            self._restore_transaction(plan)
+        finally:
+            plan.cleanup()
 
-        added = [record["path"] for record in records.values()]
+    def _restore_transaction(self, plan: _TransactionState) -> None:
+        if not plan.held:
+            return
+        for target in reversed(plan.written):
+            shutil.rmtree(target, ignore_errors=True)
+            if target in plan.backups:
+                plan.backups[target].replace(target)
+        if self._read(plan.change.scope) == plan.state:
+            atomic_json(self.state_file(plan.change.scope), plan.before)
+
+    def _commit_transaction(self, plan: _TransactionState) -> None:
+        try:
+            self._finish_transaction(plan)
+        finally:
+            plan.cleanup()
+
+    def _finish_transaction(self, plan: _TransactionState) -> None:
+        self._states[plan.change.scope] = plan.state
+        for backup in plan.backups.values():
+            shutil.rmtree(backup, ignore_errors=True)
+        if self.runtime is not None:
+            self.runtime.disabled.update(self.disabled)
+        base = self.roots[plan.change.scope]
+        for identifier in plan.change.removed:
+            old = plan.before["packages"].get(identifier)
+            if old and not old["linked"]:
+                path = Path(old["path"])
+                if path.parent == base / "plugins":
+                    shutil.rmtree(path, ignore_errors=True)
+
+    def _validate_transaction(self, plan: _TransactionState) -> None:
+        # Validate the complete installed dependency graph before commit.
+        paths = self.paths(include_disabled=True)
+        paths.update({
+            name: Path(item["path"]) for name, item in plan.change.records.items()
+        })
+        for name in plan.change.removed:
+            paths.pop(name, None)
+        dependency_order({
+            name: read_manifest(path, require_current_sdk=False)
+            for name, path in paths.items()
+        })
+
+    def _apply_transaction(self, plan: _TransactionState) -> InstallResult:
+        change = plan.change
         if self.runtime is None:
             try:
-                prepare()
-                # Validate the complete installed dependency graph before commit.
-                paths = self.paths(include_disabled=True)
-                paths.update(
-                    {name: Path(item["path"]) for name, item in records.items()},
-                )
-                for name in removed:
-                    paths.pop(name, None)
-                dependency_order(
-                    {
-                        name: read_manifest(path, require_current_sdk=False)
-                        for name, path in paths.items()
-                    },
-                )
-                commit()
-            except BaseException as exc:
-                rollback(exc)
+                self._prepare_transaction(plan)
+                self._validate_transaction(plan)
+                self._commit_transaction(plan)
+            except BaseException:
+                self._rollback_transaction(plan)
                 raise
-            return {"applied": True, "packages": list(records), "removed": removed}
+            return {
+                "applied": True,
+                "packages": list(change.records),
+                "removed": change.removed,
+            }
         removed_active = [
             identifier
-            for identifier in [*removed, *records]
+            for identifier in [*change.removed, *change.records]
             if identifier in self.runtime.plugins
         ]
-        if ctx is None:
-            ctx = self.runtime.context("plugin_manager")
-        applied = ctx.update_plugins(
-            add=added,
+        context = change.ctx or self.runtime.context("plugin_manager")
+
+        def prepare() -> None:
+            self._prepare_transaction(plan)
+
+        def commit() -> None:
+            self._commit_transaction(plan)
+
+        def rollback(_error: BaseException) -> None:
+            self._rollback_transaction(plan)
+
+        applied = context.update_plugins(
+            add=[record["path"] for record in change.records.values()],
             remove=removed_active,
             prepare=prepare,
             commit=commit,
             rollback=rollback,
         )
-        return {"applied": applied, "packages": list(records), "removed": removed}
+        return {
+            "applied": applied,
+            "packages": list(change.records),
+            "removed": change.removed,
+        }
 
     def set_enabled(
         self,
         identifier: str,
-        enabled: bool,
         *,
+        enabled: bool,
         scope: str = "workspace",
         ctx: PluginContext | None = None,
     ) -> bool:
-        runtime = self.runtime
-        if runtime is None:
-            error_message = "Plugin activation requires an attached runtime."
-            raise PluginError(error_message)
-        paths = self.paths(include_disabled=True)
-        if identifier not in paths:
-            raise PluginError("Unknown plugin: " + identifier)
-        if enabled and any(
-            identifier in v["disabled"] for k, v in self._states.items() if k != scope
-        ):
-            error_message = (
-                "Plugin is disabled in another scope; enable it there first."
-            )
-            raise PluginError(
-                error_message,
-            )
+        """Queue a dependency-checked activation change with a locked receipt.
+
+        Returns
+        -------
+        bool
+            The validated result described by this operation.
+
+        """
+        runtime, paths = self._activation_inputs(
+            identifier,
+            enabled=enabled,
+            scope=scope,
+        )
         before = self._read(scope)
         state = copy.deepcopy(before)
         state["disabled"] = [v for v in state["disabled"] if v != identifier]
@@ -1026,13 +1493,10 @@ class PackageManager:
 
         def commit() -> None:
             self._states[scope] = state
-            if enabled:
-                runtime.disabled.discard(identifier)
-            else:
-                runtime.disabled.add(identifier)
+            _apply_enabled(runtime, identifier, enabled=enabled)
             release()
 
-        def rollback(error: BaseException) -> None:
+        def rollback(_error: BaseException) -> None:
             if not held:
                 return
             try:
@@ -1054,17 +1518,62 @@ class PackageManager:
             rollback=rollback,
         )
 
+    def _activation_inputs(
+        self,
+        identifier: str,
+        *,
+        enabled: bool,
+        scope: str,
+    ) -> tuple[Runtime, dict[str, Path]]:
+        runtime = self.runtime
+        if runtime is None:
+            error_message = "Plugin activation requires an attached runtime."
+            raise PluginError(error_message)
+        paths = self.paths(include_disabled=True)
+        if identifier not in paths:
+            raise PluginError("Unknown plugin: " + identifier)
+        if enabled and any(
+            identifier in v["disabled"] for k, v in self._states.items() if k != scope
+        ):
+            error_message = (
+                "Plugin is disabled in another scope; enable it there first."
+            )
+            raise PluginError(
+                error_message,
+            )
+        return runtime, paths
+
     def uninstall(
         self,
         identifier: str,
         *,
         scope: str = "workspace",
         ctx: PluginContext | None = None,
-    ) -> dict[str, Any]:
+    ) -> InstallResult:
+        """Queue package removal while preserving linked source directories.
+
+        Returns
+        -------
+        InstallResult
+            The validated result described by this operation.
+
+        Raises
+        ------
+        PluginError
+            If this scope does not own the installed package.
+
+        """
         if identifier not in self._states[scope]["packages"]:
             raise PluginError("Plugin is not installed in this scope: " + identifier)
         temporary = tempfile.TemporaryDirectory(prefix="raychat-uninstall-")
-        return self._transaction(scope, {}, {}, [identifier], temporary, ctx)
+        return self._transaction(
+            _PackageChange(
+                scope=scope,
+                removed=[identifier],
+                temporary=temporary,
+                ctx=ctx,
+            ),
+        )
 
     def update(
         self,
@@ -1073,7 +1582,20 @@ class PackageManager:
         scope: str = "workspace",
         force: bool = False,
         ctx: PluginContext | None = None,
-    ) -> dict[str, Any]:
+    ) -> InstallResult:
+        """Resolve an installed release source again and queue its replacement.
+
+        Returns
+        -------
+        InstallResult
+            The validated result described by this operation.
+
+        Raises
+        ------
+        PluginError
+            If the package is missing or linked to a development source.
+
+        """
         record = self._states[scope]["packages"].get(identifier)
         if record is None or record.get("linked"):
             error_message = "Only installed release packages can be updated."
@@ -1083,9 +1605,15 @@ class PackageManager:
             source = source.rsplit("@", 1)[0]
         return self.install(source, scope=scope, force=force, ctx=ctx)
 
-    def check(self, path: str | Path) -> dict[str, Any]:
-        from .plugin_sources import SourceTree
+    def check(self, path: str | Path) -> CheckResult:
+        """Load a captured dependency generation and report its registrations.
 
+        Returns
+        -------
+        CheckResult
+            The validated result described by this operation.
+
+        """
         available = self.paths(include_disabled=True)
         manifest = read_manifest(path)
         available[manifest.id] = Path(path).resolve()
@@ -1122,7 +1650,23 @@ class PackageManager:
                     tree.retire()
 
 
+PLUGIN_MANAGER = ServiceKey("plugin_manager", PackageManager)
+
+
 def scaffold(path: str | Path) -> Path:
+    """Create a shareable SDK package with checked action and settings fields.
+
+    Returns
+    -------
+    Path
+        The validated result described by this operation.
+
+    Raises
+    ------
+    PluginError
+        If the destination exists or its name is not a valid plugin ID.
+
+    """
     path = Path(path).expanduser().resolve()
     if path.exists():
         error_message = "Scaffold destination already exists."
@@ -1139,32 +1683,56 @@ def scaffold(path: str | Path) -> Path:
         "A shareable RayChat plugin",
         {},
         {"greeting": "Hello"},
-        instructions='Use {"action":"greet"} to get a greeting. The operator can use /greet. Calls are counted in session state.',
+        instructions=(
+            'Use {"action":"greet"} to get a greeting. '
+            "The operator can use /greet. Calls are counted in session state."
+        ),
     )
     atomic_json(path / "plugin.json", manifest.document())
     (path / "__init__.py").write_text(
-        """from raychat.sdk import Action, CommandDefinition, PluginAPI, PluginContext, ToolDefinition
+        """from raychat.sdk import (
+    CommandDefinition, PluginAPI, PluginContext, ToolDefinition,
+)
+from raychat.validation import integer_field, object_field, text_field
 
 
 def register(api: PluginAPI) -> None:
-    def validate(action: Action) -> None:
+    def validate(action: dict[str, object]) -> None:
         if set(action) != {'action'}:
             raise ValueError('No arguments are accepted.')
 
-    def execute(action: Action, ctx: PluginContext) -> Action:
-        ctx.state['calls'] = ctx.state.get('calls', 0) + 1
-        return {'ok': True, 'message': ctx.settings['greeting'], 'calls': ctx.state['calls']}
+    def execute(_action: dict[str, object], ctx: PluginContext) -> dict[str, object]:
+        raw_state: object = ctx.state
+        state = object_field(raw_state, 'greeting state')
+        calls = integer_field(state.get('calls', 0), 'calls', minimum=0) + 1
+        state['calls'] = calls
+        return {
+            'ok': True,
+            'message': text_field(ctx.settings['greeting'], 'greeting'),
+            'calls': calls,
+        }
 
-    def greet(arguments: str, ctx: PluginContext) -> str:
-        return str(execute({'action': 'greet'}, ctx)['message'])
+    def greet(_arguments: str, ctx: PluginContext) -> str:
+        return text_field(execute({'action': 'greet'}, ctx)['message'], 'greeting')
 
-    api.register_tool(ToolDefinition('greet', 'Return a greeting', validate, execute, False))
-    api.register_command(CommandDefinition('greet', greet, description='Greet the user', usage='/greet [name]'))
+    api.register_tool(ToolDefinition(
+        'greet', 'Return a greeting', validate, execute, requires_approval=False,
+    ))
+    api.register_command(CommandDefinition(
+        'greet', greet, description='Greet the user', usage='/greet [name]',
+    ))
 """,
         encoding="utf-8",
     )
     (path / "README.md").write_text(
-        f"# {path.name}\n\nUse `/greet` or the `greet` tool. Settings live under `plugins.settings.{path.name}`.\n\nCheck with `/plugins check PATH`, share with `/plugins pack PATH`, install with `/plugins install ZIP`. In the chat, run `/greet`, then ask the model to use the greeting tool. Change plugin.json instructions and the greeting implementation, then repeat without restarting.\n",
+        f"# {path.name}\n\n"
+        "Use `/greet` or the `greet` tool. Settings live under "
+        f"`plugins.settings.{path.name}`.\n\n"
+        "Check with `/plugins check PATH`, share with `/plugins pack PATH`, "
+        "install with `/plugins install ZIP`. In the chat, run `/greet`, "
+        "then ask the model to use the greeting tool. Change plugin.json "
+        "instructions and the greeting implementation, then repeat without "
+        "restarting.\n",
         encoding="utf-8",
     )
     return path

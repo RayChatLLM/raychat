@@ -1,6 +1,9 @@
 """Serialized optimizer results and loader identifiers retain their contracts."""
-from plugins.optimization.gepa.core.data_loader import DataLoader, ensure_loader
-from plugins.optimization.gepa.core.result import ResultSnapshot
+from random import Random
+
+from plugins.optimization.gepa.data_loader import DataLoader, ensure_loader
+from plugins.optimization.gepa.optimize_anything import EngineConfig
+from plugins.optimization.gepa.result import ResultSnapshot
 
 
 def misspelled_result_field(snapshot: ResultSnapshot) -> None:
@@ -13,3 +16,16 @@ def wrong_best_index(snapshot: ResultSnapshot) -> None:
 
 def wrong_loader_identifiers() -> DataLoader[str, str]:
     return ensure_loader(["row"])  # expect-error: return-value
+
+
+def wrong_sampling_seed() -> EngineConfig:
+    return EngineConfig(seed="7")  # expect-error: arg-type
+
+
+def wrong_sampling_weights(rng: Random) -> list[str]:
+    return rng.choices(["a"], ["1"])  # expect-error: list-item
+
+
+def wrong_sampling_result(rng: Random) -> str:
+    value = rng.choice([1])
+    return value  # expect-error: return-value

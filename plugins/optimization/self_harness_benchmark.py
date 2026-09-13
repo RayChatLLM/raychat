@@ -1,4 +1,3 @@
-# Copyright 2026
 """Measure task-specific Self-Harness learning with fixed file-task cases.
 
 Run /benchmark-harness --output report.json to retain the provider evidence.
@@ -25,6 +24,7 @@ from typing import TYPE_CHECKING, TypedDict
 import raychat
 from raychat.composition import create_runtime
 from raychat.sdk import Messages, ProviderError, ProviderService, ServiceSlot
+from raychat.service_contracts import CHAT, ChatService, OptimizationComponent
 from raychat.type_support import override
 from raychat.validation import array_field, json_object, object_field, plain, text_field
 
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
     from raychat.sdk import Chat
+    from raychat.service_contracts import OptimizationBindings
 
 _provider = ServiceSlot[ProviderService]("http_provider")
 _MAX_REQUEST_BYTES = 16 * 1024 * 1024
@@ -440,9 +441,11 @@ def _prepare_workspace(workspace: Path, endpoint: str, model: str) -> None:
         "import json, sys\nfrom pathlib import Path\n"
         f"sys.path.insert(0, {str(source_root)!r})\n"
         "from raychat.composition import create_runtime\n"
+        "from raychat.service_contracts import OPTIMIZATION\n"
         'runtime=create_runtime(plugins=["optimization"], '
         'source=json.loads(Path("sources.json").read_text()))\n'
-        'evaluate=runtime.services["optimization"]("self_harness_benchmark").evaluate\n'
+        "evaluate=OPTIMIZATION.validate(runtime.services[OPTIMIZATION.name]).load("
+        '"self_harness_benchmark").evaluate\n'
         "config=json.loads(Path('endpoint.json').read_text())\n"
         "path=Path('.raychat/harness.md')\n"
         "print(json.dumps(evaluate(path.read_text() if path.exists() else '',"
@@ -470,12 +473,16 @@ def _measure(workspace: Path, endpoint: str, report: ExperimentReport) -> None:
         self_harness=harness_options,
     )
     services: object = runtime.services
-    object_field(services, "runtime.services")["chat"] = _provider.get().ChatAPI(
+    chat = _provider.get().ChatAPI(
         endpoint,
         report["model"],
         "",
         120,
         request_options={},
+    )
+    object_field(services, "runtime.services")[CHAT.name] = ChatService(
+        chat,
+        lambda: chat,
     )
     try:
         _progress("Running fixed baseline and one proposed candidate.")
@@ -545,3 +552,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def _bind_component(bindings: OptimizationBindings) -> None:
+    _provider.bind(bindings.provider)
+
+
+COMPONENT = OptimizationComponent(main, _bind_component)

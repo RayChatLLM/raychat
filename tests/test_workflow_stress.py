@@ -1,4 +1,3 @@
-# Copyright 2026
 """Fifty isolated plugin-owned children under a bounded context budget."""
 
 from __future__ import annotations

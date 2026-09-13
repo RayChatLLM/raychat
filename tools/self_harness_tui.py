@@ -8,19 +8,88 @@ ability. The driver never calls plugin or session APIs.
 from __future__ import annotations
 
 import argparse
-import json
+import shlex
+import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+from raychat.validation import (
+    ConfigurationError,
+    array_field,
+    integer_field,
+    json_object,
+    object_field,
+    text_field,
+)
 
 from .accept_tui import SOURCE, Case
+from .acceptance_support import json_text, read_object, verification_paths
 from .collective_tui import wait_done
 from .drive_tui import TerminalChat
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
-def counts(runs: list[dict[str, Any]], split: str) -> tuple[int, int]:
-    return sum(run[split]["passed"] for run in runs), sum(
-        run[split]["total"] for run in runs
+
+def counts(runs: object, split: str) -> tuple[int, int]:
+    """Sum validated integer outcomes for one independently recorded split.
+
+    Returns
+    -------
+    tuple[int, int]
+        Passed cases and total cases across the repetitions.
+
+    """
+    records = [object_field(value, "run") for value in array_field(runs, "runs")]
+    results = [object_field(run[split], split) for run in records]
+    return (
+        sum(integer_field(result["passed"], "passed", minimum=0) for result in results),
+        sum(integer_field(result["total"], "total", minimum=0) for result in results),
     )
+
+
+def summarize_report(report: Mapping[str, object]) -> dict[str, object]:
+    """Compare validated paired scores from a recorded provider experiment.
+
+    Returns
+    -------
+    dict[str, object]
+        Measured training, validation and test evidence with the original gate.
+
+    """
+    accepted = [
+        object_field(item, "attempt")
+        for item in array_field(report["attempts"], "attempts")
+        if object_field(item, "attempt").get("decision") == "accepted"
+    ]
+    test_before = counts(report["test_baseline"], "test")
+    test_after = counts(report["test_deployed"], "test")
+    summary: dict[str, object] = {
+        "tui_completed": True,
+        "model": report["model"],
+        "request_options": report["request_options"],
+        "fixture_sha256": report["fixture_sha256"],
+        "accepted_candidates": len(accepted),
+        "elapsed_seconds": report["elapsed_seconds"],
+        "provider_calls": len(array_field(report["calls"], "calls")),
+        "scope": report["scope"],
+        "test_before": test_before,
+        "test_after": test_after,
+    }
+    if accepted:
+        candidate = accepted[-1]
+        summary.update(
+            training_before=counts(candidate["baseline"], "held_in"),
+            training_after=counts(candidate["candidate"], "held_in"),
+            validation_before=counts(candidate["baseline"], "held_out"),
+            validation_after=counts(candidate["candidate"], "held_out"),
+        )
+    before, total_before = test_before
+    after, total_after = test_after
+    summary["measured_benefit"] = (
+        bool(accepted) and total_before == total_after and after > before
+    )
+    return summary
 
 
 def run(
@@ -28,16 +97,35 @@ def run(
     *,
     model: str | None,
     repetitions: int,
-    request_options: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    request_options: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Measure the live provider and retain evidence before enforcing improvement.
+
+    Returns
+    -------
+    dict[str, object]
+        The recorded outcome of every retained acceptance gate.
+
+    Raises
+    ------
+    AssertionError
+        The observed result violates a retained scenario requirement.
+
+    """
     if model is not None or request_options is not None:
-        config = json.loads(case.config.read_text())
-        provider = config["plugins"]["settings"].setdefault("chat_completions", {})
+        config = read_object(case.config)
+        provider = object_field(
+            object_field(
+                object_field(config["plugins"], "plugins")["settings"],
+                "settings",
+            ).setdefault("chat_completions", {}),
+            "chat provider",
+        )
         if model is not None:
             provider["model"] = model
         if request_options is not None:
             provider["request_options"] = request_options
-        case.config.write_text(json.dumps(config))
+        case.config.write_text(json_text(config))
     path = case.output / "report.json"
     chat = TerminalChat(
         case.root,
@@ -54,42 +142,14 @@ def run(
     try:
         chat.wait("Main chat", 30)
         # shlex quoting is for the harness command parser, not an OS shell.
-        import shlex
-
         chat.send(
-            f"/benchmark-harness --output {shlex.quote(str(path))} --repetitions {repetitions}\r",
+            f"/benchmark-harness --output {shlex.quote(str(path))} "
+            f"--repetitions {repetitions}\r",
         )
         wait_done(chat, path.exists, 600)
-        report = json.loads(path.read_text())
-        accepted = [
-            item for item in report["attempts"] if item.get("decision") == "accepted"
-        ]
-        summary: dict[str, Any] = {
-            "tui_completed": True,
-            "model": report["model"],
-            "request_options": report["request_options"],
-            "fixture_sha256": report["fixture_sha256"],
-            "accepted_candidates": len(accepted),
-            "elapsed_seconds": report["elapsed_seconds"],
-            "provider_calls": len(report["calls"]),
-            "scope": report["scope"],
-            "test_before": counts(report["test_baseline"], "test"),
-            "test_after": counts(report["test_deployed"], "test"),
-        }
-        if accepted:
-            candidate = accepted[-1]
-            summary.update(
-                training_before=counts(candidate["baseline"], "held_in"),
-                training_after=counts(candidate["candidate"], "held_in"),
-                validation_before=counts(candidate["baseline"], "held_out"),
-                validation_after=counts(candidate["candidate"], "held_out"),
-            )
-        before, total_before = summary["test_before"]
-        after, total_after = summary["test_after"]
-        summary["measured_benefit"] = (
-            bool(accepted) and total_before == total_after and after > before
-        )
-        (case.output / "result.json").write_text(json.dumps(summary, indent=2))
+        report = read_object(path)
+        summary = summarize_report(report)
+        (case.output / "result.json").write_text(json_text(summary, indent=2))
         if not summary["measured_benefit"]:
             error_message = (
                 "This run did not demonstrate improvement; full evidence was retained"
@@ -103,6 +163,7 @@ def run(
 
 
 def main() -> None:
+    """Run the terminal acceptance command and emit its observed report."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, required=True)
@@ -113,28 +174,29 @@ def main() -> None:
     )
     parser.add_argument("--repetitions", type=int, default=2)
     args = parser.parse_args()
+    paths = verification_paths(args)
+    request_options: object = args.request_options
+    model: object = args.model
+    repetitions: object = args.repetitions
     try:
         options = (
-            json.loads(args.request_options)
-            if args.request_options is not None
+            object_field(
+                json_object(text_field(request_options, "request options")),
+                "request options",
+            )
+            if request_options is not None
             else None
         )
-    except json.JSONDecodeError:
+    except (ConfigurationError, ValueError):
         parser.error("--request-options must contain a JSON object")
-    if options is not None and not isinstance(options, dict):
-        parser.error("--request-options must contain a JSON object")
-    case = Case(args.root.resolve(), args.output.resolve())
-    print(
-        json.dumps(
-            run(
-                case,
-                model=args.model,
-                repetitions=args.repetitions,
-                request_options=options,
-            ),
-            indent=2,
-        ),
+    case = Case(paths.root, paths.output)
+    result = run(
+        case,
+        model=text_field(model, "model", nullable=True),
+        repetitions=integer_field(repetitions, "repetitions"),
+        request_options=options,
     )
+    sys.stdout.write(json_text(result, indent=2) + "\n")
 
 
 if __name__ == "__main__":

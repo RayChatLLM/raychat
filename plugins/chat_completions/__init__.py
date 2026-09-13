@@ -1,4 +1,3 @@
-# Copyright 2026
 """Expose the bundled HTTP provider and its plugin entrypoint."""
 
 from raychat.sdk import ProviderError as ChatAPIError

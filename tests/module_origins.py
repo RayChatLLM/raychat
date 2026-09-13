@@ -4,58 +4,62 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import sys
 import sysconfig
 import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from raychat.plugin_sources import SourceTree
+from raychat.validation import array_field, json_object, object_field, text_field
 
-OPTIONAL_PACKAGES = frozenset(
-    {
-        "numpy",
-        "litellm",
-        "torch",
-        "tqdm",
-        "cloudpickle",
-        "wandb",
-        "mlflow",
-        "datasets",
-        "psutil",
-    },
-)
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+OPTIONAL_PACKAGES = frozenset({
+    "numpy",
+    "litellm",
+    "torch",
+    "tqdm",
+    "cloudpickle",
+    "wandb",
+    "mlflow",
+    "datasets",
+    "psutil",
+})
 
 
-def external_module_origins(project: Path) -> list[list[str]]:
-    """Reject nonstdlib imports, allowing only exact project plugin captures."""
-    project = project.resolve()
+def _published(project: Path) -> dict[str, dict[str, bytes]]:
     catalog = project / "plugin_catalog/catalog.json"
+    records = object_field(json_object(catalog.read_text(encoding="utf-8")), "catalog")
     published: dict[str, dict[str, bytes]] = {}
-    for record in json.loads(catalog.read_text(encoding="utf-8"))["plugins"]:
-        archive = (catalog.parent / record["url"]).resolve()
+    for value in array_field(records["plugins"], "catalog plugins"):
+        record = object_field(value, "catalog plugin")
+        archive = (catalog.parent / text_field(record["url"], "archive URL")).resolve()
         if not archive.is_relative_to(catalog.parent):
-            error_message = "Fixture plugin archive is outside the project catalog"
-            raise AssertionError(
-                error_message,
-            )
+            message = "Fixture plugin archive is outside the project catalog"
+            raise AssertionError(message)
         data = archive.read_bytes()
-        if hashlib.sha256(data).hexdigest() != record["sha256"]:
-            error_message = "Fixture plugin archive does not match its catalog digest"
-            raise AssertionError(
-                error_message,
-            )
+        if hashlib.sha256(data).hexdigest() != text_field(
+            record["sha256"],
+            "archive digest",
+        ):
+            message = "Fixture plugin archive does not match its catalog digest"
+            raise AssertionError(message)
         with zipfile.ZipFile(io.BytesIO(data)) as stream:
-            published[record["id"]] = {
+            published[text_field(record["id"], "plugin identifier")] = {
                 item.filename: stream.read(item)
                 for item in stream.infolist()
                 if not item.is_dir()
             }
-    locations = [
-        sysconfig.get_path("stdlib"),
-        sysconfig.get_path("platstdlib"),
-        sysconfig.get_config_var("DESTSHARED"),
-    ]
+    return published
+
+
+def _stdlib_roots() -> list[Path]:
+    locations = [sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib")]
+    shared: object = sysconfig.get_config_var("DESTSHARED")
+    if isinstance(shared, str) and shared:
+        locations.append(shared)
     # Windows extension modules live under DLLs rather than the Lib directory.
     locations.extend(
         str(Path(prefix) / "DLLs")
@@ -66,31 +70,70 @@ def external_module_origins(project: Path) -> list[list[str]]:
             sys.base_exec_prefix,
         )
     )
-    stdlib_roots = [Path(location).resolve() for location in locations if location]
+    return [Path(location).resolve() for location in locations if location]
+
+
+def _attribute(value: object, name: str) -> object:
+    result: object = getattr(value, name, None)
+    return result
+
+
+def _source(module: object) -> Path | None:
+    value = _attribute(module, "__file__")
+    if not value:
+        return None
+    if isinstance(value, (str, Path)):
+        return Path(value).resolve()
+    message = "An imported module has a non-path source location."
+    raise TypeError(message)
+
+
+def _published_capture(
+    name: str,
+    module: object,
+    source: Path,
+    published: Mapping[str, dict[str, bytes]],
+) -> bool:
+    tree = _attribute(_attribute(module, "__loader__"), "tree")
+    if not isinstance(tree, SourceTree) or not source.is_relative_to(tree.directory):
+        return False
+    expected = published.get(tree.manifest.id)
+    relative = source.relative_to(tree.directory).as_posix()
+    return (
+        expected is not None
+        and tree.sources == expected
+        and name.partition(".")[0] == tree.prefix
+        and expected.get(relative) == source.read_bytes()
+    )
+
+
+def external_module_origins(project: Path) -> list[list[str]]:
+    """Reject nonstdlib imports, allowing only exact project plugin captures.
+
+    Returns
+    -------
+    list[list[str]]
+        Module names and source paths that failed the complete provenance checks.
+
+    """
+    project = project.resolve()
+    published = _published(project)
+    stdlib_roots = _stdlib_roots()
     rejected: list[list[str]] = []
     for name, module in sorted(sys.modules.items()):
-        source = getattr(module, "__file__", None)
-        if not source:
+        source = _source(module)
+        if source is None:
             continue
-        resolved = Path(source).resolve()
-        folded_parts = {part.casefold() for part in resolved.parts}
-        if {"site-packages", "dist-packages"} & folded_parts:
-            rejected.append([name, str(resolved)])
+        folded = {part.casefold() for part in source.parts}
+        if {"site-packages", "dist-packages"} & folded:
+            rejected.append([name, str(source)])
+        elif source.is_relative_to(project) or _published_capture(
+            name,
+            module,
+            source,
+            published,
+        ):
             continue
-        if resolved.is_relative_to(project):
-            continue
-        tree = getattr(getattr(module, "__loader__", None), "tree", None)
-        if isinstance(tree, SourceTree) and resolved.is_relative_to(tree.directory):
-            expected = published.get(tree.manifest.id)
-            relative = resolved.relative_to(tree.directory).as_posix()
-            if (
-                expected is not None
-                and tree.sources == expected
-                and name.partition(".")[0] == tree.prefix
-                and expected.get(relative) == resolved.read_bytes()
-            ):
-                continue
-        if any(resolved.is_relative_to(root) for root in stdlib_roots):
-            continue
-        rejected.append([name, str(resolved)])
+        elif not any(source.is_relative_to(root) for root in stdlib_roots):
+            rejected.append([name, str(source)])
     return rejected

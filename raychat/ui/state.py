@@ -16,9 +16,9 @@ import math
 import threading
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TypeGuard, cast
 
 from raychat.configuration import SETTINGS
 
@@ -32,19 +32,35 @@ MAX_TRANSCRIPT_ENTRIES = SETTINGS.limits.max_transcript_entries
 MAX_ARGV_ITEMS = SETTINGS.limits.max_argv_items
 MAX_RESULT_ITEMS = SETTINGS.limits.max_result_items
 
+_ESCAPE = 0x1B
+_C0_MAX = 0x1F
+_DELETE = 0x7F
+_C1_MIN = 0x80
+_C1_MAX = 0x9F
+_CSI = 0x9B
+_CSI_PARAMETER_MIN = 0x30
+_CSI_PARAMETER_MAX = 0x3F
+_CSI_INTERMEDIATE_MIN = 0x20
+_CSI_INTERMEDIATE_MAX = 0x2F
+_CSI_FINAL_MIN = 0x40
+_CSI_FINAL_MAX = 0x7E
+_BASIC_MULTILINGUAL_MAX = 0xFFFF
+_SHA256_HEX_CHARACTERS = 64
+_TRANSCRIPT_INDENT_CELLS = 2
+_MIN_STATUS_ROWS = 3
+_COMPACT_BODY_ROWS = 4
+_MIN_SIDEBAR_ROWS = 6
+
 _REPLACEMENT = "�"
 _ELLIPSIS = "…"
-_BIDI_CONTROLS = frozenset(
-    {
-        0x061C,  # ARABIC LETTER MARK
-        0x200E,  # LEFT-TO-RIGHT MARK
-        0x200F,  # RIGHT-TO-LEFT MARK
-        *range(0x202A, 0x202F),  # embeddings, overrides, and PDF
-        *range(0x2066, 0x206A),  # directional isolates
-        *range(0x206A, 0x2070),  # deprecated directional controls
-    },
+BIDI_CONTROLS = (
+    frozenset({0x061C, 0x200E, 0x200F})
+    | frozenset(range(0x202A, 0x202F))
+    | frozenset(range(0x2066, 0x206A))
+    | frozenset(range(0x206A, 0x2070))
 )
-_STRING_CONTROLS = frozenset({0x90, 0x98, 0x9D, 0x9E, 0x9F})
+
+_STRING_CONTROLS = frozenset({0x90, 0x98, 0x9D, 0x9E, _C1_MAX})
 _STRING_ESCAPES = frozenset("PX]^_")
 _ENTRY_KINDS = frozenset(
     {
@@ -60,6 +76,47 @@ _ENTRY_KINDS = frozenset(
 )
 
 
+def _is_bool(value: object) -> TypeGuard[bool]:
+    return isinstance(value, bool)
+
+
+def _is_entry(value: object) -> TypeGuard[TranscriptEntry]:
+    return isinstance(value, TranscriptEntry)
+
+
+def _is_integer(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_text(value: object) -> TypeGuard[str]:
+    return isinstance(value, str)
+
+
+def _is_array(value: object) -> TypeGuard[Sequence[object]]:
+    return isinstance(value, list | tuple)
+
+
+def _is_list(value: object) -> TypeGuard[list[object]]:
+    return isinstance(value, list)
+
+
+def _is_string_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
+    if not isinstance(value, Mapping):
+        return False
+    fields = cast("Mapping[object, object]", value)
+    return all(isinstance(key, str) for key in fields)
+
+
+def _restored_action(value: object) -> Mapping[str, object] | None:
+    if not _is_text(value):
+        return None
+    try:
+        action: object = json.loads(value)
+    except (ValueError, TypeError):
+        return None
+    return action if _is_string_mapping(action) else None
+
+
 class Phase(str, Enum):
     """Lifecycle phases understood by the renderer and input controller."""
 
@@ -72,32 +129,56 @@ class Phase(str, Enum):
 
 
 def _consume_csi(text: str, index: int) -> int:
-    """Return the index after a CSI sequence beginning after CSI itself."""
+    """Return the index after a CSI sequence beginning after CSI itself.
+
+    Returns
+    -------
+    int
+        The first source position after the consumed CSI sequence.
+
+    """
     size = len(text)
-    while index < size and 0x30 <= ord(text[index]) <= 0x3F:
+    while index < size and _CSI_PARAMETER_MIN <= ord(text[index]) <= _CSI_PARAMETER_MAX:
         index += 1
-    while index < size and 0x20 <= ord(text[index]) <= 0x2F:
+    while (
+        index < size
+        and _CSI_INTERMEDIATE_MIN <= ord(text[index]) <= _CSI_INTERMEDIATE_MAX
+    ):
         index += 1
-    if index < size and 0x40 <= ord(text[index]) <= 0x7E:
+    if index < size and _CSI_FINAL_MIN <= ord(text[index]) <= _CSI_FINAL_MAX:
         index += 1
     return index
 
 
 def _consume_control_string(text: str, index: int) -> int:
-    """Consume an OSC/DCS/SOS/PM/APC string through BEL or ST."""
+    """Consume an OSC/DCS/SOS/PM/APC string through BEL or ST.
+
+    Returns
+    -------
+    int
+        The position after the terminator, or the end of incomplete input.
+
+    """
     size = len(text)
     while index < size:
         codepoint = ord(text[index])
         if codepoint in {0x07, 0x9C}:  # BEL or 8-bit ST
             return index + 1
-        if codepoint == 0x1B and index + 1 < size and text[index + 1] == "\\":
+        if codepoint == _ESCAPE and index + 1 < size and text[index + 1] == "\\":
             return index + 2
         index += 1
     return size
 
 
 def _consume_escape(text: str, index: int) -> int:
-    """Consume an ESC-led ANSI/ECMA-48 sequence."""
+    """Consume an ESC-led ANSI/ECMA-48 sequence.
+
+    Returns
+    -------
+    int
+        The position after the recognized escape sequence.
+
+    """
     size = len(text)
     if index >= size:
         return index
@@ -108,11 +189,30 @@ def _consume_escape(text: str, index: int) -> int:
         return _consume_control_string(text, index + 1)
 
     # Fe (two-byte) sequences and sequences with intermediate bytes.
-    while index < size and 0x20 <= ord(text[index]) <= 0x2F:
+    while (
+        index < size
+        and _CSI_INTERMEDIATE_MIN <= ord(text[index]) <= _CSI_INTERMEDIATE_MAX
+    ):
         index += 1
-    if index < size and 0x30 <= ord(text[index]) <= 0x7E:
+    if index < size and _CSI_PARAMETER_MIN <= ord(text[index]) <= _CSI_FINAL_MAX:
         index += 1
     return index
+
+
+def _sanitize_character(character: str, codepoint: int) -> str:
+    if codepoint <= _C0_MAX:
+        return chr(0x2400 + codepoint)
+    if codepoint == _DELETE:
+        return "\u2421"
+    if (
+        _C1_MIN <= codepoint <= _C1_MAX
+        or codepoint in BIDI_CONTROLS
+        or unicodedata.category(character) == "Cs"
+    ):
+        return _REPLACEMENT
+    if character.isspace() and character != " ":
+        return " "
+    return character
 
 
 def sanitize_text(text: str, *, max_chars: int = MAX_SOURCE_CHARS) -> str:
@@ -123,10 +223,24 @@ def sanitize_text(text: str, *, max_chars: int = MAX_SOURCE_CHARS) -> str:
     including newlines and tabs.  Unicode bidi controls are replaced as well.
     Consequently, untrusted input cannot move the cursor, set a title, create a
     hyperlink, alter colors, or reorder visible text in a terminal.
+
+    Returns
+    -------
+    str
+        Sanitized source with a visible ellipsis when the source limit is exceeded.
+
+    Raises
+    ------
+    TypeError
+        The source is not text.
+    ValueError
+        The source limit is not a nonnegative integer.
+
     """
-    if not isinstance(text, str):
-        raise TypeError("text must be a string")
-    if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 0:
+    if not _is_text(text):
+        error_message = "text must be a string"
+        raise TypeError(error_message)
+    if not _is_integer(max_chars) or max_chars < 0:
         error_message = "max_chars must be a nonnegative integer"
         raise ValueError(error_message)
 
@@ -137,30 +251,16 @@ def sanitize_text(text: str, *, max_chars: int = MAX_SOURCE_CHARS) -> str:
     while index < len(source):
         character = source[index]
         codepoint = ord(character)
-        if codepoint == 0x1B:
+        if codepoint == _ESCAPE:
             index = _consume_escape(source, index + 1)
             continue
-        if codepoint == 0x9B:  # 8-bit CSI
+        if codepoint == _CSI:  # 8-bit CSI
             index = _consume_csi(source, index + 1)
             continue
         if codepoint in _STRING_CONTROLS:
             index = _consume_control_string(source, index + 1)
             continue
-        if codepoint <= 0x1F:
-            output.append(chr(0x2400 + codepoint))
-        elif codepoint == 0x7F:
-            output.append("\u2421")
-        elif (
-            0x80 <= codepoint <= 0x9F
-            or codepoint in _BIDI_CONTROLS
-            or unicodedata.category(character) == "Cs"
-        ):
-            output.append(_REPLACEMENT)
-        elif character.isspace() and character != " ":
-            # Unicode line/paragraph separators must not become terminal layout.
-            output.append(" ")
-        else:
-            output.append(character)
+        output.append(_sanitize_character(character, codepoint))
         index += 1
     if clipped:
         output.append(_ELLIPSIS)
@@ -173,9 +273,21 @@ def display_width(text: str) -> int:
     Combining marks share their base character's cells. A leading mark gets a
     one-cell dotted-circle anchor when rendered. East Asian wide/full-width
     bases occupy two cells. Control/format characters occupy zero cells.
+
+    Returns
+    -------
+    int
+        The estimated number of terminal cells occupied by the text.
+
+    Raises
+    ------
+    TypeError
+        The source is not text.
+
     """
-    if not isinstance(text, str):
-        raise TypeError("text must be a string")
+    if not _is_text(text):
+        error_message = "text must be a string"
+        raise TypeError(error_message)
     width = 0
     for cluster in display_clusters(text):
         character = cluster[0]
@@ -194,6 +306,12 @@ def display_clusters(text: str) -> list[str]:
 
     This is a deterministic terminal-width approximation, not a full Unicode
     grapheme segmenter. Rendering, wrapping, and selection share these groups.
+
+    Returns
+    -------
+    list[str]
+        Base characters with attached combining marks grouped for wrapping.
+
     """
     pieces: list[list[str]] = []
     for character in text:
@@ -209,7 +327,14 @@ def display_clusters(text: str) -> list[str]:
 
 
 def _fit_clusters(text: str, max_cells: int) -> tuple[str, str]:
-    """Split sanitized text before the first cluster that exceeds max_cells."""
+    """Split sanitized text before the first cluster that exceeds max_cells.
+
+    Returns
+    -------
+    tuple[str, str]
+        The prefix that fits the cell limit and the remaining suffix.
+
+    """
     used = 0
     kept: list[str] = []
     remainder: list[str] = []
@@ -232,8 +357,20 @@ def truncate_display(
     ellipsis: str = _ELLIPSIS,
     max_source_chars: int = MAX_SOURCE_CHARS,
 ) -> str:
-    """Sanitize and truncate *text* without exceeding *max_cells*."""
-    if not isinstance(max_cells, int) or isinstance(max_cells, bool) or max_cells < 0:
+    """Sanitize and truncate *text* without exceeding *max_cells*.
+
+    Returns
+    -------
+    str
+        Inert text within the cell limit, with a fitted truncation suffix if needed.
+
+    Raises
+    ------
+    ValueError
+        The cell limit is not a nonnegative integer.
+
+    """
+    if not _is_integer(max_cells) or max_cells < 0:
         error_message = "max_cells must be a nonnegative integer"
         raise ValueError(error_message)
     safe = sanitize_text(text, max_chars=max_source_chars)
@@ -249,7 +386,14 @@ def truncate_display(
 
 
 def _split_word(word: str, width: int) -> list[str]:
-    """Split one sanitized word in a single pass over its clusters."""
+    """Split one sanitized word in a single pass over its clusters.
+
+    Returns
+    -------
+    list[str]
+        Word fragments that fit the requested cell width.
+
+    """
     chunks: list[str] = []
     current: list[str] = []
     current_width = 0
@@ -281,8 +425,20 @@ def wrap_display(
     *,
     max_source_chars: int = MAX_SOURCE_CHARS,
 ) -> tuple[str, ...]:
-    """Sanitize and word-wrap text into lines no wider than *width* cells."""
-    if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+    """Sanitize and word-wrap text into lines no wider than *width* cells.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Sanitized wrapped lines bounded by the requested cell width.
+
+    Raises
+    ------
+    ValueError
+        The wrapping width is not a positive integer.
+
+    """
+    if not _is_integer(width) or width < 1:
         error_message = "width must be a positive integer"
         raise ValueError(error_message)
     safe = sanitize_text(text, max_chars=max_source_chars)
@@ -322,7 +478,7 @@ def wrap_display(
 
 
 def _safe_field(value: object, cells: int) -> str:
-    if isinstance(value, str):
+    if _is_text(value):
         text = value
     elif value is None:
         text = "none"
@@ -335,7 +491,7 @@ def _safe_field(value: object, cells: int) -> str:
     return truncate_display(text, cells)
 
 
-def _safe_json_strings(values: Sequence[Any], limit: int) -> str:
+def _safe_json_strings(values: Sequence[object], limit: int) -> str:
     rendered = [_safe_field(value, 80) for value in values[:MAX_ARGV_ITEMS]]
     suffix = ["\u2026"] if len(values) > MAX_ARGV_ITEMS else []
     return truncate_display(
@@ -353,6 +509,7 @@ class EventSummary:
     ok: bool | None = None
 
     def __post_init__(self) -> None:
+        """Sanitize and cap the title and detail for terminal display."""
         object.__setattr__(self, "title", truncate_display(self.title, MAX_TITLE_CELLS))
         object.__setattr__(
             self,
@@ -369,6 +526,12 @@ def _approval_escape(text: str, *, quoted: bool = True) -> str:
     an approver can see the exact argument/path data that will be acted upon.
     All non-ASCII code points are escaped as well: terminals disagree about
     their width, and some printable Unicode characters are visually blank.
+
+    Returns
+    -------
+    str
+        An ASCII representation preserving every character without terminal effects.
+
     """
     output = ['"'] if quoted else []
     short_escapes = {
@@ -386,8 +549,8 @@ def _approval_escape(text: str, *, quoted: bool = True) -> str:
             output.append(r"\"")
         elif codepoint in short_escapes:
             output.append(short_escapes[codepoint])
-        elif codepoint <= 0x1F or codepoint >= 0x7F:
-            if codepoint <= 0xFFFF:
+        elif codepoint <= _C0_MAX or codepoint >= _DELETE:
+            if codepoint <= _BASIC_MULTILINGUAL_MAX:
                 output.append(f"\\u{codepoint:04x}")
             else:
                 output.append(f"\\U{codepoint:08x}")
@@ -398,187 +561,125 @@ def _approval_escape(text: str, *, quoted: bool = True) -> str:
     return "".join(output)
 
 
-def format_command(action: Mapping[str, Any] | None) -> str:
+def format_command(action: Mapping[str, object] | None) -> str:
     """Return the complete, terminal-inert argv and cwd for a run action.
 
     Commands execute with ``shell=False``, so an argv array is more exact than
     a reconstructed shell command. Compact ASCII JSON keeps every argument
     visible and unambiguous on both POSIX and Windows terminals.
+
+    Returns
+    -------
+    str
+        Complete escaped arguments and working directory, or an invalid-input marker.
+
     """
-    if not isinstance(action, Mapping):
+    if not _is_string_mapping(action):
         return "<invalid command action>"
     argv = action.get("argv")
-    if (
-        not isinstance(argv, (list, tuple))
-        or not argv
-        or not all(isinstance(item, str) for item in argv)
-    ):
+    if not _is_array(argv) or not argv or not all(_is_text(item) for item in argv):
         return "<invalid argv>"
     cwd = action.get("cwd", ".")
-    if not isinstance(cwd, str):
+    if not _is_text(cwd):
         return "<invalid cwd>"
+    arguments: list[object] = list(argv)
     return (
-        json.dumps(list(argv), ensure_ascii=True, separators=(",", ":"))
+        json.dumps(arguments, ensure_ascii=True, separators=(",", ":"))
         + "  cwd="
         + json.dumps(cwd, ensure_ascii=True)
     )
 
 
 def _approval_value(value: object) -> tuple[str, bool]:
-    if isinstance(value, str):
+    if _is_text(value):
         return _approval_escape(value), True
     return "<missing or invalid string>", False
 
 
-def _approval_plan(
-    action: Mapping[str, Any] | None,
-    *,
-    registered: bool = False,
-) -> tuple[str, str, tuple[str, ...], bool]:
-    """Build complete logical records before viewport-specific wrapping."""
-    if not isinstance(action, Mapping):
-        return "unknown", "Invalid action", ("action = <missing mapping>",), False
-    raw_name = action.get("action")
-    if not isinstance(raw_name, str):
-        return (
-            "unknown",
-            "Invalid action",
-            ("action = <missing or invalid string>",),
-            False,
-        )
-    name = _approval_escape(raw_name, quoted=False)
-    records: list[str] = []
-    valid = True
+@dataclass
+class _ApprovalRecords:
+    """Accumulate complete action records while retaining every validation failure."""
 
-    def string_record(label: str, key: str, *, default: str | None = None) -> None:
-        nonlocal valid
-        raw = action.get(key, default)
-        rendered, field_valid = _approval_value(raw)
-        records.append(f"{label} = {rendered}")
-        valid = valid and field_valid
+    action: Mapping[str, object]
+    lines: list[str] = field(default_factory=list)
+    valid: bool = True
 
-    if raw_name == "run":
-        title = "Approve command"
-        argv = action.get("argv")
-        if isinstance(argv, (list, tuple)):
-            records.append(f"argument count = {len(argv)}")
+    def string(self, label: str, key: str, *, default: str | None = None) -> None:
+        rendered, valid = _approval_value(self.action.get(key, default))
+        self.lines.append(f"{label} = {rendered}")
+        self.valid = self.valid and valid
+
+    def command(self) -> None:
+        argv = self.action.get("argv")
+        if _is_array(argv):
+            self.lines.append(f"argument count = {len(argv)}")
             if not argv:
-                records.append("argv = <empty; executable missing>")
-                valid = False
+                self.lines.append("argv = <empty; executable missing>")
+                self.valid = False
             for index, item in enumerate(argv):
-                rendered, item_valid = _approval_value(item)
-                records.append(f"argv[{index}] = {rendered}")
-                valid = valid and item_valid
+                rendered, valid = _approval_value(item)
+                self.lines.append(f"argv[{index}] = {rendered}")
+                self.valid = self.valid and valid
         else:
-            records.append("argv = <missing or invalid array>")
-            valid = False
-        string_record("cwd", "cwd", default=".")
-    elif raw_name == "write":
-        title = "Approve file replacement"
-        string_record("path", "path")
-        content = action.get("content")
-        if isinstance(content, str):
-            records.append(f"content characters = {len(content)}")
-            try:
-                encoded = content.encode("utf-8")
-            except UnicodeEncodeError:
-                records.extend(
-                    (
-                        "content UTF-8 bytes = <invalid Unicode>",
-                        "content SHA-256 = <unavailable>",
-                    ),
-                )
-                valid = False
-            else:
-                records.append(f"content UTF-8 bytes = {len(encoded)}")
-                records.append(
-                    "content SHA-256 = " + hashlib.sha256(encoded).hexdigest(),
-                )
-                records.append("content = " + _approval_escape(content))
+            self.lines.append("argv = <missing or invalid array>")
+            self.valid = False
+        self.string("cwd", "cwd", default=".")
+
+    def content(self, label: str) -> None:
+        content = self.action.get("content")
+        if not _is_text(content):
+            self.lines.extend((
+                f"{label} characters = <missing or invalid string>",
+                f"{label} UTF-8 bytes = <unavailable>",
+                f"{label} SHA-256 = <unavailable>",
+                f"{label} = <missing or invalid string>",
+            ))
+            self.valid = False
+            return
+        self.lines.append(f"{label} characters = {len(content)}")
+        try:
+            encoded = content.encode("utf-8")
+        except UnicodeEncodeError:
+            self.lines.extend((
+                f"{label} UTF-8 bytes = <invalid Unicode>",
+                f"{label} SHA-256 = <unavailable>",
+            ))
+            self.valid = False
         else:
-            records.extend(
-                (
-                    "content characters = <missing or invalid string>",
-                    "content UTF-8 bytes = <unavailable>",
-                    "content SHA-256 = <unavailable>",
-                    "content = <missing or invalid string>",
-                ),
-            )
-            valid = False
-    elif raw_name == "edit":
-        title = "Approve ranged file edit"
-        string_record("path", "path")
-        start = action.get("start")
-        end = action.get("end")
+            self.lines.extend((
+                f"{label} UTF-8 bytes = {len(encoded)}",
+                f"{label} SHA-256 = " + hashlib.sha256(encoded).hexdigest(),
+                f"{label} = " + _approval_escape(content),
+            ))
+
+    def edit(self) -> None:
+        self.string("path", "path")
+        start = self.action.get("start")
+        end = self.action.get("end")
         if type(start) is int and type(end) is int and 0 <= start <= end:
-            records.append(f"byte range = [{start}, {end})")
+            self.lines.append(f"byte range = [{start}, {end})")
         else:
-            records.append("byte range = <missing or invalid>")
-            valid = False
-        expected = action.get("expected_sha256")
+            self.lines.append("byte range = <missing or invalid>")
+            self.valid = False
+        expected = self.action.get("expected_sha256")
         if (
-            isinstance(expected, str)
-            and len(expected) == 64
+            _is_text(expected)
+            and len(expected) == _SHA256_HEX_CHARACTERS
             and all(character in "0123456789abcdef" for character in expected)
         ):
-            records.append("expected file SHA-256 = " + expected)
+            self.lines.append("expected file SHA-256 = " + expected)
         else:
-            records.append("expected file SHA-256 = <missing or invalid>")
-            valid = False
-        content = action.get("content")
-        if isinstance(content, str):
-            records.append(f"replacement characters = {len(content)}")
-            try:
-                encoded = content.encode("utf-8")
-            except UnicodeEncodeError:
-                records.extend(
-                    (
-                        "replacement UTF-8 bytes = <invalid Unicode>",
-                        "replacement SHA-256 = <unavailable>",
-                    ),
-                )
-                valid = False
-            else:
-                records.append(f"replacement UTF-8 bytes = {len(encoded)}")
-                records.append(
-                    "replacement SHA-256 = " + hashlib.sha256(encoded).hexdigest(),
-                )
-                records.append("replacement = " + _approval_escape(content))
-        else:
-            records.extend(
-                (
-                    "replacement characters = <missing or invalid string>",
-                    "replacement UTF-8 bytes = <unavailable>",
-                    "replacement SHA-256 = <unavailable>",
-                    "replacement = <missing or invalid string>",
-                ),
-            )
-            valid = False
-    elif raw_name == "remember":
-        title = "Approve persistent memory"
-        string_record("memory", "content")
-    elif raw_name == "forget":
-        title = "Approve memory deletion"
-        string_record("memory id", "id")
-    elif raw_name in {"list", "read"}:
-        title = "Review file access"
-        string_record("path", "path")
-    elif raw_name == "skill":
-        title = "Review skill load"
-        string_record("skill", "name")
-    elif raw_name == "memories":
-        title = "Review memory listing"
-        records.append("No parameters.")
-    elif raw_name == "done":
-        title = "Review completion"
-        string_record("message", "message")
-    elif registered:
-        title = "Approve plugin tool"
+            self.lines.append("expected file SHA-256 = <missing or invalid>")
+            self.valid = False
+        self.content("replacement")
+
+    def plugin(self) -> None:
+        fields: dict[str, object] = dict(self.action)
         try:
-            records.append(
+            self.lines.append(
                 _approval_escape(
                     json.dumps(
-                        dict(action),
+                        fields,
                         ensure_ascii=True,
                         allow_nan=False,
                         sort_keys=True,
@@ -586,22 +687,91 @@ def _approval_plan(
                 ),
             )
         except (TypeError, ValueError):
-            records.append("Invalid plugin action details.")
-            valid = False
-    else:
-        title = "Invalid action"
-        records.append("action = " + _approval_escape(raw_name))
-        records.append("Unsupported action name.")
-        valid = False
-    return name, title, tuple(records), valid
+            self.lines.append("Invalid plugin action details.")
+            self.valid = False
+
+    def fill(self, name: str, *, registered: bool) -> str:
+        if name == "run":
+            self.command()
+            return "Approve command"
+        if name == "write":
+            self.string("path", "path")
+            self.content("content")
+            return "Approve file replacement"
+        if name == "edit":
+            self.edit()
+            return "Approve ranged file edit"
+        return self._fill_review(name, registered=registered)
+
+    def _fill_review(self, name: str, *, registered: bool) -> str:
+        field_contract = _APPROVAL_FIELD_CONTRACTS.get(name)
+        if field_contract is not None:
+            title, label, key = field_contract
+            self.string(label, key)
+            return title
+        if name == "memories":
+            self.lines.append("No parameters.")
+            return "Review memory listing"
+        if registered:
+            self.plugin()
+            return "Approve plugin tool"
+        self.lines.extend((
+            "action = " + _approval_escape(name),
+            "Unsupported action name.",
+        ))
+        self.valid = False
+        return "Invalid action"
+
+
+_APPROVAL_FIELD_CONTRACTS = {
+    "remember": ("Approve persistent memory", "memory", "content"),
+    "forget": ("Approve memory deletion", "memory id", "id"),
+    "list": ("Review file access", "path", "path"),
+    "read": ("Review file access", "path", "path"),
+    "skill": ("Review skill load", "skill", "name"),
+    "done": ("Review completion", "message", "message"),
+}
+
+
+def _approval_plan(
+    action: Mapping[str, object] | None,
+    *,
+    registered: bool = False,
+) -> tuple[str, str, tuple[str, ...], bool]:
+    """Build complete logical records before viewport-specific wrapping.
+
+    Returns
+    -------
+    tuple[str, str, tuple[str, ...], bool]
+        Escaped action name, dialog title, complete records and validation status.
+
+    """
+    if not _is_string_mapping(action):
+        return "unknown", "Invalid action", ("action = <missing mapping>",), False
+    raw_name = action.get("action")
+    if not _is_text(raw_name):
+        return (
+            "unknown",
+            "Invalid action",
+            ("action = <missing or invalid string>",),
+            False,
+        )
+    records = _ApprovalRecords(action)
+    title = records.fill(raw_name, registered=registered)
+    return (
+        _approval_escape(raw_name, quoted=False),
+        title,
+        tuple(records.lines),
+        records.valid,
+    )
 
 
 def _approval_safe_line(text: str) -> bool:
     return all(
         not (
-            ord(character) <= 0x1F
-            or 0x7F <= ord(character) <= 0x9F
-            or ord(character) in _BIDI_CONTROLS
+            ord(character) <= _C0_MAX
+            or _DELETE <= ord(character) <= _C1_MAX
+            or ord(character) in BIDI_CONTROLS
             or unicodedata.category(character) in {"Cf", "Cs", "Zl", "Zp"}
             or unicodedata.category(character).startswith("M")
             or not character.isprintable()
@@ -613,14 +783,21 @@ def _approval_safe_line(text: str) -> bool:
 def _unicode_cluster_escape(cluster: str) -> str:
     return "".join(
         f"\\u{ord(character):04x}"
-        if ord(character) <= 0xFFFF
+        if ord(character) <= _BASIC_MULTILINGUAL_MAX
         else f"\\U{ord(character):08x}"
         for character in cluster
     )
 
 
 def _wrap_approval_record(record: str, width: int) -> tuple[str, ...]:
-    """Hard-wrap one inert record without dropping or coalescing characters."""
+    """Hard-wrap one inert record without dropping or coalescing characters.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Complete inert records split into terminal-width lines.
+
+    """
     lines: list[str] = []
     current: list[str] = []
     used = 0
@@ -662,6 +839,14 @@ class ApprovalDetails:
     all_critical_displayable: bool
 
     def __post_init__(self) -> None:
+        """Validate complete escaped records and their viewport bounds.
+
+        Raises
+        ------
+        ValueError
+            The display bounds, validity flags or escaped records are inconsistent.
+
+        """
         values = (
             self.action_name,
             self.title,
@@ -669,9 +854,7 @@ class ApprovalDetails:
             *self.lines,
             *self.visible_lines,
         )
-        if not all(
-            isinstance(value, str) and _approval_safe_line(value) for value in values
-        ):
+        if not all(_is_text(value) and _approval_safe_line(value) for value in values):
             error_message = "approval details must contain terminal-inert strings"
             raise ValueError(error_message)
         if self.visible_lines != self.lines[: len(self.visible_lines)]:
@@ -680,14 +863,17 @@ class ApprovalDetails:
 
     @property
     def required_lines(self) -> int:
+        """Total line count required to display every detail."""
         return len(self.lines)
 
     @property
     def omitted_lines(self) -> int:
+        """Count of records outside this limited view."""
         return len(self.lines) - len(self.visible_lines)
 
     @property
     def can_approve(self) -> bool:
+        """Report whether all required details are valid and visible."""
         return self.valid and self.all_critical_displayable
 
 
@@ -696,12 +882,10 @@ def _approval_details_from_plan(
     width: int,
     max_lines: int | None,
 ) -> ApprovalDetails:
-    if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+    if not _is_integer(width) or width < 1:
         error_message = "approval detail width must be a positive integer"
         raise ValueError(error_message)
-    if max_lines is not None and (
-        not isinstance(max_lines, int) or isinstance(max_lines, bool) or max_lines < 0
-    ):
+    if max_lines is not None and (not _is_integer(max_lines) or max_lines < 0):
         error_message = "approval detail max_lines must be nonnegative or None"
         raise ValueError(error_message)
     action_name, title, records, valid = plan
@@ -721,13 +905,20 @@ def _approval_details_from_plan(
 
 
 def approval_details(
-    action: Mapping[str, Any] | None,
+    action: Mapping[str, object] | None,
     width: int,
     max_lines: int | None = None,
     *,
     registered: bool = False,
 ) -> ApprovalDetails:
-    """Return complete, escaped, wrapped approval details for *action*."""
+    """Return complete, escaped, wrapped approval details for *action*.
+
+    Returns
+    -------
+    ApprovalDetails
+        Escaped records, wrapped lines and their approval validity.
+
+    """
     return _approval_details_from_plan(
         _approval_plan(action, registered=registered),
         width,
@@ -735,77 +926,111 @@ def approval_details(
     )
 
 
-def format_action(action: Mapping[str, Any] | None) -> EventSummary:
-    """Return a concise, capped description of a model action."""
-    if not isinstance(action, Mapping):
-        return EventSummary("Invalid action", "The worker supplied no action.", False)
-    name_value = action.get("action")
-    name = name_value if isinstance(name_value, str) else "unknown"
-    safe_name = _safe_field(name, 48)
+_ACTION_FIELD_CONTRACTS = {
+    "list": ("List files", "path", 240),
+    "read": ("Read file", "path", 240),
+    "skill": ("Load skill", "name", 240),
+    "remember": ("Remember", "content", 320),
+    "forget": ("Forget memory", "id", 80),
+}
 
-    if name == "list":
-        return EventSummary("List files", _safe_field(action.get("path"), 240))
-    if name == "read":
-        return EventSummary("Read file", _safe_field(action.get("path"), 240))
-    if name == "write":
+
+def _file_action_summary(action: Mapping[str, object]) -> EventSummary:
+    if action.get("action") == "write":
         path = _safe_field(action.get("path"), 240)
         content = action.get("content")
-        length = len(content) if isinstance(content, str) else 0
+        length = len(content) if _is_text(content) else 0
         preview = _safe_field(content, 180)
         return EventSummary("Write file", f"{path} · {length} chars · {preview}")
-    if name == "edit":
-        path = _safe_field(action.get("path"), 180)
-        start = _safe_field(action.get("start"), 30)
-        end = _safe_field(action.get("end"), 30)
-        content = action.get("content")
-        length = len(content) if isinstance(content, str) else 0
+    path = _safe_field(action.get("path"), 180)
+    start = _safe_field(action.get("start"), 30)
+    end = _safe_field(action.get("end"), 30)
+    content = action.get("content")
+    length = len(content) if _is_text(content) else 0
+    return EventSummary(
+        "Edit file",
+        f"{path} · bytes [{start}, {end}) · {length} chars",
+    )
+
+
+def format_action(action: Mapping[str, object] | None) -> EventSummary:
+    """Return a concise, capped description of a model action.
+
+    Returns
+    -------
+    EventSummary
+        A bounded action description and any explicit completion status.
+
+    """
+    if not _is_string_mapping(action):
         return EventSummary(
-            "Edit file",
-            f"{path} · bytes [{start}, {end}) · {length} chars",
+            "Invalid action",
+            "The worker supplied no action.",
+            ok=False,
         )
+    name_value = action.get("action")
+    name = name_value if _is_text(name_value) else "unknown"
+    safe_name = _safe_field(name, 48)
+
+    field_contract = _ACTION_FIELD_CONTRACTS.get(name)
+    if field_contract is not None:
+        title, key, cells = field_contract
+        return EventSummary(title, _safe_field(action.get(key), cells))
+    if name in {"write", "edit"}:
+        return _file_action_summary(action)
     if name == "run":
         argv = action.get("argv")
-        command = (
-            _safe_json_strings(argv, 300)
-            if isinstance(argv, (list, tuple))
-            else "<invalid argv>"
-        )
+        command = _safe_json_strings(argv, 300) if _is_array(argv) else "<invalid argv>"
         cwd = _safe_field(action.get("cwd", "."), 100)
         return EventSummary("Run command", f"{command} · cwd {cwd}")
-    if name == "skill":
-        return EventSummary("Load skill", _safe_field(action.get("name"), 240))
     if name == "memories":
         return EventSummary("List memories")
-    if name == "remember":
-        return EventSummary("Remember", _safe_field(action.get("content"), 320))
-    if name == "forget":
-        return EventSummary("Forget memory", _safe_field(action.get("id"), 80))
     if name == "done":
-        return EventSummary("Finish", _safe_field(action.get("message"), 360), True)
-    return EventSummary("Action " + safe_name, "Unsupported action name.", False)
-
-
-def format_result(
-    action: Mapping[str, Any] | None,
-    result: Mapping[str, Any] | None,
-) -> EventSummary:
-    """Return a concise, capped description of a host action result."""
-    if not isinstance(result, Mapping):
-        return EventSummary("Invalid result", "The worker supplied no result.", False)
-    action_name = action.get("action") if isinstance(action, Mapping) else None
-    ok = result.get("ok") is True
-    error = result.get("error")
-    if not ok and error is not None:
-        denied = result.get("denied") is True
-        return EventSummary(
-            "Denied" if denied else "Action failed",
-            _safe_field(error, MAX_DETAIL_CELLS),
-            False,
+        summary = EventSummary(
+            "Finish",
+            _safe_field(action.get("message"), 360),
+            ok=True,
         )
+    else:
+        summary = EventSummary(
+            "Action " + safe_name,
+            "Unsupported action name.",
+            ok=False,
+        )
+    return summary
 
+
+def _file_result_facts(result: Mapping[str, object], facts: list[str]) -> None:
+    if "bytes_written" in result:
+        facts.append(
+            _safe_field(result.get("bytes_written"), 40) + " bytes written",
+        )
+    if "bytes_removed" in result:
+        facts.append(
+            _safe_field(result.get("bytes_removed"), 40) + " bytes removed",
+        )
+    if "bytes_inserted" in result:
+        facts.append(
+            _safe_field(result.get("bytes_inserted"), 40) + " bytes inserted",
+        )
+    if "path" in result:
+        facts.append(_safe_field(result.get("path"), 180))
+
+
+def _command_result_facts(result: Mapping[str, object], facts: list[str]) -> None:
+    if "returncode" in result:
+        facts.append("exit " + _safe_field(result.get("returncode"), 24))
+    if result.get("timed_out") is True:
+        facts.append("timed out")
+    if result.get("stdout"):
+        facts.append("stdout: " + _safe_field(result.get("stdout"), 240))
+    if result.get("stderr"):
+        facts.append("stderr: " + _safe_field(result.get("stderr"), 180))
+
+
+def _result_facts(action_name: object, result: Mapping[str, object]) -> list[str]:
     facts: list[str] = []
-    if action_name == "list" and isinstance(result.get("entries"), list):
-        entries = result["entries"]
+    if action_name == "list" and _is_list(entries := result.get("entries")):
         shown = [_safe_field(item, 80) for item in entries[:MAX_RESULT_ITEMS]]
         if len(entries) > MAX_RESULT_ITEMS:
             shown.append(f"… +{len(entries) - MAX_RESULT_ITEMS}")
@@ -813,37 +1038,51 @@ def format_result(
     elif action_name == "read" and isinstance(result.get("content"), str):
         facts.append(_safe_field(result["content"], 340))
     elif action_name in {"write", "edit"}:
-        if "bytes_written" in result:
-            facts.append(
-                _safe_field(result.get("bytes_written"), 40) + " bytes written",
-            )
-        if "bytes_removed" in result:
-            facts.append(
-                _safe_field(result.get("bytes_removed"), 40) + " bytes removed",
-            )
-        if "bytes_inserted" in result:
-            facts.append(
-                _safe_field(result.get("bytes_inserted"), 40) + " bytes inserted",
-            )
-        if "path" in result:
-            facts.append(_safe_field(result.get("path"), 180))
+        _file_result_facts(result, facts)
     elif action_name == "run":
-        if "returncode" in result:
-            facts.append("exit " + _safe_field(result.get("returncode"), 24))
-        if result.get("timed_out") is True:
-            facts.append("timed out")
-        if result.get("stdout"):
-            facts.append("stdout: " + _safe_field(result.get("stdout"), 240))
-        if result.get("stderr"):
-            facts.append("stderr: " + _safe_field(result.get("stderr"), 180))
+        _command_result_facts(result, facts)
     elif action_name == "skill":
         facts.append("skill " + _safe_field(result.get("name"), 160))
         if result.get("already_loaded") is True:
             facts.append("already loaded")
     elif action_name in {"remember", "forget"} and "id" in result:
         facts.append("memory " + _safe_field(result.get("id"), 80))
-    elif action_name == "memories" and isinstance(result.get("memories"), list):
-        facts.append(str(len(result["memories"])) + " memories")
+    elif action_name == "memories" and _is_list(memories := result.get("memories")):
+        facts.append(str(len(memories)) + " memories")
+
+    return facts
+
+
+def format_result(
+    action: Mapping[str, object] | None,
+    result: Mapping[str, object] | None,
+) -> EventSummary:
+    """Return a concise, capped description of a host action result.
+
+    Returns
+    -------
+    EventSummary
+        A bounded result description with its success or failure status.
+
+    """
+    if not _is_string_mapping(result):
+        return EventSummary(
+            "Invalid result",
+            "The worker supplied no result.",
+            ok=False,
+        )
+    action_name = action.get("action") if _is_string_mapping(action) else None
+    ok = result.get("ok") is True
+    error = result.get("error")
+    if not ok and error is not None:
+        denied = result.get("denied") is True
+        return EventSummary(
+            "Denied" if denied else "Action failed",
+            _safe_field(error, MAX_DETAIL_CELLS),
+            ok=False,
+        )
+
+    facts = _result_facts(action_name, result)
 
     facts.extend(
         label
@@ -872,21 +1111,30 @@ class TranscriptEntry:
     ok: bool | None = None
 
     def __post_init__(self) -> None:
+        """Validate entry identity and sanitize each complete logical line.
+
+        Raises
+        ------
+        ValueError
+            An identity, kind or optional step count is invalid.
+        TypeError
+            The transcript body is not text.
+
+        """
         if self.kind not in _ENTRY_KINDS:
             error_message = "unknown transcript entry kind"
             raise ValueError(error_message)
-        if not isinstance(self.sequence, int) or self.sequence < 1:
+        if not _is_integer(self.sequence) or self.sequence < 1:
             error_message = "sequence must be a positive integer"
             raise ValueError(error_message)
         for name, value in (("step", self.step), ("max_steps", self.max_steps)):
-            if value is not None and (
-                not isinstance(value, int) or isinstance(value, bool) or value < 1
-            ):
+            if value is not None and (not _is_integer(value) or value < 1):
                 error_message = f"{name} must be a positive integer or None"
                 raise ValueError(error_message)
         object.__setattr__(self, "title", truncate_display(self.title, MAX_TITLE_CELLS))
-        if not isinstance(self.body, str):
-            raise TypeError("transcript body must be a string")
+        if not _is_text(self.body):
+            error_message = "transcript body must be a string"
+            raise TypeError(error_message)
         # Preserve intentional hard line breaks as layout data while stripping
         # every terminal instruction from each logical line.  No body is
         # clipped here: viewport virtualization, not data loss, bounds drawing.
@@ -899,6 +1147,8 @@ class TranscriptEntry:
 
 @dataclass(frozen=True, slots=True)
 class PendingApproval:
+    """Capture validated approval records independently of viewport dimensions."""
+
     action_name: str
     title: str
     detail: str
@@ -906,6 +1156,14 @@ class PendingApproval:
     details_valid: bool = False
 
     def __post_init__(self) -> None:
+        """Validate the approval identity, records and status flags.
+
+        Raises
+        ------
+        ValueError
+            The identity, validation flags or escaped records are invalid.
+
+        """
         object.__setattr__(self, "action_name", truncate_display(self.action_name, 48))
         object.__setattr__(self, "title", truncate_display(self.title, MAX_TITLE_CELLS))
         object.__setattr__(
@@ -914,14 +1172,21 @@ class PendingApproval:
             truncate_display(self.detail, MAX_DETAIL_CELLS),
         )
         if not all(
-            isinstance(record, str) and _approval_safe_line(record)
+            _is_text(record) and _approval_safe_line(record)
             for record in self.critical_records
         ):
             error_message = "critical approval records must be terminal-inert strings"
             raise ValueError(error_message)
 
     def view(self, width: int, max_lines: int | None = None) -> ApprovalDetails:
-        """Wrap the stored complete details for the current approval viewport."""
+        """Wrap the stored complete details for the current approval viewport.
+
+        Returns
+        -------
+        ApprovalDetails
+            Complete captured records wrapped for the supplied viewport.
+
+        """
         return _approval_details_from_plan(
             (self.action_name, self.title, self.critical_records, self.details_valid),
             width,
@@ -931,6 +1196,8 @@ class PendingApproval:
 
 @dataclass(frozen=True, slots=True)
 class TuiSnapshot:
+    """Capture immutable transcript and task state for another consumer."""
+
     phase: Phase
     entries: tuple[TranscriptEntry, ...]
     task: str
@@ -956,11 +1223,17 @@ class TuiState:
     """
 
     def __init__(self, *, max_entries: int | None = None) -> None:
+        """Initialize main-thread state with an optional transcript entry limit.
+
+        Raises
+        ------
+        ValueError
+            The optional transcript limit is not a positive integer.
+
+        """
         self._assert_main_thread()
         if max_entries is not None and (
-            not isinstance(max_entries, int)
-            or isinstance(max_entries, bool)
-            or max_entries < 1
+            not _is_integer(max_entries) or max_entries < 1
         ):
             error_message = "max_entries must be a positive integer or None"
             raise ValueError(error_message)
@@ -990,25 +1263,38 @@ class TuiState:
 
     @property
     def phase(self) -> Phase:
+        """Current task lifecycle phase."""
         return self._phase
 
     @property
     def entries(self) -> tuple[TranscriptEntry, ...]:
+        """Immutable snapshot of retained transcript entries."""
         return tuple(self._entries)
 
     @property
     def pending_approval(self) -> PendingApproval | None:
+        """Action awaiting a frontend approval decision."""
         return self._pending_approval
 
     @property
     def step(self) -> int:
+        """Most recent worker step count."""
         return self._step
 
     @property
     def max_steps(self) -> int:
+        """Current task step limit."""
         return self._max_steps
 
     def snapshot(self) -> TuiSnapshot:
+        """Capture current state without sharing the mutable entry list.
+
+        Returns
+        -------
+        TuiSnapshot
+            A frozen view of the current transcript, task and approval.
+
+        """
         return TuiSnapshot(
             self._phase,
             tuple(self._entries),
@@ -1025,8 +1311,6 @@ class TuiState:
         title: str,
         body: str = "",
         *,
-        step: int | None = None,
-        max_steps: int | None = None,
         ok: bool | None = None,
     ) -> TranscriptEntry:
         self._assert_main_thread()
@@ -1035,8 +1319,8 @@ class TuiState:
             kind,
             title,
             body,
-            step,
-            max_steps,
+            None,
+            None,
             ok,
         )
         self._next_sequence += 1
@@ -1061,6 +1345,7 @@ class TuiState:
         return entry
 
     def reset(self) -> None:
+        """Clear task state, transcript entries and cached viewport data."""
         self._assert_main_thread()
         self._phase = Phase.IDLE
         self._entries.clear()
@@ -1076,39 +1361,63 @@ class TuiState:
         self._transcript_scroll_offset = None
 
     def notice(self, title: str, body: str = "") -> None:
-        """Append a concise local UI notice without starting an agent job."""
+        """Append a concise local UI notice without starting an agent job.
+
+        Raises
+        ------
+        TypeError
+            The notice title or body is not text.
+
+        """
         self._assert_main_thread()
-        if not isinstance(title, str) or not isinstance(body, str):
-            raise TypeError("notice title and body must be strings")
+        if not _is_text(title) or not _is_text(body):
+            error_message = "notice title and body must be strings"
+            raise TypeError(error_message)
         self._append("system", title, body)
 
-    def restore(self, messages: Iterable[Mapping[str, Any]]) -> None:
-        """Rebuild the visible conversation from committed session messages."""
+    def restore(self, messages: Iterable[Mapping[str, object]]) -> None:
+        """Rebuild the visible conversation from committed session messages.
+
+        Raises
+        ------
+        TypeError
+            A committed user prompt does not contain text.
+
+        """
         self.reset()
         for message in messages:
             if message["kind"] == "prompt":
-                self._append("user", "You", message["content"])
+                content = message["content"]
+                if not _is_text(content):
+                    error = "Committed user prompts must contain text."
+                    raise TypeError(error)
+                self._append("user", "You", content)
             elif message["kind"] == "assistant":
-                try:
-                    action = json.loads(message["content"])
-                except (ValueError, TypeError):
+                action = _restored_action(message["content"])
+                if action is None:
                     continue
-                if not isinstance(action, dict):
-                    continue
-                if action.get("action") == "done" and isinstance(
-                    action.get("message"),
-                    str,
-                ):
-                    self._append("assistant", "Agent", action["message"])
+                response = action.get("message")
+                if action.get("action") == "done" and _is_text(response):
+                    self._append("assistant", "Agent", response)
                 elif action.get("action") == "run":
                     self._append("command", "Command", format_command(action))
 
     def start(self, task: str, *, max_steps: int = 0) -> None:
+        """Begin a task and append its sanitized prompt to the transcript.
+
+        Raises
+        ------
+        ValueError
+            The supplied task is not nonempty text.
+        RuntimeError
+            A task is already running, awaiting approval or stopping.
+
+        """
         self._assert_main_thread()
         if self._phase in {Phase.RUNNING, Phase.APPROVAL, Phase.STOPPING}:
             error_message = "cannot start another task while one is active"
             raise RuntimeError(error_message)
-        if not isinstance(task, str) or not task.strip():
+        if not _is_text(task) or not task.strip():
             error_message = "task must be a nonempty string"
             raise ValueError(error_message)
         normalized = task.replace("\r\n", "\n").replace("\r", "\n")
@@ -1123,18 +1432,26 @@ class TuiState:
 
     def begin_approval(
         self,
-        action: Mapping[str, Any] | None,
+        action: Mapping[str, object] | None,
         *,
         registered: bool = False,
         step: int | None = None,
         max_steps: int | None = None,
     ) -> None:
+        """Capture complete action details and enter the approval phase.
+
+        Raises
+        ------
+        RuntimeError
+            The current lifecycle phase cannot accept an approval.
+
+        """
         self._assert_main_thread()
         if self._phase not in {Phase.RUNNING, Phase.APPROVAL}:
             error_message = "approval is only valid while an agent is running"
             raise RuntimeError(error_message)
         summary = format_action(action)
-        raw_name = action.get("action") if isinstance(action, Mapping) else "unknown"
+        raw_name = action.get("action") if _is_string_mapping(action) else "unknown"
         plan = _approval_plan(action, registered=registered)
         self._pending_approval = PendingApproval(
             _safe_field(raw_name, 48),
@@ -1149,23 +1466,42 @@ class TuiState:
         if max_steps is not None:
             self._max_steps = _event_step(max_steps, self._max_steps)
 
-    def resolve_approval(self, approved: bool) -> None:
+    def resolve_approval(self, *, approved: bool) -> None:
+        """Clear a pending approval and resume the running phase.
+
+        Raises
+        ------
+        RuntimeError
+            No approval is pending.
+        TypeError
+            The approval decision is not a bool.
+
+        """
         self._assert_main_thread()
         if self._phase is not Phase.APPROVAL or self._pending_approval is None:
             error_message = "there is no pending approval"
             raise RuntimeError(error_message)
-        if not isinstance(approved, bool):
-            raise TypeError("approved must be a bool")
+        if not _is_bool(approved):
+            error_message = "approved must be a bool"
+            raise TypeError(error_message)
         self._pending_approval = None
         self._phase = Phase.RUNNING
 
     def request_stop(self) -> None:
+        """Move an active task into the stopping phase and clear approval."""
         self._assert_main_thread()
         if self._phase in {Phase.RUNNING, Phase.APPROVAL, Phase.DONE}:
             self._pending_approval = None
             self._phase = Phase.STOPPING
 
-    def apply_worker_event(self, event: str, payload: Mapping[str, Any]) -> None:
+    def _apply_request(self, payload: Mapping[str, object]) -> None:
+        if self._phase is Phase.IDLE:
+            self._phase = Phase.RUNNING
+        action = payload.get("action")
+        if _is_string_mapping(action) and action.get("action") == "run":
+            self._append("command", "", format_command(action))
+
+    def apply_worker_event(self, event: str, payload: Mapping[str, object]) -> None:
         """Apply one detached worker event on the main thread.
 
         Supported events are ``request``, ``result``, ``approval`` (or
@@ -1174,10 +1510,19 @@ class TuiState:
         and cwd to the transcript. Approval is a frontend event used by the
         blocking approval bridge. Results remain hidden, while a final ``done``
         reply or terminal ``error`` is added to the transcript.
+
+        Raises
+        ------
+        TypeError
+            The worker event name or payload is malformed.
+        ValueError
+            The worker event name is unsupported.
+
         """
         self._assert_main_thread()
-        if not isinstance(event, str) or not isinstance(payload, Mapping):
-            raise TypeError("worker events need a string name and mapping payload")
+        if not _is_text(event) or not _is_string_mapping(payload):
+            error_message = "worker events need a string name and mapping payload"
+            raise TypeError(error_message)
 
         self._step = _event_step(payload.get("step"), self._step)
         self._max_steps = _event_step(payload.get("max_steps"), self._max_steps)
@@ -1187,11 +1532,7 @@ class TuiState:
             self._phase = Phase.IDLE
             return
         if event == "request":
-            if self._phase is Phase.IDLE:
-                self._phase = Phase.RUNNING
-            action = payload.get("action")
-            if isinstance(action, Mapping) and action.get("action") == "run":
-                self._append("command", "", format_command(action))
+            self._apply_request(payload)
             return
         if event == "result":
             self._pending_approval = None
@@ -1201,13 +1542,13 @@ class TuiState:
         if event in {"approval", "approval_required"}:
             action = payload.get("action")
             self.begin_approval(
-                action if isinstance(action, Mapping) else None,
+                action if _is_string_mapping(action) else None,
                 registered=payload.get("registered_tool") is True,
             )
             return
         if event == "done":
             raw_message = payload.get("message")
-            message = raw_message if isinstance(raw_message, str) else str(raw_message)
+            message = raw_message if _is_text(raw_message) else str(raw_message)
             self._pending_approval = None
             self._phase = Phase.DONE
             self._append(
@@ -1224,16 +1565,28 @@ class TuiState:
             self._append(
                 "error",
                 "Agent error",
-                error if isinstance(error, str) else str(error),
+                error if _is_text(error) else str(error),
                 ok=False,
             )
             return
         raise ValueError("unknown worker event: " + sanitize_text(event, max_chars=64))
 
     def transcript_rows(self, width: int) -> tuple[TranscriptLine, ...]:
-        """The same rendered rows used by painting, scrolling and text selection."""
+        """Return the cached rows shared by painting, scrolling and selection.
+
+        Returns
+        -------
+        tuple[TranscriptLine, ...]
+            The immutable rendered rows at the requested width.
+
+        Raises
+        ------
+        ValueError
+            The display width is not a positive integer.
+
+        """
         self._assert_main_thread()
-        if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+        if not _is_integer(width) or width < 1:
             error_message = "width must be a positive integer"
             raise ValueError(error_message)
         if self._transcript_cache_width != width:
@@ -1247,6 +1600,14 @@ class TuiState:
         height: int,
         scroll_offset: int = 0,
     ) -> TranscriptViewport:
+        """Render a bottom-anchored viewport and retain its clamped scroll offset.
+
+        Returns
+        -------
+        TranscriptViewport
+            The visible rows and their clamped position within the transcript.
+
+        """
         viewport = viewport_lines(self.transcript_rows(width), height, scroll_offset)
         self._transcript_viewport_height = height
         self._transcript_scroll_offset = viewport.scroll_offset
@@ -1270,6 +1631,8 @@ class TuiState:
 
 @dataclass(frozen=True, slots=True)
 class TranscriptLine:
+    """Identify a sanitized display row and its originating transcript entry."""
+
     sequence: int
     kind: str
     text: str
@@ -1277,7 +1640,15 @@ class TranscriptLine:
     ok: bool | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.sequence, int) or self.sequence < 1:
+        """Validate row identity and remove terminal instructions from its text.
+
+        Raises
+        ------
+        ValueError
+            The row identity or kind is invalid.
+
+        """
+        if not _is_integer(self.sequence) or self.sequence < 1:
             error_message = "sequence must be a positive integer"
             raise ValueError(error_message)
         if self.kind not in _ENTRY_KINDS:
@@ -1309,9 +1680,22 @@ def _line_prefix(entry: TranscriptEntry) -> str:
 
 
 def entry_lines(entry: TranscriptEntry, width: int) -> tuple[TranscriptLine, ...]:
-    """Convert one entry to terminal-width-bounded, style-addressable lines."""
-    if not isinstance(entry, TranscriptEntry):
-        raise TypeError("entry must be a TranscriptEntry")
+    """Convert one entry to terminal-width-bounded, style-addressable lines.
+
+    Returns
+    -------
+    tuple[TranscriptLine, ...]
+        Sanitized wrapped header and body rows retaining entry identity.
+
+    Raises
+    ------
+    TypeError
+        The source is not a TranscriptEntry.
+
+    """
+    if not _is_entry(entry):
+        error_message = "entry must be a TranscriptEntry"
+        raise TypeError(error_message)
     header = _line_prefix(entry)
     if entry.kind not in {"user", "assistant"} and entry.title:
         header += "  " + entry.title
@@ -1321,7 +1705,7 @@ def entry_lines(entry: TranscriptEntry, width: int) -> tuple[TranscriptLine, ...
         for index, line in enumerate(wrap_display(header, width))
     )
     if entry.body:
-        indent = "  " if width > 2 else ""
+        indent = "  " if width > _TRANSCRIPT_INDENT_CELLS else ""
         body_width = max(1, width - display_width(indent))
         for logical_line in entry.body.split("\n"):
             rendered.extend(
@@ -1329,8 +1713,8 @@ def entry_lines(entry: TranscriptEntry, width: int) -> tuple[TranscriptLine, ...
                     entry.sequence,
                     entry.kind,
                     indent + line,
-                    True,
-                    entry.ok,
+                    continuation=True,
+                    ok=entry.ok,
                 )
                 for line in wrap_display(
                     logical_line,
@@ -1345,8 +1729,20 @@ def transcript_lines(
     entries: Iterable[TranscriptEntry],
     width: int,
 ) -> tuple[TranscriptLine, ...]:
-    """Flatten entries into immutable, line-oriented renderer input."""
-    if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+    """Flatten entries into immutable, line-oriented renderer input.
+
+    Returns
+    -------
+    tuple[TranscriptLine, ...]
+        All rendered rows in transcript order.
+
+    Raises
+    ------
+    ValueError
+        The display width is not a positive integer.
+
+    """
+    if not _is_integer(width) or width < 1:
         error_message = "width must be a positive integer"
         raise ValueError(error_message)
     lines: list[TranscriptLine] = []
@@ -1357,6 +1753,8 @@ def transcript_lines(
 
 @dataclass(frozen=True, slots=True)
 class TranscriptViewport:
+    """Describe the visible rows and available directions of transcript scrolling."""
+
     lines: tuple[TranscriptLine, ...]
     start: int
     end: int
@@ -1371,15 +1769,23 @@ def viewport_lines(
     height: int,
     scroll_offset: int = 0,
 ) -> TranscriptViewport:
-    """Return a bottom-anchored slice, with offset measured from the newest line."""
-    if not isinstance(height, int) or isinstance(height, bool) or height < 0:
+    """Return a bottom-anchored slice, with offset measured from the newest line.
+
+    Returns
+    -------
+    TranscriptViewport
+        The visible bottom-anchored range with clamped scroll bounds.
+
+    Raises
+    ------
+    ValueError
+        The height or scroll offset is not a nonnegative integer.
+
+    """
+    if not _is_integer(height) or height < 0:
         error_message = "height must be a nonnegative integer"
         raise ValueError(error_message)
-    if (
-        not isinstance(scroll_offset, int)
-        or isinstance(scroll_offset, bool)
-        or scroll_offset < 0
-    ):
+    if not _is_integer(scroll_offset) or scroll_offset < 0:
         error_message = "scroll_offset must be a nonnegative integer"
         raise ValueError(error_message)
     total = len(lines)
@@ -1401,6 +1807,8 @@ def viewport_lines(
 
 @dataclass(frozen=True, slots=True)
 class Rect:
+    """Describe the position and dimensions of a terminal-cell rectangle."""
+
     x: int
     y: int
     width: int
@@ -1408,15 +1816,19 @@ class Rect:
 
     @property
     def right(self) -> int:
+        """Exclusive right edge of the rectangle."""
         return self.x + self.width
 
     @property
     def bottom(self) -> int:
+        """Exclusive bottom edge of the rectangle."""
         return self.y + self.height
 
 
 @dataclass(frozen=True, slots=True)
 class TuiLayout:
+    """Describe non-overlapping screen regions and sidebar visibility."""
+
     columns: int
     rows: int
     wide: bool
@@ -1427,42 +1839,79 @@ class TuiLayout:
     status: Rect
 
 
+@dataclass(frozen=True, kw_only=True)
+class LayoutOptions:
+    """Configure sidebar visibility, breakpoint and the draft's requested height."""
+
+    wide_at: int = SETTINGS.tui.layout.wide_at_columns
+    preferred_sidebar: int = SETTINGS.tui.layout.preferred_sidebar_columns
+    show_system: bool = SETTINGS.tui.show_system
+    composer_lines: int = 1
+
+    def __post_init__(self) -> None:
+        """Validate sidebar geometry and the requested draft height.
+
+        Raises
+        ------
+        TypeError
+            An option dimension is not an integer or visibility is not a bool.
+        ValueError
+            An option dimension is not positive.
+
+        """
+        dimensions = (self.wide_at, self.preferred_sidebar, self.composer_lines)
+        if any(not _is_integer(value) for value in dimensions):
+            message = "layout dimensions must be integers"
+            raise TypeError(message)
+        if any(value < 1 for value in dimensions):
+            message = "layout dimensions must be positive"
+            raise ValueError(message)
+        if not _is_bool(self.show_system):
+            message = "show_system must be a bool"
+            raise TypeError(message)
+
+
+_DEFAULT_LAYOUT_OPTIONS = LayoutOptions()
+
+
 def calculate_layout(
     columns: int,
     rows: int,
     *,
-    wide_at: int = SETTINGS.tui.layout.wide_at_columns,
-    preferred_sidebar: int = SETTINGS.tui.layout.preferred_sidebar_columns,
-    show_system: bool = SETTINGS.tui.show_system,
-    composer_lines: int = 1,
+    options: LayoutOptions = _DEFAULT_LAYOUT_OPTIONS,
 ) -> TuiLayout:
-    """Calculate non-overlapping narrow/wide rectangles for a full-screen TUI."""
-    values = (columns, rows, wide_at, preferred_sidebar, composer_lines)
-    if any(not isinstance(value, int) or isinstance(value, bool) for value in values):
+    """Calculate non-overlapping narrow/wide rectangles for a full-screen TUI.
+
+    Returns
+    -------
+    TuiLayout
+        Validated screen rectangles accounting for the sidebar and composer.
+
+    Raises
+    ------
+    TypeError
+        Viewport dimensions are not integers.
+    ValueError
+        A requested dimension is not positive.
+
+    """
+    if not _is_integer(columns) or not _is_integer(rows):
         error_message = "layout dimensions must be integers"
         raise TypeError(error_message)
-    if (
-        columns < 1
-        or rows < 1
-        or wide_at < 1
-        or preferred_sidebar < 1
-        or composer_lines < 1
-    ):
+    if columns < 1 or rows < 1:
         error_message = "layout dimensions must be positive"
         raise ValueError(error_message)
-    if type(show_system) is not bool:
-        raise TypeError("show_system must be a bool")
 
     header_height = 1
-    status_height = 1 if rows >= 3 else 0
+    status_height = 1 if rows >= _MIN_STATUS_ROWS else 0
     remaining = rows - header_height - status_height
     if remaining <= 1:
         composer_height = max(0, remaining)
-    elif remaining <= 4:
+    elif remaining <= _COMPACT_BODY_ROWS:
         composer_height = 1
     else:
         visible_lines = min(
-            composer_lines,
+            options.composer_lines,
             SETTINGS.tui.layout.max_composer_lines,
             max(1, remaining - 3),
         )
@@ -1473,10 +1922,14 @@ def calculate_layout(
     composer = Rect(0, header.bottom + body_height, columns, composer_height)
     status = Rect(0, composer.bottom, columns, status_height)
 
-    wide = show_system and columns >= wide_at and body_height >= 6
+    wide = (
+        options.show_system
+        and columns >= options.wide_at
+        and body_height >= _MIN_SIDEBAR_ROWS
+    )
     if wide:
         sidebar_width = min(
-            preferred_sidebar,
+            options.preferred_sidebar,
             max(SETTINGS.tui.layout.sidebar_min_columns, columns // 3),
             max(
                 1,
@@ -1496,6 +1949,7 @@ __all__ = [
     "MAX_TRANSCRIPT_ENTRIES",
     "ApprovalDetails",
     "EventSummary",
+    "LayoutOptions",
     "PendingApproval",
     "Phase",
     "Rect",

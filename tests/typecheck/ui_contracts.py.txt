@@ -1,5 +1,7 @@
-from raychat.ui.state import TuiState, approval_details, calculate_layout, sanitize_text, wrap_display
+from raychat.ui.state import LayoutOptions, TuiState, approval_details, calculate_layout, sanitize_text, wrap_display
 from raychat.ui.terminal import KeyDecoder, LineEditor
+from raychat.ui.commands import CommandChoice, CommandCompletion
+from raychat.ui.message_queue import MessageQueue, QueuedMessage
 
 
 def reject_nontext_sanitizer_input() -> None:
@@ -28,7 +30,7 @@ def reject_fractional_transcript_limit() -> None:
 
 
 def reject_optional_show_system() -> None:
-    calculate_layout(120, 32, show_system=None)  # expect-error: arg-type
+    calculate_layout(120, 32, options=LayoutOptions(show_system=None))  # expect-error: arg-type
 
 
 def reject_text_decoder_input() -> None:
@@ -37,3 +39,23 @@ def reject_text_decoder_input() -> None:
 
 def reject_text_editor_event() -> None:
     LineEditor().handle("left")  # expect-error: arg-type
+
+
+def reject_invalid_queue_controls(queue: MessageQueue, editor: LineEditor) -> None:
+    queue.append(1)  # expect-error: arg-type
+    queue.open(editor, "first")  # expect-error: arg-type
+    queue.navigate(editor, 0.5)  # expect-error: arg-type
+    queue.finish(editor, save=None)  # expect-error: arg-type
+
+
+def reject_mutable_queued_message(item: QueuedMessage) -> None:
+    item.text = "changed"  # expect-error: misc
+
+
+def reject_invalid_completion_controls(completion: CommandCompletion, editor: LineEditor) -> None:
+    completion.update("/", ("run",))  # expect-error: arg-type
+    completion.accept(editor, "first")  # expect-error: arg-type
+
+
+def reject_mutable_completion_choice(choice: CommandChoice) -> None:
+    choice.enabled = False  # expect-error: misc

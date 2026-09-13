@@ -1,236 +1,401 @@
-"""Private stdin/stdout worker for configured subagent model calls."""
+"""Validate isolated worker requests and emit typed stdin/stdout protocol frames."""
 
 from __future__ import annotations
 
 import json
+import logging
+import math
+import os
 import signal
 import sys
 import threading
-from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from io import BufferedReader, FileIO
 from pathlib import Path
-from types import FrameType
-from typing import Any
+from typing import TYPE_CHECKING, Literal
 
-# Isolated mode includes this script's directory, not the release root.
+# The -I/-S child executes this file directly from the trusted release directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import raychat.composition as _rc_composition
 from raychat.configuration import SETTINGS
-from raychat.plugins import Runtime
-from raychat.sdk import CancelCheck, Chat
+from raychat.plugin_manager import download
+from raychat.sdk import ProviderError
+from raychat.validation import (
+    ConfigurationError,
+    array_field,
+    integer_field,
+    json_object,
+    number_field,
+    object_field,
+    text_field,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+    from types import FrameType
+
+    from raychat.plugins import Runtime
+    from raychat.sdk import CancelCheck, Chat, Messages, WorkerPayload
+    from raychat.transport import WorkerFrame
 
 _MAX_INPUT_BYTES = SETTINGS.limits.max_child_input_bytes
+_LOGGER = logging.getLogger(__name__)
 
 
-def _emit(value: Mapping[str, Any]) -> None:
+@dataclass
+class _Resources:
+    secrets: tuple[str, ...] = ()
+    provider_runtime: Runtime | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ConversationRequest:
+    workspace: str
+    task: str
+    command_timeout: float
+    context_chars: int
+    keep_recent_turns: int
+    instruction_role: Literal["system", "developer", "user"]
+    protocol: str
+    runtime_plugins: list[str]
+    allowed_actions: set[str]
+    snapshot: dict[str, object]
+    max_steps: int | None
+    source: dict[str, object] | None
+
+
+def _emit(value: WorkerFrame) -> None:
     sys.stdout.write(
-        json.dumps(dict(value), ensure_ascii=True, separators=(",", ":")) + "\n",
+        json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        + "\n",
     )
     sys.stdout.flush()
 
 
-def _provider(value: object) -> tuple[Chat, list[str], Runtime]:
-    if not isinstance(value, dict) or set(value) != {
-        "plugin",
-        "worker",
-        "source",
-        "options",
-        "secrets",
-    }:
-        error_message = "A worker provider descriptor is required."
-        raise ValueError(error_message)
-    if not isinstance(value["secrets"], list) or not all(
-        isinstance(v, str) for v in value["secrets"]
-    ):
-        error_message = "Worker redactions must be text."
-        raise ValueError(error_message)
-    if not isinstance(value["options"], dict):
-        error_message = "Worker options must be an object."
-        raise ValueError(error_message)
-    runtime = _runtime(Path.cwd(), [value["plugin"]], value["source"])
-    try:
-        name = (value["plugin"], value["worker"])
-        if runtime.owners.get(("workers", name)) != value["plugin"]:
-            error_message = "Worker factory is not owned by the declared plugin."
-            raise ValueError(error_message)
-        api = runtime.workers[name](value["options"], runtime.context(value["plugin"]))
-        return api, value["secrets"], runtime
-    except BaseException:
-        runtime.close()
-        raise
+def _text(value: object, path: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(path + " must be text.")
+    return value
+
+
+def _strings(value: object, path: str) -> list[str]:
+    return [_text(item, path) for item in array_field(value, path)]
+
+
+def _exact_fields(
+    fields: Mapping[str, object],
+    required: set[str],
+    *,
+    optional: str | None = None,
+) -> None:
+    allowed = required | ({optional} if optional is not None else set())
+    if not required <= fields.keys() or fields.keys() - allowed:
+        message = "Child-process request has invalid fields."
+        raise ValueError(message)
+
+
+def _source(value: object) -> dict[str, object] | None:
+    return None if value is None else object_field(value, "plugin source")
+
+
+def _role(value: object) -> Literal["system", "developer", "user"]:
+    if value == "system":
+        return "system"
+    if value == "developer":
+        return "developer"
+    if value == "user":
+        return "user"
+    message = "Instruction role must be system, developer, or user."
+    raise ValueError(message)
+
+
+def _provider_descriptor(value: object) -> WorkerPayload:
+    fields = object_field(value, "worker provider")
+    _exact_fields(fields, {"plugin", "worker", "source", "options", "secrets"})
+    return {
+        "plugin": text_field(fields["plugin"], "provider plugin"),
+        "worker": text_field(fields["worker"], "provider worker"),
+        "source": object_field(fields["source"], "provider source"),
+        "options": object_field(fields["options"], "provider options"),
+        "secrets": _strings(fields["secrets"], "provider redactions"),
+    }
+
+
+def _provider(value: object, resources: _Resources) -> Chat:
+    descriptor = _provider_descriptor(value)
+    resources.secrets = tuple(descriptor["secrets"])
+    runtime = _runtime(Path.cwd(), [descriptor["plugin"]], descriptor["source"])
+    resources.provider_runtime = runtime
+    name = (descriptor["plugin"], descriptor["worker"])
+    if runtime.owners.get(("workers", name)) != descriptor["plugin"]:
+        message = "Worker factory is not owned by the declared plugin."
+        raise ValueError(message)
+    return runtime.workers[name](
+        descriptor["options"],
+        runtime.context(descriptor["plugin"]),
+    )
 
 
 def _runtime(
     workspace: str | Path,
     selected: Iterable[str],
-    source: Mapping[str, Any] | None = None,
-    **options: Any,  # noqa: ANN401 - worker options are supplied by the owning plugin
+    source: Mapping[str, object] | None = None,
+    *,
+    isolated_command: bool = False,
 ) -> Runtime:
-    return _rc_composition.create_runtime(
-        workspace,
-        plugins=selected,
-        source=source,
-        **options,
+    if isolated_command:
+        return _rc_composition.create_runtime(
+            workspace,
+            plugins=selected,
+            source=source,
+            isolated_command=True,
+        )
+    return _rc_composition.create_runtime(workspace, plugins=selected, source=source)
+
+
+def _messages(value: object) -> Messages:
+    result: Messages = []
+    for item in array_field(value, "messages"):
+        fields = object_field(item, "message")
+        if not {"role", "content"} <= fields.keys():
+            message = "Chat messages require role and content."
+            raise ValueError(message)
+        result.append({
+            key: _text(value, "message field") for key, value in fields.items()
+        })
+    return result
+
+
+def _conversation_request(fields: Mapping[str, object]) -> _ConversationRequest:
+    _exact_fields(
+        fields,
+        {
+            "provider",
+            "mode",
+            "workspace",
+            "task",
+            "command_timeout",
+            "context_chars",
+            "keep_recent_turns",
+            "instruction_role",
+            "protocol",
+            "runtime_plugins",
+            "allowed_actions",
+            "snapshot",
+            "max_steps",
+        },
+        optional="plugin_source",
+    )
+    max_steps = fields["max_steps"]
+    return _ConversationRequest(
+        workspace=text_field(fields["workspace"], "workspace"),
+        task=_text(fields["task"], "task"),
+        command_timeout=number_field(fields["command_timeout"], "command timeout"),
+        context_chars=integer_field(fields["context_chars"], "context characters"),
+        keep_recent_turns=integer_field(
+            fields["keep_recent_turns"],
+            "recent turns",
+            minimum=0,
+        ),
+        instruction_role=_role(fields["instruction_role"]),
+        protocol=text_field(fields["protocol"], "protocol"),
+        runtime_plugins=_strings(fields["runtime_plugins"], "runtime plugins"),
+        allowed_actions=set(_strings(fields["allowed_actions"], "allowed actions")),
+        snapshot=object_field(fields["snapshot"], "session snapshot"),
+        max_steps=None
+        if max_steps is None
+        else integer_field(max_steps, "maximum steps"),
+        source=_source(fields.get("plugin_source")),
     )
 
 
+def _package_download(request: Mapping[str, object], cancel_check: CancelCheck) -> str:
+    _exact_fields(request, {"mode", "url", "destination"})
+    url = text_field(request["url"], "download URL")
+    destination = Path(text_field(request["destination"], "download destination"))
+    if not destination.is_absolute():
+        message = "Package download destination must be absolute."
+        raise ValueError(message)
+    data = download(url)
+    cancel_check()
+    with destination.open("xb") as stream:
+        stream.write(data)
+    return str(len(data))
+
+
+def _plugin_command(request: Mapping[str, object], cancel_check: CancelCheck) -> str:
+    _exact_fields(
+        request,
+        {"mode", "plugin", "command", "workspace"},
+        optional="plugin_source",
+    )
+    runtime = _runtime(
+        text_field(request["workspace"], "command workspace"),
+        [text_field(request["plugin"], "command plugin")],
+        _source(request.get("plugin_source")),
+        isolated_command=True,
+    )
+    try:
+        os.chdir(runtime.workspace)
+        return runtime.command(
+            text_field(request["command"], "command"),
+            cancel_check=cancel_check,
+        )
+    finally:
+        runtime.close()
+
+
+def _conversation(
+    request: _ConversationRequest,
+    api: Chat,
+    cancel_check: CancelCheck,
+) -> str:
+    runtime = _runtime(request.workspace, request.runtime_plugins, request.source)
+    session = None
+    try:
+        session = _rc_composition.create_session(
+            api,
+            request.workspace,
+            runtime=runtime,
+            timeout=request.command_timeout,
+            auto_approve=False,
+            context_chars=request.context_chars,
+            keep_recent_turns=request.keep_recent_turns,
+            instruction_role=request.instruction_role,
+            protocol=request.protocol,
+            allowed_actions=request.allowed_actions,
+        )
+        session.restore_snapshot(request.snapshot)
+        message = session.run(
+            request.task,
+            max_steps=request.max_steps,
+            event_callback=_event,
+            cancel_check=cancel_check,
+        )
+        raw_snapshot: object = session.export_snapshot()
+        _emit({
+            "type": "snapshot",
+            "snapshot": object_field(raw_snapshot, "completed snapshot"),
+        })
+        return message
+    finally:
+        if session is None:
+            runtime.close()
+        else:
+            session.close()
+
+
+def _event(kind: str, payload: Mapping[str, object]) -> None:
+    _emit({"type": "event", "event": kind, "payload": dict(payload)})
+
+
+def _execute(
+    request: Mapping[str, object],
+    resources: _Resources,
+    cancel_check: CancelCheck,
+) -> str:
+    mode = request.get("mode")
+    if mode == "package_download":
+        return _package_download(request, cancel_check)
+    if mode == "plugin_command":
+        return _plugin_command(request, cancel_check)
+    if mode == "chat":
+        _exact_fields(request, {"provider", "mode", "messages"})
+        messages = _messages(request["messages"])
+        api = _provider(request["provider"], resources)
+        return api(messages)
+    if mode == "conversation":
+        conversation = _conversation_request(request)
+        api = _provider(request["provider"], resources)
+        return _conversation(conversation, api, cancel_check)
+    message = "Unknown child-process mode."
+    raise ValueError(message)
+
+
+def _partial_redactions(request: Mapping[str, object]) -> tuple[str, ...]:
+    value = request.get("provider")
+    if value is None:
+        return ()
+    try:
+        fields = object_field(value, "provider")
+        items = array_field(fields.get("secrets"), "redactions")
+    except ConfigurationError:
+        return ()
+    return tuple(item for item in items if isinstance(item, str))
+
+
+def _emit_error(error: Exception, resources: _Resources) -> str:
+    message = f"{type(error).__name__}: {error}"
+    for secret in resources.secrets:
+        if secret:
+            message = message.replace(secret, "<redacted>")
+    message = message[: SETTINGS.limits.max_worker_error_chars]
+    retry_after = error.retry_after if isinstance(error, ProviderError) else None
+    if retry_after is not None and (not math.isfinite(retry_after) or retry_after < 0):
+        retry_after = None
+    _emit({
+        "type": "error",
+        "message": message,
+        "retryable": error.retryable if isinstance(error, ProviderError) else False,
+        "retry_after": retry_after,
+        "os_error": isinstance(error, OSError),
+    })
+    return message
+
+
 class _WorkerCancelled(BaseException):
-    """Unwind plugin cleanup without being mistaken for an ordinary tool error."""
+    """Unwind cleanup without converting cancellation into a provider failure."""
 
 
 def _run(cancel_check: CancelCheck) -> int:
-    raw = sys.stdin.buffer.read(_MAX_INPUT_BYTES + 1)
+    with BufferedReader(FileIO(0, "rb", closefd=False)) as stream:
+        raw = stream.read(_MAX_INPUT_BYTES + 1)
+    resources = _Resources()
     if len(raw) > _MAX_INPUT_BYTES:
-        _emit({"type": "error", "message": "Child-process request is too large."})
+        _emit({
+            "type": "error",
+            "message": "Child-process request is too large.",
+            "retryable": False,
+            "retry_after": None,
+            "os_error": False,
+        })
         return 1
-    secrets = []
-    provider_runtime = None
     try:
-        request = json.loads(raw)
-        if not isinstance(request, dict):
-            error_message = "Child-process request must be an object."
-            raise ValueError(error_message)
-        mode = request.get("mode")
-        if mode == "package_download":
-            from raychat.plugin_manager import download
-
-            if set(request) != {"mode", "url", "destination"} or not all(
-                isinstance(request[name], str) for name in ("url", "destination")
-            ):
-                raise ValueError("Package download request has invalid fields.")
-            destination = Path(request["destination"])
-            if not destination.is_absolute():
-                raise ValueError("Package download destination must be absolute.")
-            data = download(request["url"])
-            cancel_check()
-            with destination.open("xb") as stream:
-                stream.write(data)
-            _emit({"type": "final", "message": str(len(data))})
-            return 0
-        if mode == "plugin_command":
-            if set(request) - {"plugin_source"} != {
-                "mode",
-                "plugin",
-                "command",
-                "workspace",
-            }:
-                error_message = "Plugin command request has invalid fields."
-                raise ValueError(error_message)
-            runtime = _runtime(
-                request["workspace"],
-                [request["plugin"]],
-                request.get("plugin_source"),
-                isolated_command=True,
-            )
-            try:
-                import os
-
-                os.chdir(runtime.workspace)
-                message = runtime.command(request["command"], cancel_check=cancel_check)
-            finally:
-                runtime.close()
-            _emit({"type": "final", "message": message})
-            return 0
-        descriptor = request.get("provider")
-        if isinstance(descriptor, dict) and isinstance(descriptor.get("secrets"), list):
-            secrets = [v for v in descriptor["secrets"] if isinstance(v, str)]
-        api, secrets, provider_runtime = _provider(descriptor)
-        if mode == "chat":
-            if set(request) != {"provider", "mode", "messages"}:
-                error_message = "Chat child request has invalid fields."
-                raise ValueError(error_message)
-            message = api(request["messages"])
-        elif mode == "conversation":
-            required = {
-                "provider",
-                "mode",
-                "workspace",
-                "task",
-                "command_timeout",
-                "context_chars",
-                "keep_recent_turns",
-                "instruction_role",
-                "protocol",
-                "runtime_plugins",
-                "allowed_actions",
-            }
-            required.update({"snapshot", "max_steps"})
-            if "plugin_source" in request:
-                required.add("plugin_source")
-            if set(request) != required:
-                error_message = "Agent child request has invalid fields."
-                raise ValueError(error_message)
-            session_runtime = _runtime(
-                request["workspace"],
-                request["runtime_plugins"],
-                request.get("plugin_source"),
-            )
-            session = None
-            try:
-                session = _rc_composition.create_session(
-                    api,
-                    request["workspace"],
-                    runtime=session_runtime,
-                    timeout=request["command_timeout"],
-                    auto_approve=False,
-                    context_chars=request["context_chars"],
-                    keep_recent_turns=request["keep_recent_turns"],
-                    instruction_role=request["instruction_role"],
-                    protocol=request["protocol"],
-                    allowed_actions=set(request["allowed_actions"]),
-                )
-                session.restore_snapshot(request["snapshot"])
-
-                def event(kind: str, payload: Mapping[str, Any]) -> None:
-                    _emit({"type": "event", "event": kind, "payload": dict(payload)})
-
-                message = session.run(
-                    request["task"],
-                    max_steps=request["max_steps"],
-                    event_callback=event,
-                    cancel_check=cancel_check,
-                )
-                _emit({"type": "snapshot", "snapshot": session.export_snapshot()})
-            finally:
-                if session is None:
-                    session_runtime.close()
-                else:
-                    session.close()
-        else:
-            error_message = "Unknown child-process mode."
-            raise ValueError(error_message)
-        _emit({"type": "final", "message": message})
-        return 0
-    except Exception as exc:
-        message = f"{type(exc).__name__}: {exc}"
-        for secret in secrets:
-            if secret:
-                message = message.replace(secret, "<redacted>")
-        _emit(
-            {
-                "type": "error",
-                "message": message[: SETTINGS.limits.max_worker_error_chars],
-                "retryable": getattr(exc, "retryable", False),
-                "retry_after": getattr(exc, "retry_after", None),
-                "os_error": isinstance(exc, OSError),
-            },
+        request = object_field(json_object(raw), "child-process request")
+        resources.secrets = _partial_redactions(request)
+        message = _execute(request, resources, cancel_check)
+    except Exception as error:
+        diagnostic = RuntimeError(_emit_error(error, resources))
+        _LOGGER.exception(
+            "Worker request failed",
+            exc_info=(RuntimeError, diagnostic, None),
         )
         return 1
+    else:
+        _emit({"type": "final", "message": message})
+        return 0
     finally:
-        if provider_runtime is not None:
-            provider_runtime.close()
+        if resources.provider_runtime is not None:
+            resources.provider_runtime.close()
 
 
 def main() -> int:
+    """Run one bounded request with a signal-aware cancellation scope.
+
+    Returns
+    -------
+    int
+        Zero on completion, one on failure or 130 after cancellation.
+
+    """
     cancelled = threading.Event()
 
     def check_cancelled() -> None:
         if cancelled.is_set():
             raise _WorkerCancelled
 
-    def terminate(signum: int, frame: FrameType | None) -> None:
-        # The shared check also reaches plugin-owned background threads. Ignore
-        # repeated requests so another signal cannot interrupt their cleanup.
+    def terminate(_signum: int, _frame: FrameType | None) -> None:
         if not cancelled.is_set():
             cancelled.set()
             raise _WorkerCancelled

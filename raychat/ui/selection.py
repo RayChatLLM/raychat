@@ -8,7 +8,14 @@ from raychat.ui.state import display_clusters, display_width
 
 
 def cell_slice(text: str, start: int, end: int) -> str:
-    """Copy whole glyphs intersecting the selected terminal cells."""
+    """Copy whole glyphs intersecting the selected terminal cells.
+
+    Returns
+    -------
+    str
+        The complete display clusters overlapping the cell interval.
+
+    """
     output: list[str] = []
     column = 0
     for cluster in display_clusters(text):
@@ -21,6 +28,8 @@ def cell_slice(text: str, start: int, end: int) -> str:
 
 @dataclass
 class TextSelection:
+    """Track a drag against a stable transcript and its display coordinates."""
+
     anchor: tuple[int, int] | None = None
     focus: tuple[int, int] | None = None
     rows: tuple[str, ...] = ()
@@ -28,11 +37,13 @@ class TextSelection:
     dragging: bool = False
 
     def clear(self) -> None:
+        """Discard the selection and release an active drag."""
         self.anchor = self.focus = None
         self.rows = ()
         self.dragging = False
 
     def reconcile(self, rows: tuple[str, ...], width: int) -> None:
+        """Discard coordinates invalidated by replacement text or a resize."""
         # New output may extend a transcript. A resize, clear or history eviction
         # changes its coordinates and must never copy unrelated replacement text.
         if self.anchor is not None and (
@@ -41,6 +52,7 @@ class TextSelection:
             self.clear()
 
     def begin(self, row: int, column: int, rows: tuple[str, ...], width: int) -> None:
+        """Anchor a new drag when its row belongs to the current transcript."""
         self.clear()
         if 0 <= row < len(rows):
             self.rows = rows
@@ -49,6 +61,7 @@ class TextSelection:
             self.dragging = True
 
     def move(self, row: int, column: int, *, released: bool = False) -> None:
+        """Update the clamped drag endpoint and optionally release it."""
         if self.dragging:
             self.focus = (
                 max(0, min(row, len(self.rows) - 1)),
@@ -57,6 +70,14 @@ class TextSelection:
             self.dragging = not released
 
     def span(self, row: int) -> tuple[int, int] | None:
+        """Resolve selection bounds for one transcript row.
+
+        Returns
+        -------
+        tuple[int, int] | None
+            Start and exclusive end columns, or None outside the selection.
+
+        """
         if self.anchor is None or self.focus is None or self.anchor == self.focus:
             return None
         first, last = sorted((self.anchor, self.focus))
@@ -68,6 +89,14 @@ class TextSelection:
         )
 
     def text(self) -> str:
+        """Copy the selection as whole glyphs.
+
+        Returns
+        -------
+        str
+            Selected text with its transcript line breaks.
+
+        """
         selected = []
         for row, text in enumerate(self.rows):
             span = self.span(row)

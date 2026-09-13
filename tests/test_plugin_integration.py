@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import subprocess
+import ast
+import asyncio
 import sys
 import tempfile
 import threading
 import unittest
-from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat.application import build_runtime, dispatch_command
@@ -43,60 +43,177 @@ from raychat.sdk import (
 from raychat.session import AgentSession
 from raychat.storage import SessionStore
 from raychat.type_support import override
-from raychat.validation import text_field
-from tests.plugin_support import ScriptedChat, create_runtime, registered_session
+from raychat.ui.state import approval_details
+from raychat.validation import array_field, integer_field, object_field, text_field
+from raychat.workers import AgentWorker, WorkerExecution
+from tests.assertions import TypedTestCase
+from tests.plugin_support import (
+    ScriptedChat,
+    create_runtime,
+    plugin_module,
+    registered_session,
+)
 from tests.plugin_support import callback_plugin as module
+from tests.plugin_support import package as make_package
+from tests.transport_support import captured
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Iterable, Iterator, Mapping
+    from types import ModuleType
+
+    from plugins import goals
+    from plugins.subagents import coordinator, models
+else:
+    goals = plugin_module("goals")
+    coordinator = plugin_module("subagents.coordinator")
+    models = plugin_module("subagents.models")
+
+
+@dataclass(frozen=True)
+class _ProbeResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+async def _run_probe(script: str, *arguments: str) -> _ProbeResult:
+    creation: Awaitable[asyncio.subprocess.Process] = asyncio.create_subprocess_exec(
+        sys.executable,
+        "-B",
+        "-S",
+        "-c",
+        script,
+        *arguments,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    process = await creation
+    try:
+        output: Awaitable[tuple[bytes, bytes]] = process.communicate()
+        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(output, timeout=30)
+        stdout, stderr = await bounded
+        status = process.returncode
+        if status is None:
+            message = "The completed probe has no process exit status."
+            raise AssertionError(message)
+        return _ProbeResult(status, stdout.decode("utf-8"), stderr.decode("utf-8"))
+    finally:
+        if process.returncode is None:
+            process.kill()
+        completion: Awaitable[int] = process.wait()
+        reaped: Awaitable[int] = asyncio.wait_for(completion, timeout=5)
+        await reaped
+
+
+def _sync_failure_then_recovery(message: str) -> list[OSError | None]:
+    return [OSError(message), None]
+
+
+def _snapshot_state(snapshot: Mapping[str, object]) -> dict[str, object]:
+    return object_field(snapshot["state"], "snapshot state")
+
+
+def _snapshot_history(snapshot: Mapping[str, object]) -> list[dict[str, object]]:
+    return [
+        object_field(item, "history entry")
+        for item in array_field(snapshot["history"], "snapshot history")
+    ]
+
+
+def _registry_names(runtime: Runtime, registry: str) -> set[str]:
+    names = {
+        "tools": set(runtime.tools),
+        "middleware": set(runtime.middleware),
+        "commands": set(runtime.commands),
+        "providers": set(runtime.providers),
+    }
+    return names[registry]
+
+
+class _DisabledGoalController:
+    @staticmethod
+    def run(*_args: object, **_kwargs: object) -> str:
+        message = "Disabled goals must not run"
+        raise AssertionError(message)
+
+
+_PENDING_MODEL_VALUE = 99
 
 DONE = '{"action":"done","message":"finished"}'
 
 
 def counter(api: PluginAPI) -> None:
+    """Register an observable counter with state isolated by plugin owner."""
+
     def validate(action: Action) -> None:
         if set(action) != {"action"}:
             error_message = "Unexpected arguments."
             raise ValueError(error_message)
 
-    def execute(action: Action, ctx: PluginContext) -> dict[str, Any]:
-        ctx.state["count"] = ctx.state.get("count", 0) + 1
+    def execute(_action: Action, ctx: PluginContext) -> dict[str, object]:
+        ctx.state["count"] = (
+            integer_field(ctx.state.get("count", 0), "count", minimum=None) + 1
+        )
         return {"ok": True, "count": ctx.state["count"]}
 
     api.register_tool(
-        ToolDefinition("count", "Count invocations", validate, execute, False),
+        ToolDefinition(
+            "count",
+            "Count invocations",
+            validate,
+            execute,
+            requires_approval=False,
+        ),
     )
 
 
-class PluginIntegrationTests(unittest.TestCase):
+class PluginIntegrationTests(TypedTestCase):
+    """Check PluginIntegration behavior and failure boundaries."""
+
     @override
     def setUp(self) -> None:
+        """Create an isolated workspace and synchronization controls."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
     def runtime(self, *modules: ModuleType) -> Runtime:
+        """Load the requested plugins and arrange registry cleanup.
+
+        Returns
+        -------
+        Runtime
+            The loaded registry.
+
+        """
         runtime = Runtime(self.root)
         runtime.load(modules)
         self.addCleanup(runtime.close)
         return runtime
 
     def test_bare_kernel_does_not_import_features(self) -> None:
+        """Check bare kernel does not import features."""
         script = """
 import sys
 from raychat.session import AgentSession
 from raychat.plugins import Runtime
-s = AgentSession(lambda _: '{"action":"done","message":"ok"}', sys.argv[1], runtime=Runtime(sys.argv[1]))
+s = AgentSession(
+    lambda _: '{"action":"done","message":"ok"}', sys.argv[1],
+    runtime=Runtime(sys.argv[1]),
+)
 assert s.send("hello", event_callback=lambda *_: None) == "ok"
-assert not any(n.startswith(("raychat.builtins", "gepa", "orchestration", "optimization", "ray_chat_tui")) for n in sys.modules)
+assert not any(
+    n.startswith(("raychat.builtins", "gepa", "orchestration", "optimization",
+                  "ray_chat_tui"))
+    for n in sys.modules
+)
 s.close()
 """
-        subprocess.run(  # noqa: S603 - argument arrays only; caller controls execution and checks the result
-            [sys.executable, "-B", "-S", "-c", script, str(self.root)],
-            check=True,
-            capture_output=True,
-        )
+        result = asyncio.run(_run_probe(script, str(self.root)))
+        self.equal(result.returncode, 0, result.stderr)
 
     def test_kernel_import_direction(self) -> None:
-        import ast
-
+        """Check kernel import direction."""
         root = Path(__file__).resolve().parents[1] / "raychat"
         for filename in (
             "session.py",
@@ -115,27 +232,30 @@ s.close()
                 if isinstance(n, ast.Import)
                 for alias in n.names
             ]
-            self.assertFalse(
-                any(
+            self.require(
+                not (
                     any(
-                        word in name
-                        for word in (
-                            "builtins",
-                            "compat",
-                            "composition",
-                            "orchestration",
-                            "optimization",
-                            "tui",
+                        any(
+                            word in name
+                            for word in (
+                                "builtins",
+                                "compat",
+                                "composition",
+                                "orchestration",
+                                "optimization",
+                                "tui",
+                            )
                         )
+                        for name in imports
                     )
-                    for name in imports
                 ),
                 filename,
             )
 
     def test_remove_every_feature_and_check_capabilities(self) -> None:
+        """Check remove every feature and check capabilities."""
         manifests = read_distribution(
-            text_field(SETTINGS.plugins.profile, "plugins.profile")
+            text_field(SETTINGS.plugins.profile, "plugins.profile"),
         ).manifests
         dependencies = {manifest.id: set(manifest.requires) for manifest in manifests}
         baseline = create_runtime(self.root)
@@ -154,14 +274,17 @@ s.close()
                 disabled.update(dependents)
             runtime = create_runtime(self.root, disabled=disabled)
             self.addCleanup(runtime.close)
-            self.assertEqual(set(runtime.plugins), set(dependencies) - disabled)
-            self.assertTrue(names.isdisjoint(getattr(runtime, registry)), removed)
+            self.equal(set(runtime.plugins), set(dependencies) - disabled)
+            self.require(
+                (names.isdisjoint(_registry_names(runtime, registry))),
+                removed,
+            )
             expected = {
                 name
                 for (kind, name), owner in baseline.owners.items()
                 if kind == registry and owner not in disabled
             }
-            self.assertEqual(set(getattr(runtime, registry)), expected)
+            self.equal(set(_registry_names(runtime, registry)), expected)
 
         cases = {
             "filesystem": {"list", "read", "write", "edit"},
@@ -180,45 +303,43 @@ s.close()
         ]:
             with self.subTest(removed=removed):
                 remove_and_check(removed, registry, {name})
-        with self.assertRaisesRegex(PluginError, "subagents"):
+        with self.rejected(PluginError, "subagents"):
             create_runtime(self.root, disabled={"subagents"})
 
     def test_disabled_goals_cannot_be_reenabled_by_resource_options(self) -> None:
+        """Check disabled goals cannot be reenabled by resource options."""
         runtime = create_runtime(self.root, plugins=[])
         self.addCleanup(runtime.close)
-        controller = SimpleNamespace(
-            run=lambda *a, **k: self.fail("Disabled goals must not run"),
-        )
+        controller = _DisabledGoalController()
         runtime.options["goal_controller"] = controller
         session = AgentSession(ScriptedChat([DONE]), self.root, runtime=runtime)
-        self.assertEqual(
-            session.run("hello", event_callback=lambda *_: None),
-            "finished",
-        )
+        self.equal(session.run("hello", event_callback=lambda *_: None), "finished")
 
     def test_cyclic_dependencies_collisions_and_expired_registration(self) -> None:
-        with self.assertRaisesRegex(PluginError, "cycle"):
+        """Check cyclic dependencies collisions and expired registration."""
+        with self.rejected(PluginError, "cycle"):
             self.runtime(
                 module("a", lambda _: None, ("b",)),
                 module("b", lambda _: None, ("a",)),
             )
         runtime = Runtime(self.root)
-        with self.assertRaisesRegex(PluginError, "Duplicate"):
+        with self.rejected(PluginError, "Duplicate"):
             runtime.load([module("a", counter), module("b", counter)])
-        self.assertEqual(runtime.tools, {})
+        self.equal(runtime.tools, {})
         captured: list[PluginAPI] = []
         self.runtime(module("api", captured.append))
-        with self.assertRaises(PluginError):
+        with self.rejected(PluginError):
             captured[0].register_service("late", object())
 
     def test_reverse_cleanup_and_registration_failure(self) -> None:
+        """Check reverse cleanup and registration failure."""
         closed = []
         runtime = self.runtime(
             module("a", lambda api: api.on_close(lambda: closed.append("a"))),
             module("b", lambda api: api.on_close(lambda: closed.append("b")), ("a",)),
         )
         runtime.close()
-        self.assertEqual(closed, ["b", "a"])
+        self.equal(closed, ["b", "a"])
 
         def broken(api: PluginAPI) -> None:
             api.on_close(lambda: closed.append("broken"))
@@ -227,22 +348,25 @@ s.close()
             raise ValueError(error_message)
 
         failed = Runtime(self.root)
-        with self.assertRaises(PluginError):
+        with self.rejected(PluginError):
             failed.load([module("broken", broken)])
-        self.assertEqual(failed.tools, {})
-        self.assertEqual(closed[-1], "broken")
+        self.equal(failed.tools, {})
+        self.equal(closed[-1], "broken")
 
     def test_discovery_trust_revocation_and_package_imports(self) -> None:
+        """Check discovery trust revocation and package imports."""
         home, project = self.root / "home", self.root / "project"
         home.mkdir()
         package = project / ".raychat" / "plugins" / "example"
         package.mkdir(parents=True)
         (package / "helper.py").write_text('VALUE = "relative"\n')
-        from tests.plugin_support import package as make_package
 
         make_package(
             package,
-            'from .helper import VALUE\ndef register(api: PluginAPI) -> None: api.register_service("example", VALUE)\n',
+            "from raychat.sdk import PluginAPI\n"
+            "from .helper import VALUE\n"
+            "def register(api: PluginAPI) -> None:\n"
+            '    api.register_service("example", VALUE)\n',
         )
         with mock.patch("pathlib.Path.home", return_value=home):
             for options, expected in [
@@ -252,23 +376,23 @@ s.close()
             ]:
                 runtime = build_runtime(project, options, {})
                 self.addCleanup(runtime.close)
-                self.assertEqual("example" in runtime.plugins, expected)
+                self.equal("example" in runtime.plugins, expected)
                 if expected:
-                    self.assertEqual(runtime.services["example"], "relative")
-        self.assertNotEqual(
-            import_plugin(package).__name__,
-            import_plugin(package).__name__,
+                    self.equal(runtime.services["example"], "relative")
+        self.require(
+            (import_plugin(package).__name__) != (import_plugin(package).__name__),
         )
 
     def test_hooks_are_ordered_and_context_is_detached(self) -> None:
+        """Check hooks are ordered and context is detached."""
         order = []
 
         def first(api: PluginAPI) -> None:
             counter(api)
-            api.on(BEFORE_TOOL, lambda e, c: order.append("before"))
-            api.on(AFTER_TOOL, lambda e, c: order.append("after"))
+            api.on(BEFORE_TOOL, lambda _e, _c: order.append("before"))
+            api.on(AFTER_TOOL, lambda _e, _c: order.append("after"))
 
-            def transform(event: Context, ctx: PluginContext) -> Context:
+            def transform(event: Context, _ctx: PluginContext) -> Context:
                 first_message = event.messages[0]
                 return Context(
                     (
@@ -280,8 +404,8 @@ s.close()
             api.on(CONTEXT, transform)
 
         def second(api: PluginAPI) -> None:
-            def inspect(event: Context, ctx: PluginContext) -> None:
-                self.assertTrue(event.messages[0].content.endswith("first"))
+            def inspect(event: Context, _ctx: PluginContext) -> None:
+                self.require(event.messages[0].content.endswith("first"))
 
             api.on(CONTEXT, inspect)
 
@@ -292,44 +416,50 @@ s.close()
             runtime=runtime,
         )
         session.send("hello", event_callback=lambda *_: None)
-        self.assertEqual(order, ["before", "after"])
-        self.assertEqual(runtime.state["first"]["count"], 1)
-        self.assertNotIn("first", session.snapshot()[0]["content"])
+        self.equal(order, ["before", "after"])
+        self.equal(runtime.state["first"]["count"], 1)
+        self.require(("first") not in (session.snapshot()[0]["content"]))
 
     def test_guard_blocks_before_approval_and_execution(self) -> None:
+        """Check guard blocks before approval and execution."""
+
         def guarded(api: PluginAPI) -> None:
             api.register_tool(
                 ToolDefinition(
                     "danger",
                     "approval required",
-                    lambda a: None,
-                    lambda a, c: self.fail("blocked tool ran"),
+                    lambda _a: None,
+                    lambda _a, _c: self.fail("blocked tool ran"),
                 ),
             )
-            api.on(BEFORE_TOOL, lambda e, c: Block("blocked"))
+            api.on(BEFORE_TOOL, lambda _e, _c: Block("blocked"))
 
         runtime = self.runtime(module("guard", guarded))
         model = ScriptedChat(['{"action":"danger"}', DONE])
         session = AgentSession(model, self.root, runtime=runtime)
         session.send(
             "hello",
-            approval_callback=lambda a: self.fail("blocked tool requested approval"),
+            approval_callback=lambda _a: self.fail("blocked tool requested approval"),
             event_callback=lambda *_: None,
         )
-        self.assertIn("blocked", model.calls[-1][-1]["content"])
+        self.require(("blocked") in (model.calls[-1][-1]["content"]))
 
     def test_approval_cancellation_and_command_policy(self) -> None:
+        """Check approval cancellation and command policy."""
+
         def register(api: PluginAPI) -> None:
             api.register_tool(
                 ToolDefinition(
                     "danger",
                     "approval required",
-                    lambda a: None,
-                    lambda a, c: self.fail("denied tool ran"),
+                    lambda _a: None,
+                    lambda _a, _c: self.fail("denied tool ran"),
                 ),
             )
-            api.register_command(CommandDefinition("idle", lambda a, c: a))
-            api.register_command(CommandDefinition("live", lambda a, c: a, True))
+            api.register_command(CommandDefinition("idle", lambda a, _c: a))
+            api.register_command(
+                CommandDefinition("live", lambda a, _c: a, while_running=True),
+            )
 
         runtime = self.runtime(module("guard", register))
         session = AgentSession(
@@ -339,28 +469,35 @@ s.close()
         )
         session.send(
             "hello",
-            approval_callback=lambda a: False,
+            approval_callback=lambda _a: False,
             event_callback=lambda *_: None,
         )
-        self.assertEqual(runtime.command("/live test", running=True), "test")
-        with self.assertRaises(RuntimeError):
+        self.equal(runtime.command("/live test", running=True), "test")
+        with self.rejected(RuntimeError):
             runtime.command("/idle test", running=True)
         cancellation = KeyboardInterrupt("cancelled")
 
         def cancel() -> None:
             raise cancellation
 
-        with self.assertRaises(KeyboardInterrupt) as caught:
-            session.send("cancel", cancel_check=cancel, event_callback=lambda *_: None)
-        self.assertIs(caught.exception, cancellation)
+        caught = captured(
+            KeyboardInterrupt,
+            lambda: session.send(
+                "cancel",
+                cancel_check=cancel,
+                event_callback=lambda *_: None,
+            ),
+        )
+        self.require(caught is cancellation)
 
     def test_context_budget_after_transform_and_state_isolation(self) -> None:
+        """Check context budget after transform and state isolation."""
         runtime = self.runtime(
             module(
                 "large",
                 lambda api: api.on(
                     CONTEXT,
-                    lambda e, c: Context((Message("user", "x" * 10000),)),
+                    lambda _e, _c: Context((Message("user", "x" * 10000),)),
                 ),
             ),
         )
@@ -370,38 +507,28 @@ s.close()
             runtime=runtime,
             context_chars=1000,
         )
-        with self.assertRaisesRegex(ValueError, "budget"):
+        with self.rejected(ValueError, "budget"):
             session.send("hello", event_callback=lambda *_: None)
-        self.assertEqual(session.snapshot(), [])
+        self.equal(session.snapshot(), [])
         first, second = (
             self.runtime(module("counter", counter)),
             self.runtime(module("counter", counter)),
         )
         first.state["counter"] = {"count": 1}
-        self.assertEqual(second.state, {})
+        self.equal(second.state, {})
 
     def test_real_goals_and_workflows_run_through_registrations(self) -> None:
-        from tests.plugin_support import plugin_module
-
-        GoalController = plugin_module("goals").GoalController
-        GoalJudge = plugin_module("goals").GoalJudge
-        from tests.plugin_support import plugin_module
-
-        SubagentCoordinator = plugin_module("subagents.coordinator").SubagentCoordinator
-        from tests.plugin_support import plugin_module
-
-        ModelProfile = plugin_module("subagents.models").ModelProfile
-        ModelRouter = plugin_module("subagents.models").ModelRouter
+        """Check real goals and workflows run through registrations."""
         judge = ScriptedChat(
             [
                 '{"decision":"continue","feedback":"check again"}',
                 '{"decision":"complete","feedback":"verified"}',
             ],
         )
-        router = ModelRouter(
+        router = models.ModelRouter(
             [
-                ModelProfile("primary", "test", lambda: judge, ("judge",), 1),
-                ModelProfile(
+                models.ModelProfile("primary", "test", lambda: judge, ("judge",), 1),
+                models.ModelProfile(
                     "reader",
                     "test",
                     lambda: ScriptedChat([DONE]),
@@ -410,24 +537,26 @@ s.close()
                 ),
             ],
         )
-        controller = GoalController(GoalJudge(router))
+        controller = goals.GoalController(goals.GoalJudge(router))
         controller.configure("Finish")
-        coordinator = SubagentCoordinator(router, self.root)
+        delegation = coordinator.SubagentCoordinator(router, self.root)
         runtime = create_runtime(
             self.root,
             goal_controller=controller,
-            delegation_callback=coordinator,
-            subagent_catalog=coordinator.catalog(),
+            delegation_callback=delegation,
+            subagent_catalog=delegation.catalog(),
         )
         self.addCleanup(runtime.close)
-        seen = []
+        seen: list[str] = []
         runtime.load(
             [
                 module(
                     "audit",
                     lambda api: api.on(
                         BEFORE_TOOL,
-                        lambda e, c: seen.append(e.action["action"]),
+                        lambda e, _c: seen.append(
+                            text_field(e.action["action"], "action"),
+                        ),
                     ),
                 ),
             ],
@@ -441,28 +570,21 @@ s.close()
         )
         session = AgentSession(model, self.root, runtime=runtime)
         events = []
-        self.assertEqual(
-            session.run("hello", event_callback=lambda k, p: events.append(k)),
+        self.equal(
+            session.run("hello", event_callback=lambda k, _p: events.append(k)),
             "finished",
         )
-        self.assertEqual(seen, ["delegate"])
-        self.assertEqual(events.count("done"), 1)
-        self.assertEqual(len(judge.calls), 2)
+        self.equal(seen, ["delegate"])
+        self.equal(events.count("done"), 1)
+        self.equal(len(judge.calls), 2)
 
     def test_completed_goal_does_not_reactivate_when_session_is_restored(self) -> None:
-        from tests.plugin_support import plugin_module
-
-        GoalController = plugin_module("goals").GoalController
-        GoalJudge = plugin_module("goals").GoalJudge
-        from tests.plugin_support import plugin_module
-
-        ModelProfile = plugin_module("subagents.models").ModelProfile
-        ModelRouter = plugin_module("subagents.models").ModelRouter
+        """Check completed goal does not reactivate when session is restored."""
         judge = ScriptedChat(['{"decision":"complete","feedback":"verified"}'])
-        controller = GoalController(
-            GoalJudge(
-                ModelRouter(
-                    [ModelProfile("primary", "test", lambda: judge, ("judge",))],
+        controller = goals.GoalController(
+            goals.GoalJudge(
+                models.ModelRouter(
+                    [models.ModelProfile("primary", "test", lambda: judge, ("judge",))],
                 ),
             ),
         )
@@ -478,13 +600,14 @@ s.close()
         self.addCleanup(session.close)
         # Fresh storage initializes an empty goal; set the requested goal afterward.
         controller.configure("Finish")
-        self.assertEqual(session.run("hello"), "finished")
-        self.assertIsNone(controller.status())
-        self.assertEqual(store.snapshot()["state"]["goals"], {})
+        self.equal(session.run("hello"), "finished")
+        self.require((controller.status()) is None)
+        self.equal(_snapshot_state(store.snapshot())["goals"], {})
         session.restore()
-        self.assertIsNone(controller.status())
+        self.require((controller.status()) is None)
 
     def test_optimization_imports_lazily_and_registered_command_runs(self) -> None:
+        """Check optimization imports lazily and registered command runs."""
         script = """
 import sys
 from raychat.plugins import Runtime
@@ -498,30 +621,27 @@ assert 'improved' in r.command('/optimize demo')
 r.close()
 temporary.cleanup()
 """
-        subprocess.run(  # noqa: S603 - argument arrays only; caller controls execution and checks the result
-            [sys.executable, "-B", "-S", "-c", script],
-            check=True,
-            capture_output=True,
-        )
+        result = asyncio.run(_run_probe(script))
+        self.equal(result.returncode, 0, result.stderr)
 
     def test_registered_tool_approval_displays_complete_arguments(self) -> None:
-        from raychat.ui.state import approval_details
-
+        """Check registered tool approval displays complete arguments."""
         action = {"action": "custom", "argument": "visible\nvalue", "items": [1, 2, 3]}
-        self.assertFalse(approval_details(action, 40).valid)
+        self.require(not (approval_details(action, 40).valid))
         details = approval_details(action, 40, registered=True)
-        self.assertTrue(details.valid)
-        self.assertIn("custom", "".join(details.lines))
-        self.assertIn("items", "".join(details.lines))
+        self.require(details.valid)
+        self.require(("custom") in ("".join(details.lines)))
+        self.require(("items") in ("".join(details.lines)))
 
     def test_worker_commands_complete_without_calling_the_model(self) -> None:
-        from raychat.workers import AgentWorker
-
+        """Check worker commands complete without calling the model."""
         chat = ScriptedChat[str]([])
         worker = AgentWorker(
             None,
             self.root,
-            session_factory=lambda: registered_session(chat, self.root),
+            execution=WorkerExecution(
+                factory=lambda: registered_session(chat, self.root),
+            ),
         )
         worker.start()
         self.addCleanup(worker.join, 2)
@@ -529,18 +649,21 @@ temporary.cleanup()
         completion: Future[str] = Future()
         job_id = worker.submit("/plugins", result=completion)
         message = completion.result(timeout=10)
-        self.assertIn("filesystem", message)
-        self.assertEqual(chat.calls, [])
+        self.require(("filesystem") in (message))
+        self.equal(chat.calls, [])
         done = []
         while (event := worker.get_event(timeout=0)) is not None:
             if event.kind == "done":
                 done.append(event.payload)
-        self.assertEqual(done, [{"job_id": job_id, "message": message}])
+        self.equal(done, [{"job_id": job_id, "message": message}])
 
 
-class DurablePluginStateTests(unittest.TestCase):
+class DurablePluginStateTests(TypedTestCase):
+    """Check DurablePluginState behavior and failure boundaries."""
+
     @override
     def setUp(self) -> None:
+        """Create an isolated workspace and synchronization controls."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -550,8 +673,17 @@ class DurablePluginStateTests(unittest.TestCase):
         self,
         replies: Iterable[str] = (),
         identifier: str | None = None,
+        *,
         plugins: bool = True,
     ) -> AgentSession:
+        """Create a composed session with deterministic plugin state.
+
+        Returns
+        -------
+        AgentSession
+            A session whose lifecycle is owned by this test.
+
+        """
         runtime = Runtime(self.root)
         if plugins:
             runtime.load([module("counter", counter)])
@@ -565,164 +697,184 @@ class DurablePluginStateTests(unittest.TestCase):
         )
 
     def test_resume_fork_reconstructs_state_without_replaying_tools(self) -> None:
+        """Check resume fork reconstructs state without replaying tools."""
         session = self.session(['{"action":"count"}', DONE, '{"action":"count"}', DONE])
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
         session.send("first", event_callback=lambda *_: None)
         first = session.store.committed
         session.send("second", event_callback=lambda *_: None)
         identifier = session.store.session_id
         session.close()
         resumed = self.session(['{"action":"count"}', DONE], identifier)
-        self.assertEqual(resumed.runtime.state["counter"]["count"], 2)
-        assert first is not None
+        self.equal(resumed.runtime.state["counter"]["count"], 2)
+        if not (first is not None):
+            self.fail("Expected the configured session state to be available.")
         dispatch_command(resumed, "/fork " + first)
-        self.assertEqual(resumed.runtime.state["counter"]["count"], 1)
-        self.assertNotIn("second", str(resumed.snapshot()))
+        self.equal(resumed.runtime.state["counter"]["count"], 1)
+        self.require(("second") not in (str(resumed.snapshot())))
         resumed.send("alternative", event_callback=lambda *_: None)
-        self.assertEqual(resumed.runtime.state["counter"]["count"], 2)
-        assert isinstance(resumed.store, SessionStore)
-        self.assertEqual(len(resumed.store.tree().splitlines()), 3)
+        self.equal(resumed.runtime.state["counter"]["count"], 2)
+        if not (isinstance(resumed.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
+        self.equal(len(resumed.store.tree().splitlines()), 3)
 
     def test_rejected_fork_preserves_memory_and_durable_branch(self) -> None:
+        """Check rejected fork preserves memory and durable branch."""
         session = self.session(['{"action":"count"}', DONE, '{"action":"count"}', DONE])
         self.addCleanup(session.close)
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
 
         def register_guard(api: PluginAPI) -> None:
-            def reject(event: Lifecycle, ctx: PluginContext) -> None:
+            def reject(_event: Lifecycle, ctx: PluginContext) -> None:
                 if ctx.read_state("counter").get("count") == 1:
                     error_message = "historical counter state is rejected"
                     raise ValueError(error_message)
 
             api.on(SESSION_RESTORE, reject)
 
-        assert isinstance(session.runtime, Runtime)
+        if not (isinstance(session.runtime, Runtime)):
+            self.fail("Expected the configured session state to be available.")
         session.runtime.load([module("restore_guard", register_guard)])
         session.send("first")
         first = session.store.committed
-        assert first is not None
+        if not (first is not None):
+            self.fail("Expected the configured session state to be available.")
         session.send("second")
         before = session.export_snapshot()
         committed = session.store.committed
         original_bytes = session.store.path.read_bytes()
-        with self.assertRaisesRegex(ValueError, "historical counter state"):
+        with self.rejected(ValueError, "historical counter state"):
             dispatch_command(session, "/fork " + first)
-        self.assertEqual(session.export_snapshot(), before)
-        self.assertEqual(session.store.snapshot(), before)
-        self.assertEqual(session.store.committed, committed)
-        self.assertEqual(session.store.path.read_bytes(), original_bytes)
+        self.equal(session.export_snapshot(), before)
+        self.equal(session.store.snapshot(), before)
+        self.equal(session.store.committed, committed)
+        self.equal(session.store.path.read_bytes(), original_bytes)
         identifier = session.store.session_id
         session.close()
         resumed = self.session(identifier=identifier)
         self.addCleanup(resumed.close)
-        self.assertEqual(resumed.export_snapshot(), before)
+        self.equal(resumed.export_snapshot(), before)
 
     def test_failed_fork_sync_removes_selection_and_restores_memory(self) -> None:
+        """Check failed fork sync removes selection and restores memory."""
         session = self.session(['{"action":"count"}', DONE, '{"action":"count"}', DONE])
         self.addCleanup(session.close)
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
         session.send("first")
         first = session.store.committed
-        assert first is not None
+        if not (first is not None):
+            self.fail("Expected the configured session state to be available.")
         session.send("second")
         before = session.export_snapshot()
         original_bytes = session.store.path.read_bytes()
         with (
             mock.patch(
                 "raychat.storage.os.fsync",
-                side_effect=[OSError("fork sync failed"), None],
+                side_effect=_sync_failure_then_recovery("fork sync failed"),
             ),
-            self.assertRaisesRegex(OSError, "fork sync failed"),
+            self.rejected(OSError, "fork sync failed"),
         ):
             dispatch_command(session, "/fork " + first)
-        self.assertEqual(session.export_snapshot(), before)
-        self.assertEqual(session.store.snapshot(), before)
-        self.assertEqual(session.store.path.read_bytes(), original_bytes)
-        self.assertTrue(session.store.failed)
+        self.equal(session.export_snapshot(), before)
+        self.equal(session.store.snapshot(), before)
+        self.equal(session.store.path.read_bytes(), original_bytes)
+        self.require(session.store.failed)
         identifier = session.store.session_id
         session.close()
         resumed = self.session(identifier=identifier)
         self.addCleanup(resumed.close)
-        self.assertEqual(resumed.export_snapshot(), before)
+        self.equal(resumed.export_snapshot(), before)
 
     def test_interrupted_turn_is_retained_but_excluded_on_resume(self) -> None:
+        """Check interrupted turn is retained but excluded on resume."""
         session = self.session([DONE, '{"action":"count"}'])
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
         session.send("complete", event_callback=lambda *_: None)
-        with self.assertRaises(RuntimeError):
+        with self.rejected(RuntimeError):
             session.send("incomplete", max_steps=1, event_callback=lambda *_: None)
-        self.assertEqual(session.runtime.state, {})
-        self.assertIn("incomplete", session.store.path.read_text())
+        self.equal(session.runtime.state, {})
+        self.require(("incomplete") in (session.store.path.read_text()))
         identifier = session.store.session_id
         session.close()
         resumed = self.session(identifier=identifier)
-        self.assertNotIn("incomplete", str(resumed.snapshot()))
+        self.require(("incomplete") not in (str(resumed.snapshot())))
 
     def test_missing_plugin_retains_state_and_clear_preserves_prior_file(self) -> None:
+        """Check missing plugin retains state and clear preserves prior file."""
         session = self.session(['{"action":"count"}', DONE])
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
         session.send("first", event_callback=lambda *_: None)
         identifier, path = session.store.session_id, session.store.path
         session.close()
         resumed = self.session(identifier=identifier, plugins=False)
-        self.assertEqual(resumed.runtime.state["counter"]["count"], 1)
-        self.assertEqual(resumed.runtime.tools, {})
+        self.equal(resumed.runtime.state["counter"]["count"], 1)
+        self.equal(resumed.runtime.tools, {})
         resumed.reset()
-        self.assertTrue(path.exists())
-        assert isinstance(resumed.store, SessionStore)
-        self.assertNotEqual(path, resumed.store.path)
-        self.assertEqual(resumed.runtime.state, {})
+        self.require(path.exists())
+        if not (isinstance(resumed.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
+        self.require((path) != (resumed.store.path))
+        self.equal(resumed.runtime.state, {})
 
     def test_truncated_tail_recovers_and_interior_corruption_fails(self) -> None:
+        """Check truncated tail recovers and interior corruption fails."""
         session = self.session([DONE])
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
         session.send("first", event_callback=lambda *_: None)
         identifier, path = session.store.session_id, session.store.path
         session.close()
         with path.open("ab") as stream:
             stream.write(b'{"broken":')
         resumed = self.session(identifier=identifier)
-        self.assertEqual(resumed.snapshot()[0]["content"], "first")
+        self.equal(resumed.snapshot()[0]["content"], "first")
         resumed.close()
         with path.open("ab") as stream:
             stream.write(b"broken\n")
-        with self.assertRaises(ValueError):
+        with self.rejected(ValueError):
             self.session(identifier=identifier)
 
     def test_writer_lock_and_failed_durability(self) -> None:
+        """Check writer lock and failed durability."""
         session = self.session([DONE])
-        assert isinstance(session.store, SessionStore)
-        result = subprocess.run(  # noqa: S603 - argument arrays only; caller controls execution and checks the result
-            [
-                sys.executable,
-                "-B",
-                "-S",
-                "-c",
-                "from raychat.storage import SessionStore; import sys; SessionStore(*sys.argv[1:])",
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
+        script = (
+            "from raychat.storage import SessionStore; import sys; "
+            "SessionStore(*sys.argv[1:])"
+        )
+        result = asyncio.run(
+            _run_probe(
+                script,
                 str(self.root),
                 str(self.directory),
                 session.store.session_id,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
+            ),
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("active writer", result.stderr)
+        self.require((result.returncode) != (0))
+        self.require(("active writer") in (result.stderr))
         events = []
         with (
             mock.patch("raychat.storage.os.fsync", side_effect=OSError("disk failure")),
-            self.assertRaises(OSError),
+            self.rejected(OSError),
         ):
-            session.send("failure", event_callback=lambda k, p: events.append(k))
-        self.assertNotIn("done", events)
-        with self.assertRaises(RuntimeError):
+            session.send("failure", event_callback=lambda k, _p: events.append(k))
+        self.require(("done") not in (events))
+        with self.rejected(RuntimeError):
             session.store.append("turn_start", {})
 
 
-class ConcurrentCheckpointTests(unittest.TestCase):
+class ConcurrentCheckpointTests(TypedTestCase):
+    """Check ConcurrentCheckpoint behavior and failure boundaries."""
+
     @override
     def setUp(self) -> None:
+        """Create an isolated workspace and synchronization controls."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -731,11 +883,21 @@ class ConcurrentCheckpointTests(unittest.TestCase):
         self.cancel = threading.Event()
 
     def session(self, *, persist: bool = True) -> AgentSession:
+        """Create a composed session with deterministic plugin state.
+
+        Returns
+        -------
+        AgentSession
+            A session whose lifecycle is owned by this test.
+
+        """
         runtime = Runtime(self.root)
 
         def command_plugin(api: PluginAPI) -> None:
-            def increment(arguments: str, ctx: PluginContext) -> str:
-                ctx.state["count"] = ctx.state.get("count", 0) + 1
+            def increment(_arguments: str, ctx: PluginContext) -> str:
+                ctx.state["count"] = (
+                    integer_field(ctx.state.get("count", 0), "count", minimum=None) + 1
+                )
                 ctx.checkpoint()
                 return str(ctx.state["count"])
 
@@ -754,9 +916,11 @@ class ConcurrentCheckpointTests(unittest.TestCase):
             if messages[-1]["content"] == "pending":
                 self.started.set()
                 if not self.release.wait(10):
-                    raise RuntimeError("test gate timed out")
+                    message = "test gate timed out"
+                    raise RuntimeError(message)
                 if self.cancel.is_set():
-                    raise RuntimeError("turn cancelled")
+                    message = "turn cancelled"
+                    raise RuntimeError(message)
             return DONE
 
         runtime.load([
@@ -772,21 +936,31 @@ class ConcurrentCheckpointTests(unittest.TestCase):
 
     @contextmanager
     def running(self, session: AgentSession) -> Iterator[Future[str]]:
+        """Keep the real worker thread alive through a controlled pending turn.
+
+        Yields
+        ------
+        Future[str]
+            The pending turn on the background worker.
+
+        """
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(session.run, "pending")
             try:
-                self.assertTrue(self.started.wait(10))
+                self.require(self.started.wait(10))
                 yield future
             finally:
                 self.release.set()
 
     def abort(self, future: Future[str]) -> None:
+        """Request cancellation and require the original turn to stop."""
         self.cancel.set()
         self.release.set()
-        with self.assertRaisesRegex(RuntimeError, "turn cancelled"):
+        with self.rejected(RuntimeError, "turn cancelled"):
             future.result(10)
 
     def test_checkpoint_preserves_only_explicit_owner_on_abort(self) -> None:
+        """Check checkpoint preserves only explicit owner on abort."""
         for persist in (True, False):
             with self.subTest(persist=persist):
                 self.started.clear()
@@ -794,35 +968,36 @@ class ConcurrentCheckpointTests(unittest.TestCase):
                 self.cancel.clear()
                 session = self.session(persist=persist)
                 with self.running(session) as future:
-                    self.assertEqual(
-                        session.runtime.state["model_state"], {"value": 99}
+                    self.equal(session.runtime.state["model_state"], {"value": 99})
+                    self.equal(
+                        dispatch_command(session, "/increment", running=True),
+                        "1",
                     )
-                    self.assertEqual(
-                        dispatch_command(session, "/increment", running=True), "1"
-                    )
-                    self.assertEqual(
-                        dispatch_command(session, "/increment", running=True), "2"
+                    self.equal(
+                        dispatch_command(session, "/increment", running=True),
+                        "2",
                     )
                     if session.store is not None:
                         saved = session.store.snapshot()
-                        self.assertEqual(saved["state"]["model_state"], {"value": 10})
-                        self.assertEqual(
-                            saved["state"]["command_counter"], {"count": 2}
+                        self.equal(_snapshot_state(saved)["model_state"], {"value": 10})
+                        self.equal(
+                            _snapshot_state(saved)["command_counter"],
+                            {"count": 2},
                         )
-                        self.assertEqual(
+                        self.equal(
                             [
                                 item["content"]
-                                for item in saved["history"]
+                                for item in _snapshot_history(saved)
                                 if item["kind"] == "prompt"
                             ],
                             ["anchor"],
                         )
                     self.abort(future)
-                self.assertEqual(
+                self.equal(
                     session.runtime.state,
                     {"command_counter": {"count": 2}, "model_state": {"value": 10}},
                 )
-                self.assertEqual(
+                self.equal(
                     [
                         item.content
                         for item in session.history_snapshot()
@@ -831,32 +1006,33 @@ class ConcurrentCheckpointTests(unittest.TestCase):
                     ["anchor"],
                 )
                 if session.store is not None:
-                    self.assertEqual(
-                        session.store.snapshot(), session.export_snapshot()
-                    )
+                    self.equal(session.store.snapshot(), session.export_snapshot())
                 session.close()
 
     def test_success_keeps_pending_messages_after_multiple_checkpoints(self) -> None:
+        """Check success keeps pending messages after multiple checkpoints."""
         session = self.session()
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
         with self.running(session) as future:
             for expected in ("1", "2"):
-                self.assertEqual(
-                    dispatch_command(session, "/increment", running=True), expected
+                self.equal(
+                    dispatch_command(session, "/increment", running=True),
+                    expected,
                 )
             self.release.set()
-            self.assertEqual(future.result(10), "finished")
+            self.equal(future.result(10), "finished")
         snapshot = session.export_snapshot()
-        self.assertEqual(session.store.snapshot(), snapshot)
-        self.assertEqual(
+        self.equal(session.store.snapshot(), snapshot)
+        self.equal(
             [
                 item["content"]
-                for item in snapshot["history"]
+                for item in _snapshot_history(snapshot)
                 if item["kind"] == "prompt"
             ],
             ["anchor", "pending"],
         )
-        self.assertEqual(
+        self.equal(
             snapshot["state"],
             {"command_counter": {"count": 2}, "model_state": {"value": 99}},
         )
@@ -864,16 +1040,18 @@ class ConcurrentCheckpointTests(unittest.TestCase):
         session.close()
         with_store = SessionStore(self.root, self.root / "sessions", identifier)
         self.addCleanup(with_store.close)
-        self.assertEqual(with_store.snapshot(), snapshot)
+        self.equal(with_store.snapshot(), snapshot)
 
     def test_failed_checkpoint_keeps_previous_durable_and_rollback_state(self) -> None:
+        """Check failed checkpoint keeps previous durable and rollback state."""
         for failure in ("write", "fsync"):
             with self.subTest(failure=failure):
                 self.started.clear()
                 self.release.clear()
                 self.cancel.clear()
                 session = self.session()
-                assert isinstance(session.store, SessionStore)
+                if not (isinstance(session.store, SessionStore)):
+                    self.fail("Expected the configured session state to be available.")
                 store = session.store
                 with self.running(session) as future:
                     dispatch_command(session, "/increment", running=True)
@@ -888,51 +1066,67 @@ class ConcurrentCheckpointTests(unittest.TestCase):
                         if failure == "write"
                         else mock.patch(
                             "raychat.storage.os.fsync",
-                            side_effect=[OSError("checkpoint failed"), None],
+                            side_effect=_sync_failure_then_recovery(
+                                "checkpoint failed",
+                            ),
                         )
                     )
-                    with patch, self.assertRaisesRegex(OSError, "checkpoint failed"):
+                    with patch, self.rejected(OSError, "checkpoint failed"):
                         dispatch_command(session, "/increment", running=True)
-                    self.assertTrue(store.failed)
-                    self.assertEqual(store.path.read_bytes(), original_bytes)
-                    self.assertEqual((store.committed, store.head), (committed, head))
+                    self.require(store.failed)
+                    self.equal(store.path.read_bytes(), original_bytes)
+                    self.equal((store.committed, store.head), (committed, head))
                     self.abort(future)
-                self.assertEqual(
+                self.equal(
                     session.runtime.state,
                     {"command_counter": {"count": 1}, "model_state": {"value": 10}},
                 )
-                self.assertEqual(store.snapshot(), session.export_snapshot())
+                self.equal(store.snapshot(), session.export_snapshot())
                 identifier = store.session_id
                 session.close()
                 reopened = SessionStore(self.root, self.root / "sessions", identifier)
                 self.addCleanup(reopened.close)
-                self.assertEqual(reopened.snapshot(), session.export_snapshot())
+                self.equal(reopened.snapshot(), session.export_snapshot())
                 reopened.close()
 
     def test_failed_commit_does_not_select_attempted_turn_on_reopen(self) -> None:
+        """Check failed commit does not select attempted turn on reopen."""
         session = self.session()
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
         store = session.store
         before = store.snapshot()
-        with self.running(session) as future:
-            with mock.patch(
-                "raychat.storage.os.fsync", side_effect=[OSError("commit failed"), None]
-            ):
-                self.release.set()
-                with self.assertRaisesRegex(OSError, "commit failed"):
-                    future.result(10)
-        self.assertTrue(store.failed)
-        self.assertEqual(store.snapshot(), before)
-        self.assertEqual(session.export_snapshot(), before)
+        with (
+            self.running(session) as future,
+            mock.patch(
+                "raychat.storage.os.fsync",
+                side_effect=_sync_failure_then_recovery("commit failed"),
+            ),
+        ):
+            self.release.set()
+            with self.rejected(OSError, "commit failed"):
+                future.result(10)
+        self.require(store.failed)
+        self.equal(store.snapshot(), before)
+        self.equal(session.export_snapshot(), before)
         identifier = store.session_id
         session.close()
         reopened = SessionStore(self.root, self.root / "sessions", identifier)
         self.addCleanup(reopened.close)
-        self.assertEqual(reopened.snapshot(), before)
+        self.equal(reopened.snapshot(), before)
 
-    def external_snapshot(self, session: AgentSession) -> dict[str, Any]:
+    @staticmethod
+    def external_snapshot(session: AgentSession) -> dict[str, object]:
+        """Extend a checked snapshot with one completed external turn.
+
+        Returns
+        -------
+        dict[str, object]
+            The candidate history and plugin state to complete.
+
+        """
         snapshot = session.export_snapshot()
-        snapshot["history"].extend([
+        array_field(snapshot["history"], "snapshot history").extend([
             {"role": "user", "content": "external", "kind": "prompt", "prompt_id": 2},
             {
                 "role": "assistant",
@@ -941,20 +1135,25 @@ class ConcurrentCheckpointTests(unittest.TestCase):
                 "prompt_id": 2,
             },
         ])
-        snapshot["state"]["model_state"]["value"] = 99
+        object_field(_snapshot_state(snapshot)["model_state"], "model state")[
+            "value"
+        ] = 99
         return snapshot
 
     def test_external_completion_merges_commands_during_restore_hooks(self) -> None:
+        """Check external completion merges commands during restore hooks."""
         session = self.session()
-        assert isinstance(session.runtime, Runtime)
+        if not (isinstance(session.runtime, Runtime)):
+            self.fail("Expected the configured session state to be available.")
         restoring, finish = threading.Event(), threading.Event()
 
         def guard(api: PluginAPI) -> None:
-            def restore(event: Lifecycle, ctx: PluginContext) -> None:
-                if ctx.read_state("model_state").get("value") == 99:
+            def restore(_event: Lifecycle, ctx: PluginContext) -> None:
+                if ctx.read_state("model_state").get("value") == _PENDING_MODEL_VALUE:
                     restoring.set()
                     if not finish.wait(10):
-                        raise RuntimeError("restore gate timed out")
+                        message = "restore gate timed out"
+                        raise RuntimeError(message)
 
             api.on(SESSION_RESTORE, restore)
 
@@ -969,18 +1168,17 @@ class ConcurrentCheckpointTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(complete)
             try:
-                self.assertTrue(restoring.wait(10))
-                self.assertEqual(
-                    dispatch_command(session, "/increment", running=True), "2"
-                )
+                self.require(restoring.wait(10))
+                self.equal(dispatch_command(session, "/increment", running=True), "2")
             finally:
                 finish.set()
             future.result(10)
-        assert session.store is not None
-        self.assertEqual(session.store.snapshot(), session.export_snapshot())
-        self.assertEqual(session.runtime.state["command_counter"], {"count": 2})
-        self.assertEqual(session.runtime.state["model_state"], {"value": 99})
-        self.assertEqual(
+        if not (session.store is not None):
+            self.fail("Expected the configured session state to be available.")
+        self.equal(session.store.snapshot(), session.export_snapshot())
+        self.equal(session.runtime.state["command_counter"], {"count": 2})
+        self.equal(session.runtime.state["model_state"], {"value": 99})
+        self.equal(
             [
                 item.content
                 for item in session.history_snapshot()
@@ -992,30 +1190,34 @@ class ConcurrentCheckpointTests(unittest.TestCase):
     def test_rejected_external_completion_keeps_commands_and_original_history(
         self,
     ) -> None:
+        """Check rejected external completion keeps commands and original history."""
         session = self.session()
-        assert isinstance(session.runtime, Runtime)
+        if not (isinstance(session.runtime, Runtime)):
+            self.fail("Expected the configured session state to be available.")
 
         def guard(api: PluginAPI) -> None:
-            def restore(event: Lifecycle, ctx: PluginContext) -> None:
-                if ctx.read_state("model_state").get("value") == 99:
+            def restore(_event: Lifecycle, ctx: PluginContext) -> None:
+                if ctx.read_state("model_state").get("value") == _PENDING_MODEL_VALUE:
                     dispatch_command(session, "/increment", running=True)
-                    raise ValueError("external state rejected")
+                    message = "external state rejected"
+                    raise ValueError(message)
 
             api.on(SESSION_RESTORE, restore)
 
         session.runtime.load([module("restore_guard", guard)])
         with (
-            self.assertRaisesRegex(ValueError, "external state rejected"),
+            self.rejected(ValueError, "external state rejected"),
             session.turn(),
         ):
             snapshot = self.external_snapshot(session)
             dispatch_command(session, "/increment", running=True)
             session.complete_snapshot(snapshot)
-        assert session.store is not None
-        self.assertEqual(session.store.snapshot(), session.export_snapshot())
-        self.assertEqual(session.runtime.state["command_counter"], {"count": 2})
-        self.assertEqual(session.runtime.state["model_state"], {"value": 10})
-        self.assertEqual(
+        if not (session.store is not None):
+            self.fail("Expected the configured session state to be available.")
+        self.equal(session.store.snapshot(), session.export_snapshot())
+        self.equal(session.runtime.state["command_counter"], {"count": 2})
+        self.equal(session.runtime.state["model_state"], {"value": 10})
+        self.equal(
             [
                 item.content
                 for item in session.history_snapshot()
@@ -1023,24 +1225,30 @@ class ConcurrentCheckpointTests(unittest.TestCase):
             ],
             ["anchor"],
         )
-        self.assertEqual(session.run("replacement"), "finished")
+        self.equal(session.run("replacement"), "finished")
 
     def test_cancel_after_commit_preserves_selection_and_allows_next_turn(self) -> None:
+        """Check cancel after commit preserves selection and allows next turn."""
         session = self.session()
-        assert isinstance(session.store, SessionStore)
-        commit = session._commit
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
+        commit = session.commit_turn
 
         def interrupt_after_commit() -> None:
             commit()
             raise CancelledError
 
         with (
-            mock.patch.object(session, "_commit", side_effect=interrupt_after_commit),
-            self.assertRaises(CancelledError),
+            mock.patch.object(
+                session,
+                "commit_turn",
+                side_effect=interrupt_after_commit,
+            ),
+            self.rejected(CancelledError),
         ):
             session.run("complete")
-        self.assertEqual(session.store.snapshot(), session.export_snapshot())
-        self.assertEqual(
+        self.equal(session.store.snapshot(), session.export_snapshot())
+        self.equal(
             [
                 item.content
                 for item in session.history_snapshot()
@@ -1048,21 +1256,24 @@ class ConcurrentCheckpointTests(unittest.TestCase):
             ],
             ["anchor", "complete"],
         )
-        self.assertEqual(session.run("replacement"), "finished")
-        self.assertEqual(session.store.snapshot(), session.export_snapshot())
+        self.equal(session.run("replacement"), "finished")
+        self.equal(session.store.snapshot(), session.export_snapshot())
 
     def test_done_notification_failure_cannot_undo_a_durable_commit(self) -> None:
+        """Check done notification failure cannot undo a durable commit."""
         session = self.session()
-        assert isinstance(session.store, SessionStore)
+        if not (isinstance(session.store, SessionStore)):
+            self.fail("Expected the configured session state to be available.")
 
-        def notify(kind: str, payload: Mapping[str, Any]) -> None:
+        def notify(kind: str, _payload: Mapping[str, object]) -> None:
             if kind == "done":
-                raise RuntimeError("notification failed")
+                message = "notification failed"
+                raise RuntimeError(message)
 
-        with self.assertRaisesRegex(RuntimeError, "notification failed"):
+        with self.rejected(RuntimeError, "notification failed"):
             session.run("complete", event_callback=notify)
-        self.assertEqual(session.store.snapshot(), session.export_snapshot())
-        self.assertEqual(
+        self.equal(session.store.snapshot(), session.export_snapshot())
+        self.equal(
             [
                 item.content
                 for item in session.history_snapshot()

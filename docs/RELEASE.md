@@ -28,8 +28,11 @@ sorted allowlist. GEPA and its license belong to the optimization package at
 Credentials, user workspaces, memory, logs, bytecode, caches, and previous build
 output cannot enter the archive merely because they exist beside the sources.
 Every release contains `PORTABLE_MANIFEST.json` with byte counts and SHA-256
-hashes. ZIP member order, timestamps, permissions, and uncompressed contents are
-deterministic.
+hashes. Both the release ZIP and bundled plugin ZIPs store their contents
+without compression, so compressor versions cannot change their bytes. Member
+order, timestamps and POSIX origin/mode metadata are fixed on every platform.
+Generated catalog and profile JSON use UTF-8 with explicit LF endings, matching
+the checked-in sources even when rebuilt on Windows.
 
 The complete unit suite must pass in addition to strict typing, lint/format checks
 and real terminal acceptance. Retain its full output, including failures, errors
@@ -52,13 +55,14 @@ python3 -B -S -m tools.persistence_tui --output ./build/verification-run-1/persi
 python3 -B -S -m tools.package_download_tui --output ./build/verification-run-1/package-download
 python3 -B -S -m tools.adversarial_agents_tui --output ./build/verification-run-1/adversarial-agents
 python3 -B -S -m tools.ui_stress_tui --output ./build/verification-run-1/ui-stress
+python3 -B -S -m tools.composer_tui --output ./build/verification-run-1/composer
 python3 -B -S -m tools.collective_tui --agents 50 --parallel 8 --output ./build/verification-run-1/collective
 python3 -B -S -m tools.optimization_tui --output ./build/verification-run-1/optimization
 python3 -B -S -m tools.plugin_guide_tui --output ./build/verification-run-1/plugin-guide
 python3 -B -S -m tools.reload_race_tui --output ./build/verification-run-1/reload-race
 ```
 
-These thirteen drivers use deterministic offline providers and control the application
+These fourteen drivers use deterministic offline providers and control the application
 through terminal input, mouse events, and visible state. They cover plugin lifecycle and
 instructions, chat navigation/resume, transcript copying, focused cancellation,
 process cleanup, filesystem operations, skills, durable memory, goals, workflows,
@@ -95,8 +99,8 @@ The first command writes `build/raychat.zip` and
 `build/raychat/`, verifies their members, and extracts the ZIP into a
 separate temporary directory. Smoke compiles every Python source without
 creating bytecode and rebuilds plugin packages to compare them with the bundled
-catalog. Required POSIX release smoke runs all thirteen offline TUI drivers against
-the extracted application, including `plugin_guide_tui`. Confirm all thirteen appear
+catalog. Required POSIX release smoke runs all fourteen offline TUI drivers against
+the extracted application, including `plugin_guide_tui`. Confirm all fourteen appear
 in its coverage record before reporting complete acceptance. `smoke.json` records
 the platform and exact coverage; driver results and transcripts remain alongside it.
 

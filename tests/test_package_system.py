@@ -1,4 +1,3 @@
-# Copyright 2026
 """External SDK v4 packages use the same generation and transaction path."""
 
 from __future__ import annotations
@@ -133,7 +132,11 @@ class PackageTestCase(unittest.TestCase):
             self.fail(message or f"Expected {expected!r}; received {actual!r}.")
 
     @contextlib.contextmanager
-    def rejected(self, expected: type[Exception], match: str = "") -> Iterator[None]:
+    def rejected(
+        self,
+        expected: type[BaseException],
+        match: str = "",
+    ) -> Iterator[None]:
         """Require a failure with the expected exception type and message.
 
         Yields
@@ -238,6 +241,23 @@ class PackageTransactionTests(PackageSystemFixture):
         self.manager.install(str(archive), force=True)
         self.equal(self.runtime.command("/greet"), "Hello")
 
+    def test_package_archive_has_portable_metadata_without_a_compressor(self) -> None:
+        """Read identical source bytes from a canonical ZIP without zlib installed."""
+        source = self.external()
+        expected = files(source)
+        with mock.patch.object(zipfile, "zlib", None):
+            first = pack(source)
+            self.equal(first, pack(source))
+            with zipfile.ZipFile(io.BytesIO(first)) as archive:
+                self.equal(archive.namelist(), sorted(expected))
+                self.equal(archive.testzip(), None)
+                for member in archive.infolist():
+                    self.equal(member.create_system, 3)
+                    self.equal(member.compress_type, zipfile.ZIP_STORED)
+                    self.equal(member.date_time, (1980, 1, 1, 0, 0, 0))
+                    self.equal(member.external_attr >> 16, stat.S_IFREG | 0o644)
+                    self.equal(archive.read(member), expected[member.filename])
+
     def test_finder_metadata_does_not_change_package_or_source(self) -> None:
         """Finder metadata does not change package or source."""
         source = self.external()
@@ -264,7 +284,7 @@ class PackageTransactionTests(PackageSystemFixture):
         """Disable never resurrects and survives restart."""
         source = self.external()
         self.manager.install(str(source))
-        self.manager.set_enabled("example", False)
+        self.manager.set_enabled("example", enabled=False)
         self.external("other")
         self.runtime.refresh()
         if "example" in self.runtime.plugins:
@@ -272,7 +292,7 @@ class PackageTransactionTests(PackageSystemFixture):
         restarted = PackageManager(self.workspace, self.root / "home", trusted=True)
         if "example" in restarted.paths():
             self.fail("Package behavior violated the expected condition.")
-        self.manager.set_enabled("example", True)
+        self.manager.set_enabled("example", enabled=True)
         self.equal(self.runtime.command("/example"), "first")
 
     def test_invalid_update_restores_code_lock_state_and_generation(self) -> None:
@@ -347,7 +367,7 @@ class PackageTransactionTests(PackageSystemFixture):
         if "dep" not in self.runtime.plugins:
             self.fail("Package behavior violated the expected condition.")
         with self.rejected(PluginError, "dependency"):
-            self.manager.set_enabled("dep", False)
+            self.manager.set_enabled("dep", enabled=False)
         if "dep" not in self.runtime.plugins:
             self.fail("Package behavior violated the expected condition.")
 
@@ -1042,3 +1062,51 @@ class ManifestContractTests(PackageSystemFixture):
             manifest.cli,
             [{"flags": ["--value"], "action": "append", "default": ["original"]}],
         )
+
+
+class PackageReceiptTests(PackageSystemFixture):
+    """Validate installation receipts before trusting package source ownership."""
+
+    def test_invalid_receipt_fields_fail_before_loading_sources(self) -> None:
+        """Reject malformed paths, identity fields and optional provenance."""
+        self.manager.install(str(self.external()))
+        receipt = self.manager.state_file("workspace")
+        original = receipt.read_bytes()
+        invalid_fields: tuple[tuple[str, object], ...] = (
+            ("path", "relative/package"),
+            ("linked", "true"),
+            ("source", None),
+            ("version", "latest"),
+            ("digest", "z" * 64),
+            ("catalog", ["name"]),
+            ("archive_sha256", True),
+            ("resolved", False),
+            ("unchecked_extension", "unexpected"),
+        )
+        for name, value in invalid_fields:
+            state = _json_fields(original)
+            packages = object_field(state["packages"], "packages")
+            object_field(packages["example"], "example")[name] = value
+            receipt.write_text(_json(state))
+            with self.subTest(field=name), self.rejected(PluginError):
+                PackageManager(self.workspace, self.root / "home")
+
+    def test_lock_schema_and_unknown_fields_are_rejected(self) -> None:
+        """Reject boolean schema values and unvalidated lock extensions."""
+        receipt = self.manager.state_file("workspace")
+        state: dict[str, object] = {
+            "schema": 1,
+            "packages": {},
+            "catalogs": {},
+            "disabled": [],
+        }
+        invalid_fields: tuple[tuple[str, object], ...] = (
+            ("schema", True),
+            ("extension", "unknown"),
+            ("profiles", [False]),
+        )
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        for name, value in invalid_fields:
+            receipt.write_text(_json({**state, name: value}))
+            with self.subTest(field=name), self.rejected(PluginError):
+                PackageManager(self.workspace, self.root / "home")

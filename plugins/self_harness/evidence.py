@@ -1,22 +1,35 @@
 """Bounded local evidence and attempt history; failed turns remain observable."""
 
+from __future__ import annotations
+
 import json
 import time
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
-from raychat.event_types import AfterTool
-from raychat.validation import json_object
+from raychat.protocol import action_name
+from raychat.validation import array_field, json_object, object_field, plain
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from pathlib import Path
+
+    from raychat.event_types import AfterTool
+
+    from .records import FailureCluster, Signature
+
+_TRACE_CHARS = 2000
+_SIGNATURE_PARTS = 3
 
 
-def append(path: Path, record: Mapping[str, Any]) -> None:
+def append(path: Path, record: Mapping[str, object]) -> None:
+    """Append a complete timestamped record without allowing nonfinite JSON values."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as stream:
+        entry: dict[str, object] = {"time": time.time(), **record}
         stream.write(
             json.dumps(
-                {"time": time.time(), **record},
+                entry,
                 ensure_ascii=True,
                 allow_nan=False,
             )
@@ -24,7 +37,15 @@ def append(path: Path, record: Mapping[str, Any]) -> None:
         )
 
 
-def tail(path: Path, limit: int) -> list[dict[str, Any]]:
+def tail(path: Path, limit: int) -> list[dict[str, object]]:
+    """Read complete valid log records from a bounded suffix of the evidence file.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        The checked result described above.
+
+    """
     if not path.exists():
         return []
     with path.open("rb") as stream:
@@ -33,24 +54,41 @@ def tail(path: Path, limit: int) -> list[dict[str, Any]]:
         if size > limit:
             stream.readline()
         lines = stream.read(limit).splitlines()
-    records = []
+    records: list[dict[str, object]] = []
     for line in lines:
-        try:
-            value = json_object(line)
-            if isinstance(value, dict):
-                records.append(value)
-        except (ValueError, UnicodeError):
-            continue
+        record = _log_record(line)
+        if record is not None:
+            records.append(record)
     return records
 
 
+def _log_record(line: bytes) -> dict[str, object] | None:
+    try:
+        value = json_object(line)
+        return (
+            object_field(value, "harness log record")
+            if isinstance(value, dict)
+            else None
+        )
+    except (ValueError, UnicodeError):
+        return None
+
+
 def observe(data: AfterTool) -> dict[str, object] | None:
+    """Record bounded tool evidence while excluding self-harness observations.
+
+    Returns
+    -------
+    dict[str, object] | None
+        The checked result described above.
+
+    """
     action, result = data.action, data.result
     if action.get("action") == "self_harness":
         return None
     failed = result.get("ok") is False or result.get("timed_out") is True
     if not failed:
-        return {"passing_action": action["action"]}
+        return {"passing_action": action_name(action)}
     cause = (
         "timeout"
         if result.get("timed_out")
@@ -62,34 +100,64 @@ def observe(data: AfterTool) -> dict[str, object] | None:
     )
     # Tool observations are explicitly not causal verdicts. Evaluators can supply
     # stronger signatures with a verified cause, causal status and mechanism.
+    payload: dict[str, object] = {"action": action, "result": result}
     return {
-        "signature": [cause, "observed tool failure", action["action"]],
-        "trace": json.dumps({"action": action, "result": result}, ensure_ascii=True)[
-            :2000
-        ],
+        "signature": [cause, "observed tool failure", action_name(action)],
+        "trace": json.dumps(payload, ensure_ascii=True)[:_TRACE_CHARS],
     }
 
 
+def signature(value: object) -> Signature | None:
+    """Accept exactly three nonempty text components for a failure signature.
+
+    Returns
+    -------
+    Signature | None
+        The checked result described above.
+
+    """
+    if not isinstance(value, (list, tuple)):
+        return None
+    parts = array_field(plain(value), "failure signature")
+    if len(parts) != _SIGNATURE_PARTS:
+        return None
+    first, second, third = parts
+    if (
+        isinstance(first, str) and isinstance(second, str) and isinstance(third, str)
+    ) and all((first, second, third)):
+        return first, second, third
+    return None
+
+
+def _largest_group(pair: tuple[Signature, list[str]]) -> int:
+    return -len(pair[1])
+
+
 def recurring(
-    records: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, object]],
     minimum: int,
     budget: int,
-) -> list[dict[str, Any]]:
-    groups: defaultdict[tuple[str, ...], list[str]] = defaultdict(list)
+) -> list[FailureCluster]:
+    """Group repeated observed signatures while enforcing the evidence byte budget.
+
+    Returns
+    -------
+    list[FailureCluster]
+        The checked result described above.
+
+    """
+    groups: defaultdict[Signature, list[str]] = defaultdict(list)
     for record in records:
-        signature = record.get("signature")
-        if (
-            isinstance(signature, (list, tuple))
-            and len(signature) == 3
-            and all(isinstance(item, str) and item for item in signature)
-        ):
-            groups[tuple(signature)].append(str(record.get("trace", ""))[:2000])
-    selected, used = [], 0
-    for signature, traces in sorted(groups.items(), key=lambda pair: -len(pair[1])):
+        key = signature(record.get("signature"))
+        if key is not None:
+            groups[key].append(str(record.get("trace", ""))[:_TRACE_CHARS])
+    selected: list[FailureCluster] = []
+    used = 0
+    for key, traces in sorted(groups.items(), key=_largest_group):
         if len(traces) < minimum:
             continue
-        item = {
-            "signature": list(signature),
+        item: FailureCluster = {
+            "signature": key,
             "count": len(traces),
             "traces": traces[-minimum:],
         }

@@ -1,4 +1,3 @@
-# Copyright 2026
 """Validate unknown launch settings into the memory plugin's concrete schema."""
 
 from __future__ import annotations

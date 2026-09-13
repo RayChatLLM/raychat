@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
 """Create the clean, self-contained GEPA standard-library release.
 
-Run ``python -m tools.release`` with Python 3.10 or newer.  It removes only recognized disposable
+Run ``python -m tools.release`` with Python 3.10 or newer. It removes only
+recognized disposable
 cache files from the project source tree, builds the allowlisted release folder
 and deterministic ZIP, then verifies and smoke-tests the exact written output.
 """
@@ -15,9 +15,12 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 from raychat.configuration import SETTINGS
 from tools import build_portable
@@ -54,9 +57,44 @@ def _tree_bytes(path: Path) -> int:
     return total
 
 
-def clean_caches(root: Path = PROJECT_ROOT) -> dict[str, Any]:
-    """Remove recognized caches without entering release, VCS, or user data."""
+class CacheCleanup(TypedDict):
+    """Account for recognized disposable caches without touching user data."""
 
+    removed_bytes: int
+    removed_count: int
+    removed_paths: list[str]
+
+
+class ReleaseReport(TypedDict):
+    """Record exact written release identity, cache cleanup and smoke coverage."""
+
+    archive: str
+    archive_bytes: int
+    archive_sha256: str
+    cache_cleanup: CacheCleanup
+    folder: str
+    member_count: int
+    smoke_tested: bool
+    smoke_coverage: build_portable.SmokeReport | None
+    source_file_count: int
+
+
+def clean_caches(root: Path = PROJECT_ROOT) -> CacheCleanup:
+    """Remove recognized caches without entering release, VCS, or user data.
+
+    Returns
+    -------
+    CacheCleanup
+        The checked result described above.
+
+    Raises
+    ------
+    RuntimeError
+        If the operation violates its validation or integrity contract.
+    ValueError
+        If the operation violates its validation or integrity contract.
+
+    """
     root = root.resolve(strict=True)
     if not root.is_dir():
         error_message = "Project root must be a directory."
@@ -122,9 +160,20 @@ def create_release(
     output: Path = Path(SETTINGS.release.archive_path),
     folder: Path = Path(SETTINGS.release.folder_path),
     smoke: bool = SETTINGS.release.smoke_test,
-) -> dict[str, Any]:
-    """Clean, build, verify, and optionally smoke-test a complete release."""
+) -> ReleaseReport:
+    """Clean, build, verify, and optionally smoke-test a complete release.
 
+    Returns
+    -------
+    ReleaseReport
+        The checked result described above.
+
+    Raises
+    ------
+    RuntimeError
+        If the operation violates its validation or integrity contract.
+
+    """
     root = root.resolve(strict=True)
     output = _resolve_output(output, root)
     folder = _resolve_output(folder, root)
@@ -134,8 +183,8 @@ def create_release(
         root.joinpath(*PurePosixPath(relative).parts).resolve()
         for relative in build_portable.SOURCE_FILES
     }
-    build_portable._atomic_write(output, raw, protected)
-    build_portable._replace_release_folder(folder, members, protected)
+    build_portable.atomic_write(output, raw, protected)
+    build_portable.replace_release_folder(folder, members, protected)
     smoke_coverage = build_portable.smoke_archive(raw) if smoke else None
 
     written = output.read_bytes()
@@ -189,19 +238,36 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+@dataclass
+class _Arguments(argparse.Namespace):
+    output: Path = Path(SETTINGS.release.archive_path)
+    folder: Path = Path(SETTINGS.release.folder_path)
+    no_smoke: bool = not SETTINGS.release.smoke_test
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    """Create a cleaned, deterministic release and emit its checked report.
+
+    Returns
+    -------
+    int
+        The checked result described above.
+
+    """
+    args = _Arguments()
+    _parser().parse_args(argv, namespace=args)
     try:
         report = create_release(
             output=args.output,
             folder=args.folder,
             smoke=not args.no_smoke,
         )
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return 0
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"Release failed: {exc}", file=sys.stderr)
+        sys.stderr.write(f"Release failed: {exc}\n")
         return 1
+    else:
+        sys.stdout.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        return 0
 
 
 if __name__ == "__main__":

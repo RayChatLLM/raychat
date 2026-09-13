@@ -1,4 +1,3 @@
-# Copyright 2026
 """Optimize ``RayChat base protocol`` for an opaque incident-routing task.
 
 The task model is told only to complete "Task A" under a sealed organizational
@@ -32,6 +31,7 @@ from typing import TYPE_CHECKING, Protocol, TypedDict
 import raychat.protocol as _rc_protocol
 from raychat import configuration
 from raychat.sdk import ProviderService, ServiceSlot
+from raychat.service_contracts import OptimizationComponent
 from raychat.validation import (
     boolean_field,
     integer_field,
@@ -44,8 +44,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from raychat.sdk import Chat, Messages, ProviderClient
+    from raychat.service_contracts import OptimizationBindings
 
-    from .gepa.core.result import GEPAResult
+    from .gepa.result import GEPAResult
 
 from . import optimize_chat_prompt as port
 from .configuration import load as load_settings
@@ -1744,3 +1745,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
+
+
+def _bind_component(bindings: OptimizationBindings) -> None:
+    _provider.bind(bindings.provider)
+
+
+COMPONENT = OptimizationComponent(main, _bind_component)

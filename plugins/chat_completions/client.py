@@ -1,4 +1,3 @@
-# Copyright 2026
 """Validated HTTP chat clients and their registered provider service."""
 
 from __future__ import annotations

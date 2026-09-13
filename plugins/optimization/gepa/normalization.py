@@ -1,20 +1,22 @@
-# Copyright 2026
-"""Normalize heterogeneous loader inputs while retaining checked original identifiers."""
+"""Normalize loader inputs while retaining checked original identifiers."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import Generic
+from typing import TYPE_CHECKING, Generic
 
-from .core.adapter import DataInst
-from .core.data_loader import ComparableHashable, DataId, DataLoader
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+from .adapter import DataInst
+from .data_loader import ComparableHashable, DataId, DataLoader
 from .type_support import override
 
 
 class NormalizedLoader(
-    DataLoader[ComparableHashable, DataInst | None], Generic[DataId, DataInst]
+    DataLoader[ComparableHashable, DataInst | None],
+    Generic[DataId, DataInst],
 ):
-    """Expose opaque examples and retain the original type of each observed identifier."""
+    """Preserve typed examples and remember the original type of each identifier."""
 
     def __init__(
         self,
@@ -51,24 +53,19 @@ class NormalizedLoader(
         Returns
         -------
         list[DataInst | None]
-            Opaque examples preserving the requested identifier order.
+            Typed examples preserving the requested identifier order.
 
         """
         source_ids = [self.original_id(identifier) for identifier in ids]
         return self._fetch(source_ids)
 
     def original_id(self, identifier: ComparableHashable) -> DataId:
-        """Resolve an observed identifier without assuming its application-specific type.
+        """Resolve an observed identifier to its original application type.
 
         Returns
         -------
         DataId
             The original source identifier retained when its universe was read.
-
-        Raises
-        ------
-        KeyError
-            If the identifier has never been supplied by this loader.
 
         """
         return self._original_ids[identifier]
@@ -89,7 +86,14 @@ class NormalizedLoader(
 def normalize_loader(
     source: DataLoader[DataId, DataInst],
 ) -> NormalizedLoader[DataId, DataInst]:
-    """Normalize identifiers while preserving each example's concrete type."""
+    """Normalize identifiers while preserving each example's concrete type.
+
+    Returns
+    -------
+    NormalizedLoader[DataId, DataInst]
+        A loader that restores original identifier types before each fetch.
+
+    """
 
     def fetch(ids: Sequence[DataId]) -> list[DataInst | None]:
         return list(source.fetch(ids))
@@ -98,11 +102,19 @@ def normalize_loader(
 
 
 def single_instance_loader() -> NormalizedLoader[int, DataInst]:
-    """Supply the explicit absent example used for a single optimization task."""
+    """Supply the explicit absent example used for a single optimization task.
+
+    Returns
+    -------
+    NormalizedLoader[int, DataInst]
+        One absent example under the stable integer identifier zero.
+
+    """
 
     def fetch(ids: Sequence[int]) -> list[DataInst | None]:
         if any(identifier != 0 for identifier in ids):
-            raise KeyError("Single-instance loaders only contain identifier zero")
+            message = "Single-instance loaders only contain identifier zero."
+            raise KeyError(message)
         return [None for _ in ids]
 
     return NormalizedLoader(lambda: [0], fetch, lambda: 1)

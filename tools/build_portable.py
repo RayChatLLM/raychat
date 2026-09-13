@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Build and smoke-test the dependency-free portable source bundle.
 
 The archive is deliberately ZIP_STORED.  Avoiding zlib makes its bytes
@@ -16,14 +15,19 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 import zipfile
-from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, TypedDict
 
 from raychat.configuration import SETTINGS
+from tools.build_plugin_catalog import build_catalog
+from tools.smoke_process import SmokeCommand, run_checked
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 ARCHIVE_ROOT = SETTINGS.release.archive_root
 MANIFEST_NAME = SETTINGS.release.manifest_name
@@ -42,7 +46,20 @@ _LF_SUFFIXES = frozenset(SETTINGS.release.lf_suffixes)
 _LF_NAMES = frozenset(SETTINGS.release.lf_names)
 
 
-def _source_data(root: Path) -> dict[str, bytes]:
+def source_data(root: Path) -> dict[str, bytes]:
+    """Read only the exact allowlisted regular files with canonical text endings.
+
+    Returns
+    -------
+    dict[str, bytes]
+        The checked result described above.
+
+    Raises
+    ------
+    RuntimeError
+        If the operation violates its validation or integrity contract.
+
+    """
     if tuple(sorted(SOURCE_FILES)) != SOURCE_FILES:
         error_message = "SOURCE_FILES must remain sorted for reviewability."
         raise RuntimeError(error_message)
@@ -81,8 +98,52 @@ def _source_data(root: Path) -> dict[str, bytes]:
     return result
 
 
+class _SourceRecord(TypedDict):
+    bytes: int
+    path: str
+    sha256: str
+
+
+class _PortableManifest(TypedDict):
+    archive_root: str
+    format: int
+    python_requires: str
+    source_files: list[_SourceRecord]
+
+
+class _SmokeEvidence(TypedDict, total=False):
+    evidence: str
+
+
+class SmokeReport(_SmokeEvidence):
+    """Report exact integrity checks and the terminal scenarios actually exercised."""
+
+    platform: str
+    python_sources_compiled: int
+    plugin_packages_verified: int
+    tui_tested: bool
+    tui_scenarios: list[str]
+    provider: str | None
+    coverage_note: str
+
+
+class BuildReport(TypedDict):
+    """Record deterministic output identity and observed smoke coverage."""
+
+    archive: str
+    archive_bytes: int
+    archive_sha256: str
+    checked: bool
+    folder: str
+    member_count: int
+    smoke_tested: bool
+    smoke_coverage: SmokeReport | None
+    source_bytes: int
+    source_file_count: int
+
+
 def _manifest(source_data: dict[str, bytes]) -> bytes:
-    payload = {
+    payload: _PortableManifest = {
         "archive_root": ARCHIVE_ROOT,
         "format": MANIFEST_FORMAT,
         "python_requires": PYTHON_REQUIRES,
@@ -112,9 +173,15 @@ def _zip_info(relative: str) -> zipfile.ZipInfo:
 
 
 def build_archive(root: Path) -> tuple[bytes, dict[str, bytes]]:
-    """Return deterministic archive bytes and the expected member mapping."""
+    """Return deterministic archive bytes and the expected member mapping.
 
-    sources = _source_data(root)
+    Returns
+    -------
+    tuple[bytes, dict[str, bytes]]
+        The checked result described above.
+
+    """
+    sources = source_data(root)
     members = {MANIFEST_NAME: _manifest(sources), **sources}
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -127,8 +194,14 @@ def build_archive(root: Path) -> tuple[bytes, dict[str, bytes]]:
 
 
 def verify_archive(raw: bytes, expected: dict[str, bytes]) -> None:
-    """Validate member names, contents, metadata, and absence of duplicates."""
+    """Validate member names, contents, metadata, and absence of duplicates.
 
+    Raises
+    ------
+    RuntimeError
+        If the operation violates its validation or integrity contract.
+
+    """
     with zipfile.ZipFile(io.BytesIO(raw), "r") as archive:
         infos = archive.infolist()
         expected_names = [f"{ARCHIVE_ROOT}/{name}" for name in sorted(expected)]
@@ -185,7 +258,15 @@ def verify_archive(raw: bytes, expected: dict[str, bytes]) -> None:
                 )
 
 
-def _atomic_write(path: Path, data: bytes, protected: set[Path]) -> None:
+def atomic_write(path: Path, data: bytes, protected: set[Path]) -> None:
+    """Write and synchronize archive bytes before atomically replacing the output.
+
+    Raises
+    ------
+    ValueError
+        If the operation violates its validation or integrity contract.
+
+    """
     resolved = path.resolve()
     if resolved in protected:
         error_message = (
@@ -206,14 +287,21 @@ def _atomic_write(path: Path, data: bytes, protected: set[Path]) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        temporary.replace(path)
     finally:
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
 
 
 def verify_release_folder(path: Path, expected: dict[str, bytes]) -> None:
-    """Verify that a release directory contains exactly the expected files."""
+    """Verify that a release directory contains exactly the expected files.
+
+    Raises
+    ------
+    RuntimeError
+        If the operation violates its validation or integrity contract.
+
+    """
     if path.is_symlink() or not path.is_dir():
         error_message = f"Release folder is missing or unsafe: {path}"
         raise RuntimeError(error_message)
@@ -242,99 +330,107 @@ def verify_release_folder(path: Path, expected: dict[str, bytes]) -> None:
             raise RuntimeError(error_message)
 
 
-def _replace_release_folder(
+class _FolderReplacement:
+    def __init__(self, path: Path, members: dict[str, bytes]) -> None:
+        self.path = path
+        self.members = members
+        self.staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{path.name}.staging-",
+                dir=str(path.parent),
+            ),
+        )
+        self.backup: Path | None = None
+        self.committed = False
+
+    def write_staging(self) -> None:
+        for relative, data in self.members.items():
+            target = self.staging.joinpath(*PurePosixPath(relative).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        verify_release_folder(self.staging, self.members)
+
+    def replace(self) -> None:
+        self.write_staging()
+        if self.path.exists():
+            self.backup = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{self.path.name}.previous-",
+                    dir=str(self.path.parent),
+                ),
+            )
+            self.backup.rmdir()
+            self.path.replace(self.backup)
+        self.staging.replace(self.path)
+        verify_release_folder(self.path, self.members)
+        self.committed = True
+        if self.backup is not None:
+            previous = self.backup
+            self.backup = None
+            shutil.rmtree(previous)
+
+    def rollback(self) -> None:
+        if self.backup is not None and self.backup.exists():
+            if self.path.exists():
+                shutil.rmtree(self.path)
+            self.backup.replace(self.path)
+            self.backup = None
+        elif not self.committed and self.path.exists() and not self.staging.exists():
+            shutil.rmtree(self.path)
+
+    def cleanup(self) -> None:
+        if self.staging.exists():
+            shutil.rmtree(self.staging)
+        if self.backup is not None and self.backup.exists():
+            shutil.rmtree(self.backup)
+
+    def install(self) -> None:
+        try:
+            self.replace()
+        except BaseException:
+            self.rollback()
+            raise
+        finally:
+            self.cleanup()
+
+
+def replace_release_folder(
     path: Path,
     members: dict[str, bytes],
     protected: set[Path],
 ) -> None:
-    """Materialize a complete release tree, replacing only the exact target."""
+    """Materialize a verified release tree and restore the prior tree on failure.
+
+    Raises
+    ------
+    ValueError
+        If the operation violates its validation or integrity contract.
+
+    """
     resolved = path.resolve()
     if any(resolved == source or resolved in source.parents for source in protected):
-        error_message = "The release folder cannot contain an allowlisted source file."
-        raise ValueError(
-            error_message,
-        )
+        message = "The release folder cannot contain an allowlisted source file."
+        raise ValueError(message)
     if path.exists() and (path.is_symlink() or not path.is_dir()):
-        error_message = "The release folder target must be a directory or absent."
-        raise ValueError(error_message)
+        message = "The release folder target must be a directory or absent."
+        raise ValueError(message)
     path.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(prefix=f".{path.name}.staging-", dir=str(path.parent)),
-    )
-    backup: Path | None = None
-    committed = False
-    try:
-        for relative, data in members.items():
-            target = staging.joinpath(*PurePosixPath(relative).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-        verify_release_folder(staging, members)
-        if path.exists():
-            backup_directory = tempfile.mkdtemp(
-                prefix=f".{path.name}.previous-",
-                dir=str(path.parent),
-            )
-            backup = Path(backup_directory)
-            backup.rmdir()
-            os.replace(path, backup)
-        os.replace(staging, path)
-        verify_release_folder(path, members)
-        committed = True
-        if backup is not None:
-            previous = backup
-            backup = None
-            shutil.rmtree(previous)
-    except BaseException:
-        if backup is not None and backup.exists():
-            if path.exists():
-                shutil.rmtree(path)
-            os.replace(backup, path)
-            backup = None
-        elif not committed and path.exists() and not staging.exists():
-            shutil.rmtree(path)
-        raise
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup)
+    _FolderReplacement(path, members).install()
 
 
-def _run_checked(command: list[str], cwd: Path, environment: dict[str, str]) -> None:
-    completed = subprocess.run(  # noqa: S603 - argument arrays only; caller controls execution and checks the result
-        command,
-        cwd=cwd,
-        env=environment,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=SETTINGS.release.smoke_timeout_seconds,
-        check=False,
-    )
-    if completed.returncode:
-        output = (completed.stdout + completed.stderr)[
-            -SETTINGS.release.smoke_error_chars :
-        ]
-        error_message = (
-            f"Bundle smoke command failed ({completed.returncode}): "
-            f"{command!r}\n{output}"
-        )
-        raise RuntimeError(
-            error_message,
-        )
-
-
-def smoke_archive(raw: bytes, *, output: Path | None = None) -> dict[str, object]:
+def smoke_archive(raw: bytes, *, output: Path | None = None) -> SmokeReport:
     """Check extracted package integrity and drive POSIX TUI acceptance offline.
 
     Windows receives the same archive, plugin-package, and source-compilation
     checks. The PTY drivers require POSIX, so this does not claim Windows TUI
     coverage. An explicit output directory retains transcripts and result files.
-    """
-    from tools.build_plugin_catalog import build_catalog
 
+    Returns
+    -------
+    SmokeReport
+        The checked result described above.
+
+    """
     environment = dict(os.environ)
     for name in ("PYTHONHOME", "PYTHONPATH", "RAYCHAT_CONFIG"):
         environment.pop(name, None)
@@ -395,24 +491,28 @@ def smoke_archive(raw: bytes, *, output: Path | None = None) -> dict[str, object
                 ),
                 ("tools.optimization_tui", "optimization", []),
             ):
-                _run_checked(
-                    [
-                        sys.executable,
-                        "-B",
-                        "-S",
-                        "-m",
-                        module,
-                        "--root",
-                        str(root),
-                        "--output",
-                        str(evidence / name),
-                        *arguments,
-                    ],
-                    root,
-                    environment,
+                run_checked(
+                    SmokeCommand(
+                        (
+                            sys.executable,
+                            "-B",
+                            "-S",
+                            "-m",
+                            module,
+                            "--root",
+                            str(root),
+                            "--output",
+                            str(evidence / name),
+                            *arguments,
+                        ),
+                        root,
+                        environment,
+                        SETTINGS.release.smoke_timeout_seconds,
+                        SETTINGS.release.smoke_error_chars,
+                    ),
                 )
                 tui_scenarios.append(name)
-        report: dict[str, object] = {
+        report: SmokeReport = {
             "platform": sys.platform,
             "python_sources_compiled": len(python_sources),
             "plugin_packages_verified": sum(
@@ -422,9 +522,18 @@ def smoke_archive(raw: bytes, *, output: Path | None = None) -> dict[str, object
             "tui_scenarios": tui_scenarios,
             "provider": "deterministic offline fixtures" if tui_scenarios else None,
             "coverage_note": (
-                "Actual POSIX terminal interaction, startup and installation upgrades, saved plugin state, stalled package-download cancellation, hostile input, focused child cancellation, feature plugins, 50 subagents, context pressure, and offline optimization."
+                (
+                    "Actual POSIX terminal interaction, startup and installation "
+                    "upgrades, saved plugin state, stalled package-download "
+                    "cancellation, hostile input, focused child cancellation, "
+                    "feature plugins, 50 subagents, context pressure, and offline "
+                    "optimization."
+                )
                 if tui_scenarios
-                else "Archive/package integrity and source compilation only; Windows TUI was not exercised."
+                else (
+                    "Archive/package integrity and source compilation only; Windows"
+                    " TUI was not exercised."
+                )
             ),
         }
         if output is not None:
@@ -459,62 +568,89 @@ def _parser() -> argparse.ArgumentParser:
         "--smoke",
         action=argparse.BooleanOptionalAction,
         default=SETTINGS.release.smoke_test,
-        help="verify extracted packages and compilation; run offline TUI acceptance on POSIX",
+        help=(
+            "verify extracted packages and compilation; run offline TUI "
+            "acceptance on POSIX"
+        ),
     )
     parser.add_argument(
         "--smoke-output",
         type=Path,
-        help="new directory for extracted-release TUI transcripts and acceptance reports",
+        help=(
+            "new directory for extracted-release TUI transcripts and acceptance reports"
+        ),
     )
     return parser
 
 
+@dataclass
+class _Arguments(argparse.Namespace):
+    output: Path = Path(SETTINGS.release.archive_path)
+    folder: Path = Path(SETTINGS.release.folder_path)
+    check: bool = False
+    smoke: bool = SETTINGS.release.smoke_test
+    smoke_output: Path | None = None
+
+
+def _check_existing(args: _Arguments, raw: bytes, members: dict[str, bytes]) -> None:
+    existing = args.output.read_bytes()
+    if existing != raw:
+        message = (
+            "Existing archive is not the deterministic build: "
+            f"expected {hashlib.sha256(raw).hexdigest()}, "
+            f"found {hashlib.sha256(existing).hexdigest()}."
+        )
+        raise RuntimeError(message)
+    verify_archive(existing, members)
+    verify_release_folder(args.folder, members)
+
+
+def _build(args: _Arguments, root: Path) -> BuildReport:
+    raw, members = build_archive(root)
+    protected = {
+        root.joinpath(*PurePosixPath(relative).parts).resolve()
+        for relative in SOURCE_FILES
+    }
+    if args.check:
+        _check_existing(args, raw, members)
+    else:
+        atomic_write(args.output, raw, protected)
+        replace_release_folder(args.folder, members, protected)
+    smoke_report = smoke_archive(raw, output=args.smoke_output) if args.smoke else None
+    return {
+        "archive": str(args.output),
+        "archive_bytes": len(raw),
+        "archive_sha256": hashlib.sha256(raw).hexdigest(),
+        "checked": args.check,
+        "folder": str(args.folder),
+        "member_count": len(members),
+        "smoke_tested": args.smoke,
+        "smoke_coverage": smoke_report,
+        "source_bytes": sum(len(members[name]) for name in SOURCE_FILES),
+        "source_file_count": len(SOURCE_FILES),
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    """Build or verify the allowlisted archive and report its exact coverage.
+
+    Returns
+    -------
+    int
+        The checked result described above.
+
+    """
+    args = _Arguments()
+    _parser().parse_args(argv, namespace=args)
     root = Path(__file__).resolve().parents[1]
     try:
-        raw, members = build_archive(root)
-        protected = {
-            root.joinpath(*PurePosixPath(relative).parts).resolve()
-            for relative in SOURCE_FILES
-        }
-        if args.check:
-            existing = args.output.read_bytes()
-            if existing != raw:
-                error_message = (
-                    "Existing archive is not the deterministic build: "
-                    f"expected {hashlib.sha256(raw).hexdigest()}, "
-                    f"found {hashlib.sha256(existing).hexdigest()}."
-                )
-                raise RuntimeError(
-                    error_message,
-                )
-            verify_archive(existing, members)
-            verify_release_folder(args.folder, members)
-        else:
-            _atomic_write(args.output, raw, protected)
-            _replace_release_folder(args.folder, members, protected)
-        smoke_report = (
-            smoke_archive(raw, output=args.smoke_output) if args.smoke else None
-        )
-        source_bytes = sum(len(members[name]) for name in SOURCE_FILES)
-        report = {
-            "archive": str(args.output),
-            "archive_bytes": len(raw),
-            "archive_sha256": hashlib.sha256(raw).hexdigest(),
-            "checked": bool(args.check),
-            "folder": str(args.folder),
-            "member_count": len(members),
-            "smoke_tested": bool(args.smoke),
-            "smoke_coverage": smoke_report,
-            "source_bytes": source_bytes,
-            "source_file_count": len(SOURCE_FILES),
-        }
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return 0
+        report = _build(args, root)
     except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        sys.stderr.write(f"Error: {exc}\n")
         return 1
+    else:
+        sys.stdout.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        return 0
 
 
 if __name__ == "__main__":

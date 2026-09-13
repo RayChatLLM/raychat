@@ -1,4 +1,3 @@
-# Copyright 2026
 """Immutable settings owned and validated by this plugin."""
 
 from __future__ import annotations
@@ -223,7 +222,7 @@ def load(namespace: object) -> SelfHarnessSettings:
     Returns
     -------
     SelfHarnessSettings
-        Validated fields belonging to the captured plugin namespace.
+        The checked result described above.
 
     """
     return SelfHarnessSettings.parse(captured_settings(namespace, "self_harness"))

@@ -4,38 +4,109 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Callable, Mapping
 from concurrent.futures import Future
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from raychat.sdk import (
-    ApprovalCallback,
-    CancelCheck,
-    Conversation,
-    EventCallback,
-    Messages,
-    SessionPersistence,
-)
-from raychat.session import AgentSession
-from raychat.workers import AgentWorker
+from raychat.service_contracts import AgentChat, SessionCatalogState
+from raychat.workers import AgentWorker, WorkerExecution
 
 from .configuration import load as load_settings
-from .models import ModelProfile
+from .lifecycle import FailureCapture
 
 if TYPE_CHECKING:
-    from .coordinator import SubagentCoordinator
+    from collections.abc import Callable, Mapping
+    from pathlib import Path
+
+    from raychat.plugin_sources import PluginSources
+    from raychat.sdk import (
+        ApprovalCallback,
+        CancelCheck,
+        Conversation,
+        EventCallback,
+        Messages,
+        SessionPersistence,
+    )
+    from raychat.session import AgentSession
+
+    from .models import ModelProfile, ModelRouter
 from raychat.composition import create_runtime, create_session
 from raychat.configuration import SETTINGS
 from raychat.transport import run_child
 
-_PLUGIN_SETTINGS = load_settings(globals())
+_namespace: object = globals()
+_PLUGIN_SETTINGS = load_settings(_namespace)
+
+
+@runtime_checkable
+class SessionCoordinator(Protocol):
+    """Describe the coordinator fields required to construct isolated conversations."""
+
+    @property
+    def workspace(self) -> Path:
+        """The absolute workspace used by each child."""
+        ...
+
+    @property
+    def router(self) -> ModelRouter:
+        """The configured router used to resolve child profiles."""
+        ...
+
+    @property
+    def plugin_source(self) -> PluginSources | None:
+        """The captured plugin generation supplied to child runtimes."""
+        ...
+
+    @property
+    def timeout(self) -> float:
+        """The command timeout used within child conversations."""
+        ...
+
+    @property
+    def context_chars(self) -> int:
+        """The default character budget for child requests."""
+        ...
+
+    @property
+    def keep_recent_turns(self) -> int:
+        """The number of complete recent turns retained in child context."""
+        ...
+
+    @property
+    def instruction_role(self) -> str:
+        """The instruction role supplied to child providers."""
+        ...
+
+    @property
+    def protocol(self) -> str | None:
+        """The optional operator-selected child protocol."""
+        ...
+
+
+def session_coordinator(value: object) -> SessionCoordinator | None:
+    """Validate the conversation-construction capability of a supplied coordinator.
+
+    Returns
+    -------
+    SessionCoordinator | None
+        The result described above.
+
+    Raises
+    ------
+    TypeError
+        If the operation cannot satisfy its checked contract.
+
+    """
+    if value is None or isinstance(value, SessionCoordinator):
+        return value
+    message = "Delegation requires a session coordinator."
+    raise TypeError(message)
 
 
 class ProcessConversation:
     """A child chat whose completed history survives isolated process calls."""
 
-    def __init__(self, profile: ModelProfile, coordinator: SubagentCoordinator) -> None:
+    def __init__(self, profile: ModelProfile, coordinator: SessionCoordinator) -> None:
+        """Create a local history owner for this isolated child provider."""
         self.profile = profile
         self.coordinator = coordinator
         self.root = coordinator.workspace
@@ -43,19 +114,38 @@ class ProcessConversation:
         self.runtime = self._session.runtime
         self.store: SessionPersistence | None = None
 
-    def export_snapshot(self) -> dict[str, Any]:
+    def export_snapshot(self) -> dict[str, object]:
+        """Export the complete child conversation and plugin state.
+
+        Returns
+        -------
+        dict[str, object]
+            The result described above.
+
+        """
         return self._session.export_snapshot()
 
-    def restore_snapshot(self, snapshot: Mapping[str, Any]) -> None:
+    def restore_snapshot(self, snapshot: Mapping[str, object]) -> None:
+        """Restore checked history and plugin state into the local owner."""
         self._session.restore_snapshot(snapshot)
 
     def checkpoint(self, owner: str) -> None:
+        """Persist the child history for the specified checkpoint owner."""
         self._session.checkpoint(owner)
 
     def snapshot(self) -> Messages:
+        """Copy the complete child message history.
+
+        Returns
+        -------
+        Messages
+            The result described above.
+
+        """
         return self._session.snapshot()
 
     def validate_context(self) -> None:
+        """Verify that the current task and complete tool evidence fit."""
         self._session.validate_context()
 
     def run(
@@ -67,32 +157,47 @@ class ProcessConversation:
         max_steps: int | None = None,
         approval_callback: ApprovalCallback | None = None,
     ) -> str:
+        """Commit exactly one completed isolated snapshot after cancellation checks.
+
+        Returns
+        -------
+        str
+            The result described above.
+
+        Raises
+        ------
+        RuntimeError
+            If the operation cannot satisfy its checked contract.
+
+        """
+        del approval_callback
         with self._session.turn(notify=event_callback):
-            pending: list[dict[str, Any]] = []
+            pending: list[dict[str, object]] = []
             profile, coordinator = self.profile, self.coordinator
+            payload: dict[str, object] = {
+                "mode": "conversation",
+                "workspace": str(self.root),
+                "task": prompt,
+                "runtime_plugins": list(
+                    _PLUGIN_SETTINGS.child_plugins,
+                ),
+                "allowed_actions": sorted(self._session.allowed_actions),
+                "command_timeout": self._session.timeout,
+                "context_chars": self._session.context_chars,
+                "keep_recent_turns": self._session.keep_recent_turns,
+                "instruction_role": self._session.instruction_role,
+                "protocol": self._session.protocol,
+                "snapshot": self.export_snapshot(),
+                "max_steps": max_steps,
+                **(
+                    {"plugin_source": coordinator.plugin_source}
+                    if coordinator.plugin_source is not None
+                    else {}
+                ),
+            }
             result = run_child(
                 profile.process_spec,
-                {
-                    "mode": "conversation",
-                    "workspace": str(self.root),
-                    "task": prompt,
-                    "runtime_plugins": list(
-                        _PLUGIN_SETTINGS.child_plugins,
-                    ),
-                    "allowed_actions": sorted(self._session.allowed_actions),
-                    "command_timeout": self._session.timeout,
-                    "context_chars": self._session.context_chars,
-                    "keep_recent_turns": self._session.keep_recent_turns,
-                    "instruction_role": self._session.instruction_role,
-                    "protocol": self._session.protocol,
-                    "snapshot": self.export_snapshot(),
-                    "max_steps": max_steps,
-                    **(
-                        {"plugin_source": coordinator.plugin_source}
-                        if coordinator.plugin_source is not None
-                        else {}
-                    ),
-                },
+                payload,
                 cancel_check,
                 event_callback=event_callback,
                 snapshot_callback=pending.append,
@@ -106,41 +211,40 @@ class ProcessConversation:
             return result
 
     def reset(self) -> None:
+        """Reset the child conversation through its local history owner."""
         self._session.reset()
 
     def close(self) -> None:
+        """Release the local child runtime and its owned resources."""
         self._session.close()
-
-
-@dataclass
-class AgentChat:
-    id: str
-    name: str
-    parent_id: str | None
-    profile: str
-    worker: AgentWorker
-    owned: bool = True
-    task: str = ""
-    job_id: int | None = None
-    status: str = "idle"
 
 
 class AgentSessions:
     """Session catalog shared by the plugin and its host's session picker."""
 
     def caption(self, identifier: str) -> str:
+        """Describe the selected chat and its navigation commands.
+
+        Returns
+        -------
+        str
+            The result described above.
+
+        """
         return self.get(identifier).name
 
     def __init__(self, status_changed: Callable[[int], None] | None = None) -> None:
-        self.status_changed = status_changed
-        self._active: set[str] = set()
+        """Initialize an empty catalog with the configured root session identity."""
         self._lock = threading.RLock()
         self._chats: dict[str, AgentChat] = {}
         self.focused_id = _PLUGIN_SETTINGS.root_session_id
         self.root_id = self.focused_id
         self.closed = False
+        self.status_changed = status_changed
+        self._active: set[str] = set()
 
-    def activity(self, identifier: str, active: bool) -> None:
+    def activity(self, identifier: str, *, active: bool) -> None:
+        """Publish the number of child workers currently executing a job."""
         with self._lock:
             if active:
                 self._active.add(identifier)
@@ -149,7 +253,11 @@ class AgentSessions:
             if self.status_changed is not None:
                 self.status_changed(len(self._active))
 
+    def _activity_callback(self, identifier: str) -> Callable[[bool], None]:
+        return lambda active: self.activity(identifier, active=active)
+
     def attach_root(self, worker: AgentWorker) -> None:
+        """Expose the host worker without taking ownership of its lifecycle."""
         with self._lock:
             self._chats[self.root_id] = AgentChat(
                 self.root_id,
@@ -157,16 +265,25 @@ class AgentSessions:
                 None,
                 "",
                 worker,
-                False,
+                owned=False,
             )
 
-    def export(self) -> tuple[dict[str, AgentChat], str]:
-        with self._lock:
-            return dict(self._chats), self.focused_id
+    def export(self) -> SessionCatalogState:
+        """Copy catalog membership while retaining live worker and entry identities.
 
-    def restore(self, data: tuple[dict[str, AgentChat], str]) -> None:
+        Returns
+        -------
+        SessionCatalogState
+            The result described above.
+
+        """
         with self._lock:
-            self._chats, self.focused_id = data
+            return SessionCatalogState(dict(self._chats), self.focused_id)
+
+    def restore(self, data: SessionCatalogState) -> None:
+        """Restore worker ownership and focus from a shared typed reload record."""
+        with self._lock:
+            self._chats, self.focused_id = dict(data.entries), data.focused_id
             self._active = {
                 entry.id
                 for entry in self._chats.values()
@@ -175,13 +292,12 @@ class AgentSessions:
             if self.status_changed is not None:
                 self.status_changed(len(self._active))
 
-    def reconfigure(self, coordinator: SubagentCoordinator | None) -> None:
+    def reconfigure(self, coordinator: SessionCoordinator | None) -> None:
+        """Replace owned child runtimes while retaining history and worker queues."""
         with self._lock:
             for entry in self._chats.values():
                 if entry.owned:
-                    entry.worker.on_activity = lambda active, identifier=entry.id: (
-                        self.activity(identifier, active)
-                    )
+                    entry.worker.on_activity = self._activity_callback(entry.id)
         if coordinator is None:
             return
         for entry in self.entries():
@@ -213,10 +329,26 @@ class AgentSessions:
             entry.worker.reconfigure(replace)
 
     def entries(self) -> list[AgentChat]:
+        """Copy the current navigation entries under the catalog lock.
+
+        Returns
+        -------
+        list[AgentChat]
+            The result described above.
+
+        """
         with self._lock:
             return list(self._chats.values())
 
     def get(self, identifier: str) -> AgentChat:
+        """Resolve one current chat by its stable session identifier.
+
+        Returns
+        -------
+        AgentChat
+            The result described above.
+
+        """
         with self._lock:
             return self._chats[identifier]
 
@@ -224,17 +356,32 @@ class AgentSessions:
         self,
         name: str,
         profile: ModelProfile,
-        coordinator: SubagentCoordinator,
+        coordinator: SessionCoordinator,
         task: str,
         *,
         parent_id: str | None = None,
     ) -> tuple[AgentChat, Future[str]]:
+        """Queue an independent child task and retain its completion future.
+
+        Returns
+        -------
+        tuple[AgentChat, Future[str]]
+            The result described above.
+
+        Raises
+        ------
+        RuntimeError
+            If the operation cannot satisfy its checked contract.
+
+        """
         identifier = uuid.uuid4().hex
         worker = AgentWorker(
             None,
             coordinator.workspace,
-            session_factory=lambda: self.create_conversation(profile, coordinator),
-            on_activity=lambda active: self.activity(identifier, active),
+            execution=WorkerExecution(
+                factory=lambda: self.create_conversation(profile, coordinator),
+                on_activity=self._activity_callback(identifier),
+            ),
         )
         entry = AgentChat(
             identifier,
@@ -257,26 +404,32 @@ class AgentSessions:
     @staticmethod
     def create_conversation(
         profile: ModelProfile,
-        coordinator: SubagentCoordinator,
+        coordinator: SessionCoordinator,
     ) -> Conversation:
+        """Select isolated execution when the model has a provider descriptor.
+
+        Returns
+        -------
+        Conversation
+            The result described above.
+
+        """
         if profile.process_spec is not None:
             return ProcessConversation(profile, coordinator)
         return _local_session(profile, coordinator)
 
     def close(self) -> None:
+        """Stop and join every owned worker before raising the first join failure."""
         with self._lock:
             self.closed = True
             children = [entry for entry in self._chats.values() if entry.owned]
         for entry in children:
             entry.worker.stop()
-        failure = None
+        failure = FailureCapture()
         for entry in children:
-            try:
+            with failure:
                 entry.worker.join()
-            except Exception as exc:
-                failure = failure or exc
-        if failure is not None:
-            raise failure
+        failure.raise_if_failed()
 
 
 def _isolated_chat(_messages: Messages) -> str:
@@ -288,7 +441,7 @@ def _isolated_chat(_messages: Messages) -> str:
 
 def _local_session(
     profile: ModelProfile,
-    coordinator: SubagentCoordinator,
+    coordinator: SessionCoordinator,
 ) -> AgentSession:
     runtime = create_runtime(
         coordinator.workspace,
@@ -315,7 +468,8 @@ def _local_session(
         runtime.watch(
             enabled=coordinator.plugin_source is None and SETTINGS.plugins.auto_reload,
         )
-        return session
     except BaseException:
         runtime.close()
         raise
+    else:
+        return session

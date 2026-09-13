@@ -1,4 +1,3 @@
-# Copyright 2026
 """Decode optimization snapshots without assuming types for untrusted values."""
 
 from __future__ import annotations
@@ -179,4 +178,24 @@ def identity(value: object) -> object:
         The original value without unchecked assumptions about its type.
 
     """
+    return value
+
+
+def boolean(value: object) -> bool:
+    """Validate a Boolean snapshot flag without numerical coercion.
+
+    Returns
+    -------
+    bool
+        The checked flag.
+
+    Raises
+    ------
+    TypeError
+        If the value is not a Boolean.
+
+    """
+    if not isinstance(value, bool):
+        message = "Optimization snapshot flags must be Boolean values."
+        raise TypeError(message)
     return value

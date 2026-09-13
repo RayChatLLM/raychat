@@ -7,82 +7,190 @@ import os
 import shutil
 import tempfile
 import time
-import unittest
-from collections.abc import Callable
+from enum import IntEnum
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat.resources import AgentResources, create_resources
-from raychat.sdk import Messages
 from raychat.type_support import override
 from raychat.ui import controller as tui
 from raychat.ui.renderer import RayTracer, Surface
 from raychat.ui.state import Phase, TuiSnapshot, TuiState
 from raychat.ui.terminal import (
     FrameMetrics,
+    FrameTick,
     KeyDecoder,
     KeyEvent,
     LineEditor,
     TerminalSession,
 )
-from raychat.workers import WorkerEvent
-from tests.plugin_support import plugin_module
+from raychat.validation import object_field
+from raychat.workers import AgentWorker, WorkerEvent
+from tests.assertions import TypedTestCase
+from tests.plugin_support import (
+    plugin_module,
+    require_agent_sessions,
+    require_goal_controller,
+)
 from tests.tui_support import arguments, provider_fixture
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from concurrent.futures import Future
+
     from typing_extensions import Self
 
+    from plugins import goals
+    from plugins.subagents import coordinator, models
+    from raychat.sdk import Messages
+else:
+    goals = plugin_module("goals")
+    models = plugin_module("subagents.models")
+    coordinator = plugin_module("subagents.coordinator")
 
-chat_completions = plugin_module("chat_completions")
-goals = plugin_module("goals")
-ModelProfile = plugin_module("subagents.models").ModelProfile
-ModelRouter = plugin_module("subagents.models").ModelRouter
-SubagentCoordinator = plugin_module("subagents.coordinator").SubagentCoordinator
+
+class _GoalStage(IntEnum):
+    CONFIGURE = 0
+    WORK = 1
+    JUDGING = 2
 
 
 class Scheduler:
+    """Check Scheduler behavior and failure boundaries."""
+
     period = 0.01
 
     def __init__(self, fps: float) -> None:
+        """Retain the requested frame rate and deterministic sequence."""
+        self.fps = fps
         self.sequence = 0
 
-    def begin_frame(self) -> object:
-        self.sequence += 1
-        return SimpleNamespace(sequence=self.sequence)
+    def begin_frame(self) -> FrameTick:
+        """Start a deterministic frame.
 
-    def end_frame(self, tick: object) -> FrameMetrics:
+        Returns
+        -------
+        FrameTick
+            Stable timing data for the session controller.
+
+        """
+        self.sequence += 1
+        return FrameTick(self.sequence, 0, 0, 0, 0, self.period)
+
+    @staticmethod
+    def end_frame(_tick: FrameTick) -> FrameMetrics:
+        """Complete a deterministic frame.
+
+        Returns
+        -------
+        FrameMetrics
+            Stable completed-frame timing.
+
+        """
         return FrameMetrics(0.001, 0.001, 0.01, 0.01, 0)
 
 
 class Terminal(TerminalSession):
+    """Check Terminal behavior and failure boundaries."""
+
     is_tty = True
-    output = io.StringIO()
 
     def __init__(self, read: Callable[[], bytes]) -> None:
+        """Retain a scripted input driver and in-memory output stream."""
+        super().__init__(io.StringIO(), io.StringIO())
         self.driver = read
+        self.read_requests: list[tuple[float, int]] = []
 
     @override
     def __enter__(self) -> Self:
+        """Enter the in-memory terminal.
+
+        Returns
+        -------
+        Self
+            This terminal without modifying the actual console.
+
+        """
         return self
 
     @override
     def __exit__(self, *args: object) -> None:
-        pass
+        """Leave the in-memory terminal without modifying the actual console."""
 
     @override
     def present(self, frame: str) -> None:
-        pass
+        """Accept a rendered frame without writing to the actual console."""
 
     @override
     def read(self, timeout: float = 0, max_bytes: int = 65536) -> bytes:
+        """Record read bounds and invoke the next input step.
+
+        Returns
+        -------
+        bytes
+            The next scripted input fragment.
+
+        """
+        self.read_requests.append((timeout, max_bytes))
         return self.driver()
 
 
-class TuiSessionTests(unittest.TestCase):
+class _NavigationWorker(AgentWorker):
+    def __init__(self) -> None:
+        super().__init__(lambda _messages: "")
+        self.session_factory = None
+        self.alive = True
+        self.pending_events: list[WorkerEvent] = []
+        self.tasks: list[str] = []
+        self.cancelled: list[int] = []
+        self.completions: list[Future[str] | None] = []
+
+    @property
+    @override
+    def is_alive(self) -> bool:
+        return self.alive
+
+    @override
+    def start(self) -> Self:
+        return self
+
+    @override
+    def submit(self, task: str, *, result: Future[str] | None = None) -> int:
+        self.tasks.append(task)
+        self.completions.append(result)
+        return len(self.tasks)
+
+    @override
+    def drain_events(self) -> list[WorkerEvent]:
+        events, self.pending_events = self.pending_events, []
+        return events
+
+    @override
+    def cancel_current(self, job_id: int | None = None) -> bool:
+        job = len(self.tasks) if job_id is None else job_id
+        self.cancelled.append(job)
+        self.pending_events.append(WorkerEvent("cancelled", {"job_id": job}))
+        return True
+
+    @override
+    def stop(self) -> None:
+        self.alive = False
+
+    @override
+    def join(self, timeout: float | None = None) -> bool:
+        if timeout is not None and timeout < 0:
+            message = "The controller must use a nonnegative join timeout."
+            raise AssertionError(message)
+        return not self.alive
+
+
+class TuiSessionTests(TypedTestCase):
+    """Check terminal UISession behavior and failure boundaries."""
+
     @override
     def setUp(self) -> None:
+        """Create isolated workspace, home and durable-session options."""
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
@@ -108,14 +216,21 @@ class TuiSessionTests(unittest.TestCase):
         resources: AgentResources,
         driver: Callable[[list[TuiSnapshot]], bytes],
     ) -> list[TuiSnapshot]:
+        """Run the real session controller with deterministic input and frames.
+
+        Returns
+        -------
+        list[TuiSnapshot]
+            Every composed frame in order.
+
+        """
         snapshots = []
 
         def compose(
-            tracer: RayTracer,
+            _tracer: RayTracer,
             state: TuiState,
-            editor: LineEditor,
-            *args: object,
-            **kwargs: object,
+            _editor: LineEditor,
+            _composition: tui.FrameComposition,
         ) -> Surface:
             snapshots.append(state.snapshot())
             return Surface(80, 24)
@@ -129,13 +244,14 @@ class TuiSessionTests(unittest.TestCase):
                 return_value=os.terminal_size((80, 24)),
             ),
         ):
-            self.assertEqual(
+            self.equal(
                 tui.run_tui(self.args, resources, Terminal(lambda: driver(snapshots))),
                 0,
             )
         return snapshots
 
     def test_goal_set_before_first_message_is_preserved_and_judged(self) -> None:
+        """Check goal set before first message is preserved and judged."""
         calls = []
 
         def chat(messages: Messages) -> str:
@@ -150,27 +266,31 @@ class TuiSessionTests(unittest.TestCase):
         with provider_fixture(chat):
             resources = create_resources(self.args, {})
         self.addCleanup(resources.close)
-        stage = 0
+        stage = _GoalStage.CONFIGURE
         deadline = time.monotonic() + 3
 
         def drive(snapshots: list[TuiSnapshot]) -> bytes:
             nonlocal stage
-            self.assertLess(
-                time.monotonic(),
-                deadline,
-                f"TUI did not finish the goal: stage={stage}, calls={calls}, last={snapshots[-1] if snapshots else None}",
+            self.require(
+                (time.monotonic()) < (deadline),
+                f"TUI did not finish the goal: stage={stage}, calls={calls}, "
+                f"last={snapshots[-1] if snapshots else None}",
             )
-            if stage == 0:
-                stage = 1
+            if stage == _GoalStage.CONFIGURE:
+                stage = _GoalStage.WORK
                 return b"/goal Finish the task\r"
-            if stage == 1 and snapshots and snapshots[-1].phase is Phase.DONE:
-                stage = 2
-                self.assertIsNotNone(
-                    resources.runtime.services["goal_controller"].status(),
+            if (
+                stage == _GoalStage.WORK
+                and snapshots
+                and snapshots[-1].phase is Phase.DONE
+            ):
+                stage = _GoalStage.JUDGING
+                self.require(
+                    (require_goal_controller(resources.runtime).status()) is not None,
                 )
                 return b"do work\r"
             if (
-                stage == 2
+                stage == _GoalStage.JUDGING
                 and calls == ["task", "judge"]
                 and snapshots[-1].phase is Phase.DONE
             ):
@@ -179,44 +299,18 @@ class TuiSessionTests(unittest.TestCase):
             return b""
 
         self.run_ui(resources, drive)
-        self.assertEqual(calls, ["task", "judge"])
-        assert resources.store is not None
-        self.assertEqual(resources.store.snapshot()["state"]["goals"], {})
+        self.equal(calls, ["task", "judge"])
+        if resources.store is None:
+            self.fail("The TUI fixture must retain its durable session store.")
+        self.equal(
+            object_field(resources.store.snapshot()["state"], "state")["goals"],
+            {},
+        )
 
     def test_background_completion_does_not_disarm_focused_chat_or_redirect_commands(
         self,
     ) -> None:
-        class Worker:
-            session = None
-            is_alive = True
-            session_factory = None
-
-            def __init__(self) -> None:
-                self.events: list[WorkerEvent] = []
-                self.tasks: list[str] = []
-                self.cancelled: list[int] = []
-
-            def start(self) -> Self:
-                return self
-
-            def submit(self, task: str, **kwargs: object) -> int:
-                self.tasks.append(task)
-                return len(self.tasks)
-
-            def drain_events(self) -> list[WorkerEvent]:
-                events, self.events = self.events, []
-                return events
-
-            def cancel_current(self, job: int) -> bool:
-                self.cancelled.append(job)
-                self.events.append(WorkerEvent("cancelled", {"job_id": job}))
-                return True
-
-            def stop(self) -> None:
-                self.is_alive = False
-
-            def join(self) -> None:
-                pass
+        """Background completion does not disarm focused chat or redirect commands."""
 
         class ImmediateEscape(KeyDecoder):
             @override
@@ -225,26 +319,30 @@ class TuiSessionTests(unittest.TestCase):
 
         resources = create_resources(self.args, {})
         self.addCleanup(resources.close)
-        resources.runtime.services["goal_controller"].configure("Parent goal")
-        registry = resources.runtime.services["chat_sessions"]
-        root, child = Worker(), Worker()
+        require_goal_controller(resources.runtime).configure("Parent goal")
+        registry = require_agent_sessions(resources.runtime)
+        root, child = _NavigationWorker(), _NavigationWorker()
         registry.attach_root(root)
-        profile = ModelProfile("child", "test", lambda: lambda _: "", ("*",))
-        coordinator = SubagentCoordinator(ModelRouter([profile]), self.root)
+        profile = models.ModelProfile("child", "test", lambda: lambda _: "", ("*",))
+        delegation = coordinator.SubagentCoordinator(
+            models.ModelRouter([profile]),
+            self.root,
+        )
         with mock.patch(f"{type(registry).__module__}.AgentWorker", return_value=child):
-            registry.create_child("child", profile, coordinator, "child task")
+            registry.create_child("child", profile, delegation, "child task")
         self.args.initial_prompt = "parent task"
         inputs = iter(
             [b"/agents\t\r", b"\x1b[B\r", b"\x1b", b"\x1b", b"/goal clear\r", b"\x03"],
         )
         step = 0
+        background_completion_frame = 3
 
-        def drive(snapshots: list[TuiSnapshot]) -> bytes:
+        def drive(_snapshots: list[TuiSnapshot]) -> bytes:
             nonlocal step
             step += 1
-            if step == 3:
+            if step == background_completion_frame:
                 # Delivered next frame, strictly between the focused child's escapes.
-                root.events.extend(
+                root.pending_events.extend(
                     [
                         WorkerEvent(
                             "done",
@@ -260,11 +358,10 @@ class TuiSessionTests(unittest.TestCase):
             mock.patch.object(tui, "KeyDecoder", ImmediateEscape),
         ):
             self.run_ui(resources, drive)
-        self.assertEqual(child.cancelled, [1])
-        self.assertEqual(root.cancelled, [])
-        self.assertEqual(root.tasks, ["parent task"])
-        self.assertEqual(child.tasks, ["child task", "/goal clear"])
-        self.assertEqual(
-            resources.runtime.services["goal_controller"].status().objective,
-            "Parent goal",
-        )
+        self.equal(child.cancelled, [1])
+        self.equal(root.cancelled, [])
+        self.equal(root.tasks, ["parent task"])
+        self.equal(child.tasks, ["child task", "/goal clear"])
+        status = require_goal_controller(resources.runtime).status()
+        if status is None or status.objective != "Parent goal":
+            self.fail("The parent goal did not survive the child session command.")

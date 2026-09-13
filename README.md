@@ -235,11 +235,11 @@ uses of `Any`.
 
 The complete unit suite is required alongside static checks and actual TUI
 acceptance; none substitutes for the others. Record failures, errors and skips
-with the tested source revision. The recorded functional QA ran 592 tests (one
-Windows-only skip), all thirteen packaged TUI drivers, and a 50-child workflow;
-see [the verification index](docs/verification/README.md). The separate
-`verify_quality.py` maximum-strictness audit is still being developed and is not
-part of that configured-checks pass claim.
+with the tested source revision. Historical packaged QA is retained in
+[the verification index](docs/verification/README.md). The current
+`verify_quality.py` gate independently inventories source files, applies maximum
+mypy and Ruff rules, checks formatting, and fails if sources change during the
+run. Its report lists every diagnostic and explicit rule exception.
 
 TUI acceptance drives the actual terminal UI on POSIX. Each output path
 must be new; reports, provider requests, and terminal transcripts remain there.
@@ -263,13 +263,14 @@ python3 -B -S -m tools.persistence_tui --output ./build/verification-run-1/persi
 python3 -B -S -m tools.package_download_tui --output ./build/verification-run-1/package-download
 python3 -B -S -m tools.adversarial_agents_tui --output ./build/verification-run-1/adversarial-agents
 python3 -B -S -m tools.ui_stress_tui --output ./build/verification-run-1/ui-stress
+python3 -B -S -m tools.composer_tui --output ./build/verification-run-1/composer
 python3 -B -S -m tools.collective_tui --agents 50 --parallel 8 --output ./build/verification-run-1/collective
 python3 -B -S -m tools.optimization_tui --output ./build/verification-run-1/optimization
 python3 -B -S -m tools.plugin_guide_tui --output ./build/verification-run-1/plugin-guide
 python3 -B -S -m tools.reload_race_tui --output ./build/verification-run-1/reload-race
 ```
 
-These thirteen drivers use deterministic offline model fixtures while exercising
+These fourteen drivers use deterministic offline model fixtures while exercising
 installed plugins, navigation, focused cancellation, commands, file/process operations,
 memory, skills, goals, workflow children, context compaction, and the documented
 external-plugin authoring/install workflow. The collective run verifies 50 child results and their aggregate, then tests a child follow-up,

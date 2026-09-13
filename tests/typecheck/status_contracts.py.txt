@@ -1,0 +1,24 @@
+"""SDK 4 pushed status retains concrete records and update controls."""
+from raychat.plugins import Runtime
+from raychat.sdk import PluginContext, StatusItem
+
+
+def reject_invalid_status_fields() -> None:
+    StatusItem(1)  # expect-error: arg-type
+    StatusItem("working", level="busy")  # expect-error: arg-type
+    StatusItem("working", priority=1.5)  # expect-error: arg-type
+
+
+def reject_mutable_status(item: StatusItem) -> None:
+    item.text = "changed"  # expect-error: misc
+
+
+def reject_invalid_status_updates(ctx: PluginContext) -> None:
+    ctx.set_status(1, StatusItem("working"))  # expect-error: arg-type
+    ctx.set_status("activity", {"text": "working"})  # expect-error: arg-type
+    ctx.set_status("activity", None, scope="workspace")  # expect-error: arg-type
+    ctx.set_status("activity", None, ttl_seconds="later")  # expect-error: arg-type
+
+
+def reject_unchecked_status_snapshot(runtime: Runtime) -> str:
+    return runtime.status_items()[0].item  # expect-error: return-value

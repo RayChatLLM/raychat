@@ -1,4 +1,3 @@
-# Copyright 2026
 """Expose static override checks without a runtime third-party dependency."""
 
 from typing import TYPE_CHECKING, TypeVar
