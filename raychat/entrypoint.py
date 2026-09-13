@@ -7,6 +7,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass
+from itertools import starmap
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -314,13 +315,10 @@ def _choose_session(
             "or run --resume in a terminal to choose."
         )
         raise ValueError(message)
-    choices = [
-        picker.Choice(
-            identifier,
-            SessionStore.describe(options.workspace, options.session_dir, identifier),
-        )
-        for identifier in saved
-    ]
+    choices = starmap(
+        picker.Choice,
+        SessionStore.choices(options.workspace, options.session_dir),
+    )
     return picker.choose(
         terminal,
         "Resume a session",

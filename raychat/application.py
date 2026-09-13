@@ -335,7 +335,17 @@ def _invalid(message: str) -> NoReturn:
 def _resume(session: AgentSession, argument: str, notify: EventCallback | None) -> str:
     store = session.store
     directory = store.directory if isinstance(store, SessionStore) else None
-    replacement = SessionStore(session.root, directory, argument.strip())
+    target = argument.strip()
+    if not target:
+        saved = SessionStore.list_sessions(session.root, directory)
+        if not saved:
+            _invalid("No saved sessions exist in this workspace.")
+        if len(saved) > 1:
+            _invalid("Several sessions exist. Use /resume SESSION_ID to choose one.")
+        target = saved[0]
+    if isinstance(store, SessionStore) and target == store.session_id:
+        return "Already in session " + target
+    replacement = SessionStore(session.root, directory, target)
     try:
         session.store = replacement
         session.restore()
