@@ -2,77 +2,86 @@
 
 from __future__ import annotations
 
+import ctypes
 import io
 import os
 import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict
+from typing import TYPE_CHECKING, Protocol, TypedDict, runtime_checkable
 from unittest import mock
 
 import raychat.ui.terminal as runtime
 from raychat import workers
-from raychat._common import RESULT_PREFIX
 from raychat.composition import create_session
+from raychat.configuration import SETTINGS
 from raychat.plugins import Runtime, import_plugin
-from raychat.sdk import (
-    ApprovalCallback,
-    CancelCheck,
-    EventCallback,
-    Messages,
-    SessionPersistence,
-)
 from raychat.type_support import override
+from raychat.ui import terminal_backend as backend
+from raychat.validation import integer_field, object_field, text_field
+from tests.assertions import TypedTestCase
 from tests.plugin_support import package
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from typing_extensions import Unpack
 
+    from raychat.sdk import (
+        ApprovalCallback,
+        CancelCheck,
+        EventCallback,
+        Messages,
+        SessionPersistence,
+    )
 
-class KeyDecoderTests(unittest.TestCase):
+
+class KeyDecoderTests(TypedTestCase):
+    """Check KeyDecoder behavior and failure boundaries."""
+
     def test_pending_input_tracks_partial_utf8_escape_and_bracketed_paste(self) -> None:
+        """Check pending input tracks partial utf8 escape and bracketed paste."""
         decoder = runtime.KeyDecoder()
-        self.assertFalse(decoder.has_pending_input)
+        self.require(not (decoder.has_pending_input))
 
-        self.assertEqual(decoder.feed("\u2603".encode("utf-8")[:1]), [])
-        self.assertTrue(decoder.has_pending_input)
+        self.equal(decoder.feed("\u2603".encode("utf-8")[:1]), [])
+        self.require(decoder.has_pending_input)
         decoder.reset()
-        self.assertFalse(decoder.has_pending_input)
+        self.require(not (decoder.has_pending_input))
 
-        self.assertEqual(decoder.feed(b"\x1b"), [])
-        self.assertTrue(decoder.has_pending_input)
-        self.assertEqual(decoder.expire_escape(), [runtime.KeyEvent("escape")])
-        self.assertFalse(decoder.has_pending_input)
+        self.equal(decoder.feed(b"\x1b"), [])
+        self.require(decoder.has_pending_input)
+        self.equal(decoder.expire_escape(), [runtime.KeyEvent("escape")])
+        self.require(not (decoder.has_pending_input))
 
-        self.assertEqual(decoder.feed(b"\x1b[200~partial"), [])
-        self.assertTrue(decoder.has_pending_input)
-        self.assertEqual(
-            decoder.feed(b"\x1b[201~"),
-            [runtime.KeyEvent("paste", "partial")],
-        )
-        self.assertFalse(decoder.has_pending_input)
+        self.equal(decoder.feed(b"\x1b[200~partial"), [])
+        self.require(decoder.has_pending_input)
+        self.equal(decoder.feed(b"\x1b[201~"), [runtime.KeyEvent("paste", "partial")])
+        self.require(not (decoder.has_pending_input))
 
     def test_decodes_split_utf8_without_corruption(self) -> None:
+        """Check decodes split utf8 without corruption."""
         decoder = runtime.KeyDecoder()
         encoded = "A€🙂Z".encode()
         events = []
         for byte in encoded:
             events.extend(decoder.feed(bytes([byte])))
         events.extend(decoder.flush())
-        self.assertEqual("".join(event.text for event in events), "A€🙂Z")
-        self.assertTrue(all(event.kind == "text" for event in events))
+        self.equal("".join(event.text for event in events), "A€🙂Z")
+        self.require(all(event.kind == "text" for event in events))
 
     def test_decodes_split_csi_navigation_sequences(self) -> None:
+        """Check decodes split csi navigation sequences."""
         decoder = runtime.KeyDecoder()
         raw = b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F\x1b[3~\x1b[5~\x1b[6~"
         events = []
         for byte in raw:
             events.extend(decoder.feed(bytes([byte])))
-        self.assertEqual(
+        self.equal(
             [event.kind for event in events],
             [
                 "up",
@@ -88,20 +97,22 @@ class KeyDecoderTests(unittest.TestCase):
         )
 
     def test_decodes_ss3_and_tilde_home_end(self) -> None:
+        """Check decodes ss3 and tilde home end."""
         decoder = runtime.KeyDecoder()
         events = decoder.feed(b"\x1bOH\x1bOF\x1b[1~\x1b[4~\x1b[7~\x1b[8~")
-        self.assertEqual(
+        self.equal(
             [event.kind for event in events],
             ["home", "end", "home", "end", "home", "end"],
         )
 
     def test_decodes_split_sgr_mouse_wheel_with_modifiers(self) -> None:
+        """Check decodes split sgr mouse wheel with modifiers."""
         decoder = runtime.KeyDecoder()
         raw = b"\x1b[<64;10;20M\x1b[<69;200;3M\x1b[<0;4;5M\x1b[<0;4;5m"
         events = []
         for byte in raw:
             events.extend(decoder.feed(bytes([byte])))
-        self.assertEqual(
+        self.equal(
             events,
             [
                 runtime.KeyEvent("mouse_up"),
@@ -112,36 +123,41 @@ class KeyDecoderTests(unittest.TestCase):
         )
 
     def test_malformed_sgr_mouse_is_an_unknown_event(self) -> None:
-        self.assertEqual(
+        """Check malformed sgr mouse is an unknown event."""
+        self.equal(
             runtime.KeyDecoder().feed(b"\x1b[<64;;20M"),
             [runtime.KeyEvent("unknown", "\x1b[<64;;20M")],
         )
 
     def test_bracketed_paste_is_one_utf8_safe_event_across_chunks(self) -> None:
+        """Check bracketed paste is one utf8 safe event across chunks."""
         decoder = runtime.KeyDecoder()
         chunks = [b"\x1b[2", b"00~hello\n", "snowman: ☃".encode(), b"\x1b[20", b"1~"]
         events = []
         for chunk in chunks:
             events.extend(decoder.feed(chunk))
-        self.assertEqual(events, [runtime.KeyEvent("paste", "hello\nsnowman: ☃")])
+        self.equal(events, [runtime.KeyEvent("paste", "hello\nsnowman: ☃")])
 
     def test_flush_returns_unterminated_paste(self) -> None:
+        """Check flush returns unterminated paste."""
         decoder = runtime.KeyDecoder()
-        self.assertEqual(decoder.feed(b"\x1b[200~partial"), [])
-        self.assertEqual(decoder.flush(), [runtime.KeyEvent("paste", "partial")])
+        self.equal(decoder.feed(b"\x1b[200~partial"), [])
+        self.equal(decoder.flush(), [runtime.KeyEvent("paste", "partial")])
 
     def test_control_c_escapes_an_unterminated_bracketed_paste(self) -> None:
+        """Check control c escapes an unterminated bracketed paste."""
         decoder = runtime.KeyDecoder()
 
-        self.assertEqual(decoder.feed(b"\x1b[200~unfinished"), [])
-        self.assertTrue(decoder.has_pending_input)
-        self.assertEqual(decoder.feed(b"\x03"), [runtime.KeyEvent("interrupt")])
-        self.assertFalse(decoder.has_pending_input)
-        self.assertEqual(decoder.feed(b"safe"), [runtime.KeyEvent("text", "safe")])
+        self.equal(decoder.feed(b"\x1b[200~unfinished"), [])
+        self.require(decoder.has_pending_input)
+        self.equal(decoder.feed(b"\x03"), [runtime.KeyEvent("interrupt")])
+        self.require(not (decoder.has_pending_input))
+        self.equal(decoder.feed(b"safe"), [runtime.KeyEvent("text", "safe")])
 
     def test_paste_limit_rejects_and_consumes_until_closing_marker(self) -> None:
+        """Check paste limit rejects and consumes until closing marker."""
         decoder = runtime.KeyDecoder(max_paste_bytes=3)
-        self.assertEqual(
+        self.equal(
             decoder.feed(b"\x1b[200~four"),
             [
                 runtime.KeyEvent(
@@ -150,22 +166,24 @@ class KeyDecoderTests(unittest.TestCase):
                 ),
             ],
         )
-        self.assertTrue(decoder.has_pending_input)
-        self.assertEqual(decoder.feed(b"\n/quit\n\x1b[20"), [])
-        self.assertEqual(decoder.feed(b"1~"), [])
-        self.assertFalse(decoder.has_pending_input)
-        self.assertEqual(decoder.feed(b"ok"), [runtime.KeyEvent("text", "ok")])
+        self.require(decoder.has_pending_input)
+        self.equal(decoder.feed(b"\n/quit\n\x1b[20"), [])
+        self.equal(decoder.feed(b"1~"), [])
+        self.require(not (decoder.has_pending_input))
+        self.equal(decoder.feed(b"ok"), [runtime.KeyEvent("text", "ok")])
 
     def test_controls_and_crlf(self) -> None:
+        """Check controls and crlf."""
         events = runtime.KeyDecoder().feed(b"a\r\n\t\x7f\x03\x04\x0c")
-        self.assertEqual(
+        self.equal(
             [event.kind for event in events],
             ["text", "enter", "tab", "backspace", "interrupt", "eof", "refresh"],
         )
 
     def test_ctrl_a_and_ctrl_k_decode_to_portable_editing_events(self) -> None:
+        """Check ctrl a and ctrl k decode to portable editing events."""
         events = runtime.KeyDecoder().feed(b"abc\x01\x0b")
-        self.assertEqual(
+        self.equal(
             events,
             [
                 runtime.KeyEvent("text", "abc"),
@@ -175,100 +193,112 @@ class KeyDecoderTests(unittest.TestCase):
         )
 
     def test_standalone_escape_waits_until_flush(self) -> None:
+        """Check standalone escape waits until flush."""
         decoder = runtime.KeyDecoder()
-        self.assertEqual(decoder.feed(b"\x1b"), [])
-        self.assertEqual(decoder.flush(), [runtime.KeyEvent("escape")])
+        self.equal(decoder.feed(b"\x1b"), [])
+        self.equal(decoder.flush(), [runtime.KeyEvent("escape")])
 
     def test_lone_escape_can_expire_without_flushing_other_partial_input(self) -> None:
+        """Check lone escape can expire without flushing other partial input."""
         decoder = runtime.KeyDecoder()
-        self.assertFalse(decoder.pending_escape)
-        self.assertEqual(decoder.feed(b"\x1b"), [])
-        self.assertTrue(decoder.pending_escape)
-        self.assertEqual(decoder.expire_escape(), [runtime.KeyEvent("escape")])
-        self.assertFalse(decoder.pending_escape)
-        self.assertEqual(decoder.expire_escape(), [])
+        self.require(not (decoder.pending_escape))
+        self.equal(decoder.feed(b"\x1b"), [])
+        self.require(decoder.pending_escape)
+        self.equal(decoder.expire_escape(), [runtime.KeyEvent("escape")])
+        self.require(not (decoder.pending_escape))
+        self.equal(decoder.expire_escape(), [])
 
         decoder.feed("é".encode()[:1])
-        self.assertFalse(decoder.pending_escape)
-        self.assertEqual(decoder.expire_escape(), [])
-        self.assertEqual(
-            decoder.feed("é".encode()[1:]),
-            [runtime.KeyEvent("text", "é")],
-        )
+        self.require(not (decoder.pending_escape))
+        self.equal(decoder.expire_escape(), [])
+        self.equal(decoder.feed("é".encode()[1:]), [runtime.KeyEvent("text", "é")])
 
     def test_unknown_csi_is_single_non_text_event(self) -> None:
+        """Check unknown csi is single non text event."""
         event = runtime.KeyDecoder().feed(b"\x1b[99z")
-        self.assertEqual(event, [runtime.KeyEvent("unknown", "\x1b[99z")])
+        self.equal(event, [runtime.KeyEvent("unknown", "\x1b[99z")])
 
     def test_rejects_non_bytes_and_bad_limit(self) -> None:
-        with self.assertRaises(ValueError):
+        """Check rejects non bytes and bad limit."""
+        with self.rejected(ValueError):
             runtime.KeyDecoder(max_paste_bytes=0)
-        self.assertRaises(TypeError, runtime.KeyDecoder().feed, "text")
+        self.reject_unchecked_call(TypeError, runtime.KeyDecoder().feed, "text")
 
 
-class LineEditorTests(unittest.TestCase):
+class LineEditorTests(TypedTestCase):
+    """Check LineEditor behavior and failure boundaries."""
+
     def test_cursor_editing_and_submission(self) -> None:
+        """Check cursor editing and submission."""
         editor = runtime.LineEditor("ac")
         editor.handle(runtime.KeyEvent("left"))
         editor.handle(runtime.KeyEvent("text", "b"))
-        self.assertEqual((editor.text, editor.cursor), ("abc", 2))
+        self.equal((editor.text, editor.cursor), ("abc", 2))
         editor.handle(runtime.KeyEvent("home"))
         editor.handle(runtime.KeyEvent("delete"))
         editor.handle(runtime.KeyEvent("end"))
         editor.handle(runtime.KeyEvent("backspace"))
-        self.assertEqual(editor.text, "b")
-        self.assertEqual(editor.handle(runtime.KeyEvent("enter")), "b")
-        self.assertEqual((editor.text, editor.cursor), ("", 0))
+        self.equal(editor.text, "b")
+        self.equal(editor.handle(runtime.KeyEvent("enter")), "b")
+        self.equal((editor.text, editor.cursor), ("", 0))
 
     def test_input_cap_rejects_whole_insertion_and_preserves_draft(self) -> None:
+        """Check input cap rejects whole insertion and preserves draft."""
         editor = runtime.LineEditor("🙂", max_chars=4)
-        with self.assertRaisesRegex(ValueError, "exceeds 4 characters"):
+        with self.rejected(ValueError, "exceeds 4 characters"):
             editor.insert("abcde")
-        self.assertEqual((editor.text, editor.cursor, editor.revision), ("🙂", 1, 0))
-        self.assertEqual(editor.insert("abc"), 3)
-        self.assertEqual(editor.text, "🙂abc")
-        with self.assertRaisesRegex(ValueError, "0 available"):
+        self.equal((editor.text, editor.cursor, editor.revision), ("🙂", 1, 0))
+        self.equal(editor.insert("abc"), 3)
+        self.equal(editor.text, "🙂abc")
+        with self.rejected(ValueError, "0 available"):
             editor.insert("z")
-        self.assertEqual((editor.text, editor.cursor, editor.revision), ("🙂abc", 4, 1))
+        self.equal((editor.text, editor.cursor, editor.revision), ("🙂abc", 4, 1))
 
     def test_paste_normalizes_newlines_and_removes_nul(self) -> None:
+        """Check paste normalizes newlines and removes nul."""
         editor = runtime.LineEditor(max_chars=30)
         editor.handle(runtime.KeyEvent("paste", "a\r\nb\rc\x00"))
-        self.assertEqual(editor.text, "a\nb\nc")
+        self.equal(editor.text, "a\nb\nc")
 
     def test_revision_changes_only_when_state_changes(self) -> None:
+        """Check revision changes only when state changes."""
         editor = runtime.LineEditor()
         editor.handle(runtime.KeyEvent("left"))
-        self.assertEqual(editor.revision, 0)
+        self.equal(editor.revision, 0)
         editor.insert("x")
         editor.handle(runtime.KeyEvent("home"))
-        self.assertEqual(editor.revision, 2)
+        self.equal(editor.revision, 2)
         editor.handle(runtime.KeyEvent("home"))
-        self.assertEqual(editor.revision, 2)
+        self.equal(editor.revision, 2)
 
     def test_ctrl_a_then_ctrl_k_clears_and_kill_to_end_respects_cursor(self) -> None:
+        """Check ctrl a then ctrl k clears and kill to end respects cursor."""
         editor = runtime.LineEditor("alpha beta gamma")
         editor.set_text(editor.text, 6)
         editor.handle(runtime.KeyEvent("kill_to_end"))
-        self.assertEqual((editor.text, editor.cursor), ("alpha ", 6))
+        self.equal((editor.text, editor.cursor), ("alpha ", 6))
 
         editor.insert("replacement")
         editor.handle(runtime.KeyEvent("home"))
-        self.assertEqual(editor.cursor, 0)
+        self.equal(editor.cursor, 0)
         editor.handle(runtime.KeyEvent("kill_to_end"))
-        self.assertEqual((editor.text, editor.cursor), ("", 0))
+        self.equal((editor.text, editor.cursor), ("", 0))
 
     def test_set_text_validation(self) -> None:
+        """Check set text validation."""
         editor = runtime.LineEditor(max_chars=3)
-        with self.assertRaises(ValueError):
+        with self.rejected(ValueError):
             editor.set_text("four")
-        with self.assertRaises(ValueError):
+        with self.rejected(ValueError):
             editor.set_text("ok", 3)
-        self.assertRaises(TypeError, editor.handle, "left")
+        self.reject_unchecked_call(TypeError, editor.handle, "left")
 
 
 class FakeTerminalStream(io.StringIO):
-    def __init__(self, tty: bool, fd: int = 41) -> None:
+    """Check FakeTerminalStream behavior and failure boundaries."""
+
+    def __init__(self, *, tty: bool, fd: int = 41) -> None:
+        """Initialize explicit fixture state for the terminal or worker check."""
         super().__init__()
         self.tty = tty
         self.fd = fd
@@ -277,522 +307,570 @@ class FakeTerminalStream(io.StringIO):
 
     @override
     def isatty(self) -> bool:
+        """Report the configured TTY flag.
+
+        Returns
+        -------
+        bool
+            Whether the fixture represents a terminal.
+
+        """
         return self.tty
 
     @override
     def fileno(self) -> int:
+        """Expose the configured descriptor.
+
+        Returns
+        -------
+        int
+            The fake terminal descriptor.
+
+        """
         return self.fd
 
     @override
     def write(self, value: str) -> int:
+        """Record and store one complete write.
+
+        Returns
+        -------
+        int
+            The number of characters stored.
+
+        """
         self.writes.append(value)
         return super().write(value)
 
     @override
     def flush(self) -> None:
+        """Count explicit flushes before forwarding to the in-memory stream."""
         self.flushes += 1
         super().flush()
 
 
-class TerminalSessionTests(unittest.TestCase):
-    @unittest.skipUnless(os.name == "posix", "POSIX backend test")
-    def test_failed_enter_best_effort_exits_and_preserves_original_error(self) -> None:
-        class FailFirstFlushStream(FakeTerminalStream):
-            @override
-            def flush(self) -> None:
-                self.flushes += 1
-                if self.flushes == 1:
-                    error_message = "ENTER flush failed"
-                    raise OSError(error_message)
-                io.StringIO.flush(self)
+@dataclass
+class _PosixFixture:
+    attributes: backend.PosixAttributes = field(
+        default_factory=lambda: backend.PosixAttributes(
+            input_flags=1,
+            output_flags=2,
+            control_flags=3,
+            local_flags=4,
+            input_speed=5,
+            output_speed=6,
+            control_characters=(b"\x03", 127),
+        ),
+    )
+    restore_failure: OSError | None = None
+    data: bytes = b"keys"
+    operations: list[tuple[str, int, object]] = field(default_factory=list)
 
-        fake_termios = mock.Mock(TCSANOW=1)
-        fake_termios.tcgetattr.return_value = ["saved"]
-        fake_termios.tcsetattr.side_effect = OSError("restore failed")
-        output = FailFirstFlushStream(True)
-        session = runtime.TerminalSession(FakeTerminalStream(True), output)
+    def capture(self, fd: int) -> backend.PosixAttributes:
+        self.operations.append(("capture", fd, None))
+        return self.attributes
 
-        with (
-            mock.patch.object(runtime, "_termios", fake_termios),
-            mock.patch.object(runtime, "_tty", mock.Mock()),
+    def raw(self, fd: int) -> None:
+        self.operations.append(("raw", fd, None))
+
+    def restore(self, fd: int, attributes: backend.PosixAttributes) -> None:
+        self.operations.append(("restore", fd, attributes))
+        if self.restore_failure is not None:
+            raise self.restore_failure
+
+    def readable(self, fd: int, timeout: float) -> bool:
+        self.operations.append(("readable", fd, timeout))
+        return True
+
+    def read(self, fd: int, max_bytes: int) -> bytes:
+        self.operations.append(("read", fd, max_bytes))
+        return self.data
+
+
+@dataclass
+class _WindowsFixture:
+    input_handle: int = 0x1_0000_0123
+    output_handle: int = 0x1_0000_0456
+    input_mode: int = 0x0247
+    output_mode: int = 0x0001
+    reject_vt: bool = False
+    reject_restore: bool = False
+    set_calls: list[tuple[int, int]] = field(default_factory=list)
+    modes: dict[int, int] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.modes = {
+            self.input_handle: self.input_mode,
+            self.output_handle: self.output_mode,
+        }
+
+    def standard_handle(self, identifier: int) -> int:
+        return (
+            self.input_handle
+            if identifier == backend.WindowsBackend.STD_INPUT_HANDLE
+            else self.output_handle
+        )
+
+    def get_mode(self, handle: int) -> int:
+        return self.modes[handle]
+
+    def set_mode(self, handle: int, mode: int) -> bool:
+        self.set_calls.append((handle, mode))
+        if handle == self.input_handle and (
+            self.reject_restore
+            or (
+                self.reject_vt
+                and mode & backend.WindowsBackend.ENABLE_VIRTUAL_TERMINAL_INPUT
+            )
         ):
-            with self.assertRaisesRegex(OSError, "ENTER flush failed"):
-                session.__enter__()
+            return False
+        self.modes[handle] = mode
+        return True
 
-        self.assertEqual(
+    @staticmethod
+    def last_error() -> int:
+        return 123
+
+
+@dataclass
+class _KeyboardFixture:
+    characters: list[str] = field(default_factory=list)
+
+    def ready(self) -> bool:
+        return bool(self.characters)
+
+    def read_character(self) -> str:
+        return self.characters.pop(0)
+
+
+class _FailFirstFlushStream(FakeTerminalStream):
+    @override
+    def flush(self) -> None:
+        self.flushes += 1
+        if self.flushes == 1:
+            message = "ENTER flush failed"
+            raise OSError(message)
+        io.StringIO.flush(self)
+
+
+def _require_inactive(test: TypedTestCase, session: runtime.TerminalSession) -> None:
+    with test.rejected(RuntimeError):
+        session.read()
+    with test.rejected(RuntimeError):
+        session.present("outside the active context")
+
+
+def _raise_fixture_error(error: BaseException) -> None:
+    raise error
+
+
+@runtime_checkable
+class _NativeMetadata(Protocol):
+    argtypes: object
+    restype: object
+
+
+def _native_callback(factory: object, function: object) -> _NativeMetadata:
+    if not callable(factory):
+        message = "ctypes did not return a callable native callback factory."
+        raise TypeError(message)
+    result: object = factory(function)
+    if not isinstance(result, _NativeMetadata):
+        message = "The native callback lacks ctypes signature metadata."
+        raise TypeError(message)
+    return result
+
+
+class TerminalSessionTests(TypedTestCase):
+    """Check TerminalSession behavior and failure boundaries."""
+
+    def test_failed_enter_best_effort_exits_and_preserves_original_error(self) -> None:
+        """Check failed enter best effort exits and preserves original error."""
+        calls = _PosixFixture(restore_failure=OSError("restore failed"))
+        modes = backend.PosixBackend(calls)
+        output = _FailFirstFlushStream(tty=True)
+        session = runtime.TerminalSession(
+            FakeTerminalStream(tty=True),
+            output,
+            backend=modes,
+        )
+        with self.rejected(OSError, "ENTER flush failed"), session:
+            self.require(
+                condition=False,
+                message="Entering the terminal should have failed.",
+            )
+        self.equal(
             output.writes,
             [
                 runtime.TerminalSession.ENTER_SEQUENCE,
                 runtime.TerminalSession.EXIT_SEQUENCE,
             ],
         )
-        self.assertFalse(session._entered)
-        self.assertFalse(session._active)
-        fake_termios.tcsetattr.assert_called_once_with(41, 1, ["saved"])
+        _require_inactive(self, session)
+        self.equal(
+            calls.operations,
+            [
+                ("capture", 41, None),
+                ("raw", 41, None),
+                ("restore", 41, calls.attributes),
+            ],
+        )
+        modes.restore()
+        self.equal(len(calls.operations), 3)
 
-    @unittest.skipUnless(os.name == "posix", "POSIX backend test")
     def test_posix_lifecycle_restores_mode_and_present_is_one_write(self) -> None:
-        input_stream = FakeTerminalStream(True)
-        output_stream = FakeTerminalStream(True, 42)
-        fake_termios = mock.Mock(TCSANOW=7)
-        fake_termios.tcgetattr.return_value = ["saved"]
-        fake_tty = mock.Mock()
-        with (
-            mock.patch.object(runtime, "_termios", fake_termios),
-            mock.patch.object(runtime, "_tty", fake_tty),
-        ):
-            with runtime.TerminalSession(input_stream, output_stream) as session:
-                self.assertTrue(session.is_tty)
-                before = len(output_stream.writes)
-                session.present("FRAME")
-                self.assertEqual(len(output_stream.writes), before + 1)
-                self.assertEqual(output_stream.writes[-1], "\x1b[HFRAME")
-            fake_tty.setraw.assert_called_once_with(41, when=7)
-            fake_termios.tcsetattr.assert_called_once_with(41, 7, ["saved"])
-        self.assertEqual(
-            output_stream.writes[0],
-            runtime.TerminalSession.ENTER_SEQUENCE,
+        """Check posix lifecycle restores mode and present is one write."""
+        input_stream = FakeTerminalStream(tty=True)
+        output_stream = FakeTerminalStream(tty=True, fd=42)
+        calls = _PosixFixture()
+        with runtime.TerminalSession(
+            input_stream,
+            output_stream,
+            backend=backend.PosixBackend(calls),
+        ) as session:
+            self.require(session.is_tty)
+            before = len(output_stream.writes)
+            session.present("FRAME")
+            self.equal(len(output_stream.writes), before + 1)
+            self.equal(output_stream.writes[-1], "\x1b[HFRAME")
+        self.equal(
+            calls.operations,
+            [
+                ("capture", 41, None),
+                ("raw", 41, None),
+                ("restore", 41, calls.attributes),
+            ],
         )
-        self.assertEqual(
-            output_stream.writes[-1],
-            runtime.TerminalSession.EXIT_SEQUENCE,
-        )
-        self.assertIn("\x1b[?7l", output_stream.writes[0])
-        self.assertIn("\x1b[?7h", output_stream.writes[-1])
-        self.assertIn("\x1b[?1000h", output_stream.writes[0])
-        self.assertIn("\x1b[?1006h", output_stream.writes[0])
-        self.assertIn("\x1b[?1006l", output_stream.writes[-1])
-        self.assertIn("\x1b[?1000l", output_stream.writes[-1])
+        self.equal(output_stream.writes[0], runtime.TerminalSession.ENTER_SEQUENCE)
+        self.equal(output_stream.writes[-1], runtime.TerminalSession.EXIT_SEQUENCE)
+        self.require("\x1b[?7l" in output_stream.writes[0])
+        self.require("\x1b[?7h" in output_stream.writes[-1])
+        self.require("\x1b[?1000h" in output_stream.writes[0])
+        self.require("\x1b[?1006h" in output_stream.writes[0])
+        self.require("\x1b[?1006l" in output_stream.writes[-1])
+        self.require("\x1b[?1000l" in output_stream.writes[-1])
 
-    @unittest.skipUnless(os.name == "posix", "POSIX backend test")
     def test_posix_restores_after_body_exception(self) -> None:
-        fake_termios = mock.Mock(TCSANOW=1)
-        fake_termios.tcgetattr.return_value = [1, 2]
+        """Check posix restores after body exception."""
+        calls = _PosixFixture()
+        error = RuntimeError("boom")
         with (
-            mock.patch.object(runtime, "_termios", fake_termios),
-            mock.patch.object(runtime, "_tty", mock.Mock()),
+            self.rejected(RuntimeError, "boom"),
+            runtime.TerminalSession(
+                FakeTerminalStream(tty=True),
+                FakeTerminalStream(tty=True),
+                backend=backend.PosixBackend(calls),
+            ),
         ):
-            with self.assertRaisesRegex(RuntimeError, "boom"):
-                with runtime.TerminalSession(
-                    FakeTerminalStream(True),
-                    FakeTerminalStream(True),
-                ):
-                    error_message = "boom"
-                    raise RuntimeError(error_message)
-        fake_termios.tcsetattr.assert_called_once()
+            _raise_fixture_error(error)
+        self.equal(
+            calls.operations,
+            [
+                ("capture", 41, None),
+                ("raw", 41, None),
+                ("restore", 41, calls.attributes),
+            ],
+        )
 
-    @unittest.skipUnless(os.name == "posix", "POSIX backend test")
     def test_posix_read_uses_select_and_bounded_os_read(self) -> None:
-        fake_termios = mock.Mock(TCSANOW=1)
-        fake_termios.tcgetattr.return_value = [1]
-        fake_select = mock.Mock()
-        fake_select.select.return_value = ([41], [], [])
-        with (
-            mock.patch.object(runtime, "_termios", fake_termios),
-            mock.patch.object(runtime, "_tty", mock.Mock()),
-            mock.patch.object(runtime, "_select", fake_select),
-            mock.patch.object(os, "read", return_value=b"keys") as os_read,
-        ):
-            with runtime.TerminalSession(
-                FakeTerminalStream(True),
-                FakeTerminalStream(True),
-            ) as session:
-                self.assertEqual(session.read(0.25, 10), b"keys")
-        fake_select.select.assert_called_once_with([41], [], [], 0.25)
-        os_read.assert_called_once_with(41, 10)
+        """Check posix read uses select and bounded os read."""
+        calls = _PosixFixture()
+        with runtime.TerminalSession(
+            FakeTerminalStream(tty=True),
+            FakeTerminalStream(tty=True),
+            backend=backend.PosixBackend(calls),
+        ) as session:
+            self.equal(session.read(0.25, 10), b"keys")
+        self.equal(calls.operations[2:4], [("readable", 41, 0.25), ("read", 41, 10)])
 
-    @unittest.skipUnless(os.name == "posix", "POSIX backend test")
     def test_posix_readable_zero_byte_read_raises_eof(self) -> None:
-        fake_termios = mock.Mock(TCSANOW=1)
-        fake_termios.tcgetattr.return_value = [1]
-        fake_select = mock.Mock()
-        fake_select.select.return_value = ([41], [], [])
+        """Check posix readable zero byte read raises eof."""
+        calls = _PosixFixture(data=b"")
         with (
-            mock.patch.object(runtime, "_termios", fake_termios),
-            mock.patch.object(runtime, "_tty", mock.Mock()),
-            mock.patch.object(runtime, "_select", fake_select),
-            mock.patch.object(os, "read", return_value=b"") as os_read,
+            runtime.TerminalSession(
+                FakeTerminalStream(tty=True),
+                FakeTerminalStream(tty=True),
+                backend=backend.PosixBackend(calls),
+            ) as session,
+            self.rejected(EOFError, "input closed"),
         ):
-            with runtime.TerminalSession(
-                FakeTerminalStream(True),
-                FakeTerminalStream(True),
-            ) as session:
-                with self.assertRaisesRegex(EOFError, "input closed"):
-                    session.read(0.25, 10)
-        fake_select.select.assert_called_once_with([41], [], [], 0.25)
-        os_read.assert_called_once_with(41, 10)
+            session.read(0.25, 10)
+        self.equal(calls.operations[2:4], [("readable", 41, 0.25), ("read", 41, 10)])
+
+    def test_native_posix_adapter_preserves_syscall_arguments(self) -> None:
+        """Check immediate mode timing, selected descriptors and bounded OS reads."""
+        if os.name != "posix":
+            self.skipTest("The native terminal adapter requires POSIX modules.")
+        attributes = _PosixFixture().attributes
+        with (
+            mock.patch("termios.TCSANOW", 7),
+            mock.patch(
+                "termios.tcgetattr",
+                return_value=attributes.to_list(),
+            ) as capture,
+            mock.patch("tty.setraw") as raw,
+            mock.patch("termios.tcsetattr") as restore,
+            mock.patch("select.select", return_value=([41], [], [])) as ready,
+            mock.patch.object(os, "read", return_value=b"keys") as read,
+        ):
+            calls = backend.NativePosixCalls()
+            self.equal(calls.capture(41), attributes)
+            calls.raw(41)
+            calls.restore(41, attributes)
+            self.require(calls.readable(41, 0.25))
+            self.equal(calls.read(41, 10), b"keys")
+        capture.assert_called_once_with(41)
+        raw.assert_called_once_with(41, when=7)
+        restore.assert_called_once_with(41, 7, attributes.to_list())
+        empty: list[int] = []
+        expected_readable: list[int] = [41]
+        ready.assert_called_once_with(expected_readable, empty, empty, 0.25)
+        read.assert_called_once_with(41, 10)
 
     def test_non_tty_emits_no_control_codes_and_read_is_empty(self) -> None:
-        output = FakeTerminalStream(False)
-        with runtime.TerminalSession(FakeTerminalStream(False), output) as session:
-            self.assertFalse(session.is_tty)
+        """Check non tty emits no control codes and read is empty."""
+        output = FakeTerminalStream(tty=False)
+        with runtime.TerminalSession(FakeTerminalStream(tty=False), output) as session:
+            self.require(not (session.is_tty))
             session.present("plain")
-            self.assertEqual(session.read(), b"")
-        self.assertEqual(output.writes, ["plain"])
+            self.equal(session.read(), b"")
+        self.equal(output.writes, ["plain"])
 
     def test_present_and_read_require_active_context(self) -> None:
+        """Check present and read require active context."""
         session = runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
+            FakeTerminalStream(tty=False),
+            FakeTerminalStream(tty=False),
         )
-        with self.assertRaises(RuntimeError):
+        with self.rejected(RuntimeError):
             session.present("x")
-        with self.assertRaises(RuntimeError):
+        with self.rejected(RuntimeError):
             session.read()
 
     def test_read_rejects_nonfinite_or_boolean_timeouts(self) -> None:
+        """Check read rejects nonfinite or boolean timeouts."""
         with runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
+            FakeTerminalStream(tty=False),
+            FakeTerminalStream(tty=False),
         ) as session:
             for timeout in (-1, float("nan"), float("inf"), True):
-                with self.subTest(timeout=timeout):
-                    with self.assertRaises(ValueError):
-                        session.read(timeout)
+                with self.subTest(timeout=timeout), self.rejected(ValueError):
+                    session.read(timeout)
 
     def test_windows_extended_codes_cover_navigation(self) -> None:
-        self.assertEqual(runtime.TerminalSession._WINDOWS_EXTENDED["H"], b"\x1b[A")
-        self.assertEqual(runtime.TerminalSession._WINDOWS_EXTENDED["S"], b"\x1b[3~")
-        self.assertEqual(runtime.TerminalSession._WINDOWS_EXTENDED["Q"], b"\x1b[6~")
+        """Check windows extended codes cover navigation."""
+        self.equal(backend.WindowsBackend.EXTENDED_KEYS["H"], b"\x1b[A")
+        self.equal(backend.WindowsBackend.EXTENDED_KEYS["S"], b"\x1b[3~")
+        self.equal(backend.WindowsBackend.EXTENDED_KEYS["Q"], b"\x1b[6~")
 
     def test_windows_modes_keep_processed_input_and_restore_exactly(self) -> None:
-        input_handle = 0x1_0000_0123
-        output_handle = 0x1_0000_0456
-        original_input = (
-            runtime.TerminalSession._ENABLE_PROCESSED_INPUT
-            | runtime.TerminalSession._ENABLE_LINE_INPUT
-            | runtime.TerminalSession._ENABLE_ECHO_INPUT
-            | runtime.TerminalSession._ENABLE_VIRTUAL_TERMINAL_INPUT
-            | 0x0040
+        """Check windows modes keep processed input and restore exactly."""
+        console = _WindowsFixture()
+        modes = backend.WindowsBackend(console, _KeyboardFixture())
+        modes.configure(io.StringIO())
+        configured = console.modes[console.input_handle]
+        self.require(configured & backend.WindowsBackend.ENABLE_PROCESSED_INPUT)
+        self.require(not configured & backend.WindowsBackend.ENABLE_LINE_INPUT)
+        self.require(not configured & backend.WindowsBackend.ENABLE_ECHO_INPUT)
+        self.require(configured & backend.WindowsBackend.ENABLE_VIRTUAL_TERMINAL_INPUT)
+        self.equal(configured & 0x0040, 0x0040)
+        self.equal(
+            console.modes[console.output_handle],
+            console.output_mode
+            | backend.WindowsBackend.ENABLE_VIRTUAL_TERMINAL_PROCESSING,
         )
-        original_output = 0x0001
-
-        class Value:
-            def __init__(self, value: int = 0) -> None:
-                self.value = value
-
-        class Kernel:
-            def __init__(self) -> None:
-                self.modes = {
-                    input_handle: original_input,
-                    output_handle: original_output,
-                }
-                self.set_calls: list[tuple[int, int]] = []
-
-            def GetStdHandle(self, identifier: int) -> int:
-                return input_handle if identifier == -10 else output_handle
-
-            def GetConsoleMode(self, handle: int, mode: Value) -> int:
-                mode.value = self.modes[handle]
-                return 1
-
-            def SetConsoleMode(self, handle: int, mode: int) -> int:
-                self.set_calls.append((handle, mode))
-                self.modes[handle] = mode
-                return 1
-
-        kernel = Kernel()
-        fake_ctypes = SimpleNamespace(
-            windll=SimpleNamespace(kernel32=kernel),
-            c_ulong=Value,
-            byref=lambda value: value,
-            get_last_error=lambda: 0,
-        )
-        session = runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
-        )
-        with (
-            mock.patch.object(runtime, "_ctypes", fake_ctypes),
-            mock.patch.object(runtime, "_msvcrt", object()),
-        ):
-            session._configure_windows()
-            configured_input = kernel.modes[input_handle]
-            self.assertTrue(
-                configured_input & runtime.TerminalSession._ENABLE_PROCESSED_INPUT,
-            )
-            self.assertFalse(
-                configured_input & runtime.TerminalSession._ENABLE_LINE_INPUT,
-            )
-            self.assertFalse(
-                configured_input & runtime.TerminalSession._ENABLE_ECHO_INPUT,
-            )
-            self.assertTrue(
-                configured_input
-                & runtime.TerminalSession._ENABLE_VIRTUAL_TERMINAL_INPUT,
-            )
-            self.assertEqual(configured_input & 0x0040, 0x0040)
-            self.assertEqual(
-                kernel.modes[output_handle],
-                original_output
-                | runtime.TerminalSession._ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-            )
-            session._restore_modes()
-        self.assertEqual(kernel.modes[input_handle], original_input)
-        self.assertEqual(kernel.modes[output_handle], original_output)
-        self.assertEqual(
-            kernel.set_calls[-2:],
-            [(input_handle, original_input), (output_handle, original_output)],
+        modes.restore()
+        self.equal(console.modes[console.input_handle], console.input_mode)
+        self.equal(console.modes[console.output_handle], console.output_mode)
+        self.equal(
+            console.set_calls[-2:],
+            [
+                (console.input_handle, console.input_mode),
+                (console.output_handle, console.output_mode),
+            ],
         )
 
     def test_windows_input_mode_falls_back_when_vt_input_is_unavailable(self) -> None:
-        input_handle = 1
-        output_handle = 2
-
-        class Value:
-            def __init__(self, value: int = 0) -> None:
-                self.value = value
-
-        class Kernel:
-            def __init__(self) -> None:
-                self.modes = {input_handle: 0x47, output_handle: 0x01}
-                self.input_attempts: list[int] = []
-
-            def GetStdHandle(self, identifier: int) -> int:
-                return input_handle if identifier == -10 else output_handle
-
-            def GetConsoleMode(self, handle: int, mode: Value) -> int:
-                mode.value = self.modes[handle]
-                return 1
-
-            def SetConsoleMode(self, handle: int, mode: int) -> int:
-                if handle == input_handle:
-                    self.input_attempts.append(mode)
-                    if mode & runtime.TerminalSession._ENABLE_VIRTUAL_TERMINAL_INPUT:
-                        return 0
-                self.modes[handle] = mode
-                return 1
-
-        kernel = Kernel()
-        fake_ctypes = SimpleNamespace(
-            windll=SimpleNamespace(kernel32=kernel),
-            c_ulong=Value,
-            byref=lambda value: value,
-            get_last_error=lambda: 0,
+        """Check windows input mode falls back when vt input is unavailable."""
+        console = _WindowsFixture(
+            input_handle=1,
+            output_handle=2,
+            input_mode=0x47,
+            reject_vt=True,
         )
-        session = runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
+        modes = backend.WindowsBackend(console, _KeyboardFixture())
+        modes.configure(io.StringIO())
+        attempts = [
+            mode for handle, mode in console.set_calls if handle == console.input_handle
+        ]
+        self.equal(len(attempts), 2)
+        self.require(attempts[0] & backend.WindowsBackend.ENABLE_VIRTUAL_TERMINAL_INPUT)
+        self.require(
+            not attempts[1] & backend.WindowsBackend.ENABLE_VIRTUAL_TERMINAL_INPUT,
         )
-        with (
-            mock.patch.object(runtime, "_ctypes", fake_ctypes),
-            mock.patch.object(runtime, "_msvcrt", object()),
-        ):
-            session._configure_windows()
-            self.assertEqual(len(kernel.input_attempts), 2)
-            self.assertTrue(
-                kernel.input_attempts[0]
-                & runtime.TerminalSession._ENABLE_VIRTUAL_TERMINAL_INPUT,
-            )
-            self.assertFalse(
-                kernel.input_attempts[1]
-                & runtime.TerminalSession._ENABLE_VIRTUAL_TERMINAL_INPUT,
-            )
-            session._restore_modes()
+        modes.restore()
 
     def test_windows_restore_attempts_both_modes_reports_and_clears_state(self) -> None:
-        class Kernel:
-            def __init__(self) -> None:
-                self.calls: list[tuple[str, int]] = []
-
-            def SetConsoleMode(self, handle: str, mode: int) -> int:
-                self.calls.append((handle, mode))
-                return 0 if handle == "input" else 1
-
-        kernel = Kernel()
-        fake_ctypes = SimpleNamespace(get_last_error=lambda: 123)
+        """Check windows restore attempts both modes reports and clears state."""
+        console = _WindowsFixture(input_mode=11, output_mode=22)
+        modes = backend.WindowsBackend(console, _KeyboardFixture())
         session = runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
+            FakeTerminalStream(tty=True),
+            FakeTerminalStream(tty=True),
+            backend=modes,
         )
-        session._entered = True
-        session._active = True
-        session._win_kernel = kernel
-        session._win_input_handle = "input"
-        session._win_output_handle = "output"
-        session._win_input_mode = 11
-        session._win_output_mode = 22
-
-        with mock.patch.object(runtime, "_ctypes", fake_ctypes):
-            with self.assertRaisesRegex(OSError, "restore Windows input mode"):
-                session.__exit__(None, None, None)
-
-        self.assertEqual(kernel.calls, [("input", 11), ("output", 22)])
-        self.assertFalse(session._entered)
-        self.assertFalse(session._active)
-        self.assertIsNone(session._win_kernel)
-        self.assertIsNone(session._win_input_handle)
-        self.assertIsNone(session._win_output_handle)
-        self.assertIsNone(session._win_input_mode)
-        self.assertIsNone(session._win_output_mode)
+        with self.rejected(OSError, "restore Windows input mode"), session:
+            console.set_calls.clear()
+            console.reject_restore = True
+        self.equal(
+            console.set_calls,
+            [(console.input_handle, 11), (console.output_handle, 22)],
+        )
+        _require_inactive(self, session)
+        modes.restore()
+        self.equal(
+            console.set_calls,
+            [(console.input_handle, 11), (console.output_handle, 22)],
+        )
 
     def test_real_ctypes_functions_receive_pointer_sized_console_signatures(
         self,
     ) -> None:
-        class Function:
-            def __init__(self) -> None:
-                self.argtypes = None
-                self.restype = None
+        """Check real ctypes functions receive pointer sized console signatures."""
+        expected_handle = 0x1_0000_0123
 
-        class FakeCtypes:
-            _CFuncPtr = Function
-            c_ulong = object()
-            c_void_p = object()
-            c_int = object()
+        def full_handle(_identifier: int) -> int:
+            return expected_handle
 
-            @staticmethod
-            def POINTER(value: object) -> tuple[str, object]:
-                return ("pointer", value)
+        def success(*_arguments: object) -> int:
+            return 1
 
+        handle_factory: object = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_ulong)
+        query_factory: object = ctypes.CFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ulong),
+        )
+        update_factory: object = ctypes.CFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+        )
+        handle = _native_callback(handle_factory, full_handle)
+        query = _native_callback(query_factory, success)
+        update = _native_callback(update_factory, success)
         kernel = SimpleNamespace(
-            GetStdHandle=Function(),
-            GetConsoleMode=Function(),
-            SetConsoleMode=Function(),
+            GetStdHandle=handle,
+            GetConsoleMode=query,
+            SetConsoleMode=update,
         )
-        with mock.patch.object(runtime, "_ctypes", FakeCtypes):
-            runtime._set_windows_api_signatures(kernel)
-        self.assertEqual(kernel.GetStdHandle.argtypes, [FakeCtypes.c_ulong])
-        self.assertIs(kernel.GetStdHandle.restype, FakeCtypes.c_void_p)
-        self.assertEqual(
-            kernel.GetConsoleMode.argtypes,
-            [FakeCtypes.c_void_p, ("pointer", FakeCtypes.c_ulong)],
+        console = backend.NativeWindowsConsole(kernel)
+        self.equal(
+            console.standard_handle(backend.WindowsBackend.STD_INPUT_HANDLE),
+            expected_handle,
         )
-        self.assertIs(kernel.GetConsoleMode.restype, FakeCtypes.c_int)
-        self.assertEqual(
-            kernel.SetConsoleMode.argtypes,
-            [FakeCtypes.c_void_p, FakeCtypes.c_ulong],
-        )
-        self.assertIs(kernel.SetConsoleMode.restype, FakeCtypes.c_int)
+        handle_arguments: object = handle.argtypes
+        handle_result: object = handle.restype
+        query_arguments: object = query.argtypes
+        query_result: object = query.restype
+        update_arguments: object = update.argtypes
+        update_result: object = update.restype
+        self.equal(handle_arguments, [ctypes.c_ulong])
+        self.require(handle_result is ctypes.c_void_p)
+        self.equal(query_arguments, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)])
+        self.require(query_result is ctypes.c_int)
+        self.equal(update_arguments, [ctypes.c_void_p, ctypes.c_ulong])
+        self.require(update_result is ctypes.c_int)
 
     def test_mocked_windows_kernel_functions_are_not_decorated(self) -> None:
-        class FunctionType:
-            pass
+        """Check mocked windows kernel functions are not decorated."""
 
         def plain_function(*_args: object) -> int:
             return 1
 
-        fake_ctypes = SimpleNamespace(
-            _CFuncPtr=FunctionType,
-            c_ulong=object(),
-            c_void_p=object(),
-            c_int=object(),
-            POINTER=lambda value: ("pointer", value),
-        )
         kernel = SimpleNamespace(
             GetStdHandle=plain_function,
             GetConsoleMode=plain_function,
             SetConsoleMode=plain_function,
         )
-        with mock.patch.object(runtime, "_ctypes", fake_ctypes):
-            runtime._set_windows_api_signatures(kernel)
-        self.assertFalse(hasattr(plain_function, "argtypes"))
-        self.assertFalse(hasattr(plain_function, "restype"))
+        with self.rejected(TypeError, "Windows console function"):
+            backend.NativeWindowsConsole(kernel)
+        self.require(not hasattr(plain_function, "argtypes"))
+        self.require(not hasattr(plain_function, "restype"))
 
     def test_windows_reader_retains_utf8_and_escape_overflow(self) -> None:
-        class FakeMsvcrt:
-            def __init__(self) -> None:
-                self.characters = ["\ud83d", "\ude42", "\xe0", "H"]
-
-            def kbhit(self) -> bool:
-                return bool(self.characters)
-
-            def getwch(self) -> str:
-                return self.characters.pop(0)
-
-        session = runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
-        )
-        fake = FakeMsvcrt()
-        with mock.patch.object(runtime, "_msvcrt", fake):
-            first = session._read_windows(0, 3)
-            second = session._read_windows(0, 10)
-        self.assertEqual((first + second).decode("utf-8"), "🙂\x1b[A")
+        """Check windows reader retains utf8 and escape overflow."""
+        keyboard = _KeyboardFixture(["\ud83d", "\ude42", "\xe0", "H"])
+        reader = backend.WindowsBackend(_WindowsFixture(), keyboard)
+        first = reader.read(0, 3)
+        second = reader.read(0, 10)
+        self.equal((first + second).decode("utf-8"), "🙂\x1b[A")
 
     def test_windows_reader_forwards_ctrl_a_and_ctrl_k_to_decoder(self) -> None:
-        class FakeMsvcrt:
-            def __init__(self) -> None:
-                self.characters = ["\x01", "\x0b"]
-
-            def kbhit(self) -> bool:
-                return bool(self.characters)
-
-            def getwch(self) -> str:
-                return self.characters.pop(0)
-
-        session = runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
+        """Check windows reader forwards ctrl a and ctrl k to decoder."""
+        reader = backend.WindowsBackend(
+            _WindowsFixture(),
+            _KeyboardFixture(["\x01", "\x0b"]),
         )
-        with mock.patch.object(runtime, "_msvcrt", FakeMsvcrt()):
-            raw = session._read_windows(0, 10)
-        self.assertEqual(
-            runtime.KeyDecoder().feed(raw),
+        self.equal(
+            runtime.KeyDecoder().feed(reader.read(0, 10)),
             [runtime.KeyEvent("home"), runtime.KeyEvent("kill_to_end")],
         )
 
     def test_windows_reader_forwards_vt_mouse_reports_to_decoder(self) -> None:
-        class FakeMsvcrt:
-            def __init__(self) -> None:
-                self.characters = list("\x1b[<64;9;7M\x1b[<65;9;7M")
-
-            def kbhit(self) -> bool:
-                return bool(self.characters)
-
-            def getwch(self) -> str:
-                return self.characters.pop(0)
-
-        session = runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
+        """Check windows reader forwards vt mouse reports to decoder."""
+        reader = backend.WindowsBackend(
+            _WindowsFixture(),
+            _KeyboardFixture(list("\x1b[<64;9;7M\x1b[<65;9;7M")),
         )
-        with mock.patch.object(runtime, "_msvcrt", FakeMsvcrt()):
-            raw = session._read_windows(0, 100)
-        self.assertEqual(
-            runtime.KeyDecoder().feed(raw),
+        self.equal(
+            runtime.KeyDecoder().feed(reader.read(0, 100)),
             [runtime.KeyEvent("mouse_up"), runtime.KeyEvent("mouse_down")],
         )
 
     def test_windows_reader_retains_split_surrogate(self) -> None:
-        class FakeMsvcrt:
-            def __init__(self) -> None:
-                self.characters = ["\ud83d"]
-
-            def kbhit(self) -> bool:
-                return bool(self.characters)
-
-            def getwch(self) -> str:
-                return self.characters.pop(0)
-
-        session = runtime.TerminalSession(
-            FakeTerminalStream(False),
-            FakeTerminalStream(False),
-        )
-        fake = FakeMsvcrt()
-        with mock.patch.object(runtime, "_msvcrt", fake):
-            self.assertEqual(session._read_windows(0, 10), b"")
-            fake.characters.append("\ude42")
-            self.assertEqual(session._read_windows(0, 10).decode("utf-8"), "🙂")
+        """Check windows reader retains split surrogate."""
+        keyboard = _KeyboardFixture(["\ud83d"])
+        reader = backend.WindowsBackend(_WindowsFixture(), keyboard)
+        self.equal(reader.read(0, 10), b"")
+        keyboard.characters.append("\ude42")
+        self.equal(reader.read(0, 10).decode("utf-8"), "🙂")
 
 
 class FakeClock:
+    """Check FakeClock behavior and failure boundaries."""
+
     def __init__(self) -> None:
+        """Initialize explicit fixture state for the terminal or worker check."""
         self.now = 0.0
         self.sleeps: list[float] = []
 
     def __call__(self) -> float:
+        """Return the deterministic clock value.
+
+        Returns
+        -------
+        float
+            The current simulated time.
+
+        """
         return self.now
 
     def sleep(self, seconds: float) -> None:
+        """Record the requested sleep and advance the fake clock."""
         self.sleeps.append(seconds)
         self.now += seconds
 
     def advance(self, seconds: float) -> None:
+        """Move the fake clock forward by the requested interval."""
         self.now += seconds
 
 
-class FrameSchedulerTests(unittest.TestCase):
+class FrameSchedulerTests(TypedTestCase):
+    """Check FrameScheduler behavior and failure boundaries."""
+
     def test_60hz_uses_absolute_deadlines_without_drift(self) -> None:
+        """Check 60hz uses absolute deadlines without drift."""
         clock = FakeClock()
         scheduler = runtime.FrameScheduler(60, clock=clock, sleeper=clock.sleep)
         starts = []
@@ -803,22 +881,24 @@ class FrameSchedulerTests(unittest.TestCase):
             scheduler.end_frame(tick)
         expected = [index / 60.0 for index in range(5)]
         for actual, target in zip(starts, expected, strict=True):
-            self.assertAlmostEqual(actual, target, places=12)
+            self.almost_equal(actual, target, places=12)
 
     def test_skips_late_frames_and_returns_to_grid(self) -> None:
+        """Check skips late frames and returns to grid."""
         clock = FakeClock()
         scheduler = runtime.FrameScheduler(60, clock=clock, sleeper=clock.sleep)
         first = scheduler.begin_frame()
         scheduler.end_frame(first)
         clock.advance(0.055)
         late = scheduler.begin_frame()
-        self.assertEqual(late.sequence, 3)
-        self.assertEqual(late.skipped, 2)
-        self.assertEqual(scheduler.total_skipped, 2)
-        self.assertAlmostEqual(late.scheduled, 3 / 60.0)
+        self.equal(late.sequence, 3)
+        self.equal(late.skipped, 2)
+        self.equal(scheduler.total_skipped, 2)
+        self.almost_equal(late.scheduled, 3 / 60.0)
         scheduler.end_frame(late)
 
     def test_ewma_render_time_and_utilization(self) -> None:
+        """Check ewma render time and utilization."""
         clock = FakeClock()
         scheduler = runtime.FrameScheduler(
             fps=100,
@@ -829,29 +909,31 @@ class FrameSchedulerTests(unittest.TestCase):
         tick = scheduler.begin_frame()
         clock.advance(0.004)
         first = scheduler.end_frame(tick)
-        self.assertAlmostEqual(first.ewma_render_seconds, 0.004)
+        self.almost_equal(first.ewma_render_seconds, 0.004)
         tick = scheduler.begin_frame()
         clock.advance(0.008)
         second = scheduler.end_frame(tick)
-        self.assertAlmostEqual(second.ewma_render_seconds, 0.006)
-        self.assertAlmostEqual(second.utilization, 0.6)
-        self.assertIsNotNone(second.ewma_interval_seconds)
+        self.almost_equal(second.ewma_render_seconds, 0.006)
+        self.almost_equal(second.utilization, 0.6)
+        self.require((second.ewma_interval_seconds) is not None)
 
     def test_requires_end_before_next_begin_and_matching_tick(self) -> None:
+        """Check requires end before next begin and matching tick."""
         clock = FakeClock()
         scheduler = runtime.FrameScheduler(clock=clock, sleeper=clock.sleep)
         tick = scheduler.begin_frame()
-        with self.assertRaises(RuntimeError):
+        with self.rejected(RuntimeError):
             scheduler.begin_frame()
         fake = runtime.FrameTick(0, 0, 0, 0, 0, None)
-        with self.assertRaises(RuntimeError):
+        with self.rejected(RuntimeError):
             scheduler.end_frame(fake)
         scheduler.end_frame(tick)
 
     def test_rejects_nonfinite_timing_parameters(self) -> None:
-        with self.assertRaises(ValueError):
+        """Check rejects nonfinite timing parameters."""
+        with self.rejected(ValueError):
             runtime.FrameScheduler(float("nan"))
-        with self.assertRaises(ValueError):
+        with self.rejected(ValueError):
             runtime.FrameScheduler(60, ewma_alpha=float("inf"))
 
 
@@ -860,6 +942,19 @@ def collect_until(
     kind: str,
     timeout: float = 2.0,
 ) -> tuple[workers.WorkerEvent, list[workers.WorkerEvent]]:
+    """Collect every event through the requested lifecycle notification.
+
+    Returns
+    -------
+    tuple[workers.WorkerEvent, list[workers.WorkerEvent]]
+        The matched event and the complete ordered batch through that event.
+
+    Raises
+    ------
+    AssertionError
+        If the requested event does not arrive before the deadline.
+
+    """
     deadline = time.monotonic() + timeout
     collected: list[workers.WorkerEvent] = []
     while time.monotonic() < deadline:
@@ -873,6 +968,8 @@ def collect_until(
 
 
 class WorkerCallbacks(TypedDict):
+    """Check WorkerCallbacks behavior and failure boundaries."""
+
     max_steps: int | None
     event_callback: EventCallback
     approval_callback: ApprovalCallback
@@ -880,7 +977,11 @@ class WorkerCallbacks(TypedDict):
 
 
 class ScriptedSend(Protocol):
-    def __call__(self, task: str, /, **kwargs: Unpack[WorkerCallbacks]) -> str: ...
+    """Check ScriptedSend behavior and failure boundaries."""
+
+    def __call__(self, task: str, /, **kwargs: Unpack[WorkerCallbacks]) -> str:
+        """Accept one prompt and its concrete worker callback mapping."""
+        ...
 
 
 class ScriptedConversation:
@@ -889,6 +990,7 @@ class ScriptedConversation:
     store: SessionPersistence | None = None
 
     def __init__(self, send: ScriptedSend) -> None:
+        """Initialize explicit fixture state for the terminal or worker check."""
         self.send = send
 
     def run(
@@ -900,9 +1002,22 @@ class ScriptedConversation:
         approval_callback: ApprovalCallback | None = None,
         cancel_check: CancelCheck | None = None,
     ) -> str:
-        assert event_callback is not None
-        assert approval_callback is not None
-        assert cancel_check is not None
+        """Forward one task with every required worker callback.
+
+        Returns
+        -------
+        str
+            The response produced by the scripted send function.
+
+        Raises
+        ------
+        AssertionError
+            If the worker omits a required callback.
+
+        """
+        if event_callback is None or approval_callback is None or cancel_check is None:
+            message = "Worker execution must supply every managed callback."
+            raise AssertionError(message)
         return self.send(
             prompt,
             max_steps=max_steps,
@@ -911,31 +1026,52 @@ class ScriptedConversation:
             cancel_check=cancel_check,
         )
 
-    def snapshot(self) -> Messages:
+    @staticmethod
+    def snapshot() -> Messages:
+        """Return the empty history for this callback-only conversation.
+
+        Returns
+        -------
+        Messages
+            No retained provider messages.
+
+        """
         return []
 
-    def export_snapshot(self) -> dict[str, Any]:
+    @staticmethod
+    def export_snapshot() -> dict[str, object]:
+        """Export an empty state with the ordinary persistence shape.
+
+        Returns
+        -------
+        dict[str, object]
+            Empty history and plugin state.
+
+        """
         return {"history": [], "state": {}}
 
-    def restore_snapshot(self, value: Mapping[str, Any]) -> None:
-        pass
+    def restore_snapshot(self, value: Mapping[str, object]) -> None:
+        """Accept a state handoff without retaining fixture-only state."""
 
     def validate_context(self) -> None:
-        pass
+        """Accept the empty history used by this conversation fixture."""
 
     def reset(self) -> None:
-        pass
+        """Keep the fixture history empty after a requested reset."""
 
     def checkpoint(self, owner: str) -> None:
-        pass
+        """Accept a checkpoint without writing fixture state."""
 
     def close(self) -> None:
-        pass
+        """Complete fixture cleanup without external resources."""
 
 
-class AgentWorkerTests(unittest.TestCase):
+class AgentWorkerTests(TypedTestCase):
+    """Check AgentWorker behavior and failure boundaries."""
+
     @override
     def setUp(self) -> None:
+        """Create an isolated workspace and home for the worker test."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -946,6 +1082,7 @@ class AgentWorkerTests(unittest.TestCase):
     def test_generic_command_runner_cancels_and_reuses_without_owning_conversation(
         self,
     ) -> None:
+        """Generic command runner cancels and reuses without owning conversation."""
         started = threading.Event()
 
         def run(task: str, cancel: CancelCheck, notify: EventCallback) -> str:
@@ -957,30 +1094,34 @@ class AgentWorkerTests(unittest.TestCase):
             notify("notification", {"message": "runner reusable"})
             return "replacement ready"
 
-        worker = workers.AgentWorker(None, task_runner=run)
+        worker = workers.AgentWorker(None, execution=workers.WorkerExecution(task=run))
         try:
             job = worker.submit("block")
-            self.assertTrue(started.wait(2))
-            self.assertTrue(worker.cancel_current(job))
+            self.require(started.wait(2))
+            self.require(worker.cancel_current(job))
             cancelled, _ = collect_until(worker, "cancelled")
-            self.assertEqual(cancelled.payload["job_id"], job)
+            self.equal(cancelled.payload["job_id"], job)
             replacement = worker.submit("replacement")
             completed, events = collect_until(worker, "completed")
-            self.assertEqual(completed.payload["job_id"], replacement)
-            self.assertEqual(completed.payload["result"], "replacement ready")
-            self.assertTrue(any(event.kind == "notification" for event in events))
-            self.assertIsNone(worker.session)
-            self.assertIsNone(worker.session_factory)
+            self.equal(completed.payload["job_id"], replacement)
+            self.equal(completed.payload["result"], "replacement ready")
+            self.require(any(event.kind == "notification" for event in events))
+            self.require((worker.session) is None)
+            self.require((worker.session_factory) is None)
         finally:
             worker.stop()
-            self.assertTrue(worker.join(2))
+            self.require(worker.join(2))
 
-        with self.assertRaises(TypeError):
-            workers.AgentWorker(lambda _: "not owned", task_runner=run)
+        with self.rejected(TypeError):
+            workers.AgentWorker(
+                lambda _: "not owned",
+                execution=workers.WorkerExecution(task=run),
+            )
 
     def test_deferred_reload_notifies_original_session_after_job_completion(
         self,
     ) -> None:
+        """Check deferred reload notifies original session after job completion."""
         plugin = package(
             self.root / "deferred",
             "from raychat.sdk import CommandDefinition\n"
@@ -989,8 +1130,10 @@ class AgentWorkerTests(unittest.TestCase):
             "    def update(args, ctx):\n"
             "        ctx.update_plugins()\n"
             "        return 'reload queued'\n"
-            "    api.register_command(CommandDefinition('update', update, while_running=True))\n"
-            "    api.on(PLUGINS_RELOADED, lambda event, ctx: ctx.emit('ui', {'session': 'child'}))\n",
+            "    api.register_command(CommandDefinition('update', update, "
+            "while_running=True))\n"
+            "    api.on(PLUGINS_RELOADED, lambda event, ctx: "
+            "ctx.emit('ui', {'session': 'child'}))\n",
         )
         host = Runtime(self.root)
         host.load([import_plugin(plugin)])
@@ -1000,7 +1143,10 @@ class AgentWorkerTests(unittest.TestCase):
             self.root,
             runtime=host,
         )
-        worker = workers.AgentWorker(None, session_factory=lambda: session)
+        worker = workers.AgentWorker(
+            None,
+            execution=workers.WorkerExecution(factory=lambda: session),
+        )
         other = workers.AgentWorker(lambda _: "unused")
         try:
             # An application command pins the registry while the worker queues
@@ -1008,37 +1154,38 @@ class AgentWorkerTests(unittest.TestCase):
             with host.operation():
                 job = worker.submit("/update")
                 completed, _ = collect_until(worker, "completed")
-                self.assertEqual(completed.payload["job_id"], job)
+                self.equal(completed.payload["job_id"], job)
                 collect_until(worker, "idle")
-                self.assertEqual(host.generation, 0)
-            self.assertEqual(host.generation, 1)
+                self.equal(host.generation, 0)
+            self.equal(host.generation, 1)
             notification, events = collect_until(worker, "notification")
-            self.assertIn("Plugin generation 1 active", notification.payload["message"])
-            self.assertEqual(notification.payload["scope"], "session")
-            self.assertNotIn("job_id", notification.payload)
-            navigation = next(event for event in events if event.kind == "ui")
-            self.assertEqual(
-                navigation.payload,
-                {"scope": "session", "session": "child"},
+            self.require(
+                ("Plugin generation 1 active")
+                in (text_field(notification.payload["message"], "message")),
             )
-            self.assertEqual(other.drain_events(), [])
+            self.equal(notification.payload["scope"], "session")
+            self.require(("job_id") not in (notification.payload))
+            navigation = next(event for event in events if event.kind == "ui")
+            self.equal(navigation.payload, {"scope": "session", "session": "child"})
+            self.equal(other.drain_events(), [])
             replacement = worker.submit("replacement")
             completed, _ = collect_until(worker, "completed")
-            self.assertEqual(completed.payload["job_id"], replacement)
-            self.assertEqual(completed.payload["result"], "replacement ready")
+            self.equal(completed.payload["job_id"], replacement)
+            self.equal(completed.payload["result"], "replacement ready")
         finally:
             worker.stop()
             other.stop()
-            self.assertTrue(worker.join(2))
-            self.assertTrue(other.join(2))
+            self.require(worker.join(2))
+            self.require(other.join(2))
 
     def test_cancelled_job_keeps_deferred_notices_but_discards_deferred_navigation(
         self,
     ) -> None:
+        """Cancelled job keeps deferred notices but discards deferred navigation."""
         callbacks: list[EventCallback] = []
         started = threading.Event()
 
-        def run(task: str, **options: Unpack[WorkerCallbacks]) -> str:
+        def run(_task: str, **options: Unpack[WorkerCallbacks]) -> str:
             callbacks.append(options["event_callback"])
             started.set()
             while True:
@@ -1047,55 +1194,58 @@ class AgentWorkerTests(unittest.TestCase):
 
         worker = workers.AgentWorker(
             None,
-            session_factory=lambda: ScriptedConversation(run),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(run),
+            ),
         )
         try:
             job = worker.submit("cancel this task")
-            self.assertTrue(started.wait(2))
-            self.assertTrue(worker.cancel_current(job))
+            self.require(started.wait(2))
+            self.require(worker.cancel_current(job))
             collect_until(worker, "cancelled")
             collect_until(worker, "idle")
             notify = callbacks[0]
             notify("ui", {"scope": "session", "session": "stale-child"})
-            self.assertEqual(worker.drain_events(), [])
+            self.equal(worker.drain_events(), [])
             notify("notification", {"scope": "session", "message": "update rejected"})
             event, _ = collect_until(worker, "notification")
-            self.assertEqual(event.payload["message"], "update rejected")
-            self.assertNotIn("job_id", event.payload)
+            self.equal(event.payload["message"], "update rejected")
+            self.require(("job_id") not in (event.payload))
             for kind in ("ui", "notification", "done", "request"):
-                with self.subTest(kind=kind), self.assertRaises(workers._TaskCancelled):
+                with self.subTest(kind=kind), self.rejected(workers.TaskCancelled):
                     payload = (
                         {} if kind in {"ui", "notification"} else {"scope": "session"}
                     )
                     notify(kind, payload)
             worker.stop()
-            self.assertTrue(worker.join(2))
+            self.require(worker.join(2))
             worker.drain_events()
             notify("notification", {"scope": "session", "message": "retired"})
             notify("ui", {"scope": "session", "session": "retired"})
-            self.assertEqual(worker.drain_events(), [])
+            self.equal(worker.drain_events(), [])
         finally:
             worker.stop()
-            self.assertTrue(worker.join(2))
+            self.require(worker.join(2))
 
     def test_rejects_invalid_poll_and_queue_timeouts(self) -> None:
+        """Check rejects invalid poll and queue timeouts."""
         for timeout in (0, -1, float("nan"), float("inf"), True):
-            with self.subTest(poll_timeout=timeout):
-                with self.assertRaises(ValueError):
-                    workers.AgentWorker(
-                        lambda _messages: "",
-                        approval_poll_seconds=timeout,
-                    )
+            with self.subTest(poll_timeout=timeout), self.rejected(ValueError):
+                workers.AgentWorker(
+                    lambda _messages: "",
+                    approval_poll_seconds=timeout,
+                )
 
         worker = workers.AgentWorker(lambda _messages: "")
         for timeout in (-1, float("nan"), float("inf"), True):
             with self.subTest(queue_timeout=timeout):
-                with self.assertRaises(ValueError):
+                with self.rejected(ValueError):
                     worker.get_event(timeout)
-                with self.assertRaises(ValueError):
+                with self.rejected(ValueError):
                     worker.join(timeout)
 
     def test_integrates_with_real_run_agent_and_approval(self) -> None:
+        """Check integrates with real run agent and approval."""
         replies = iter(
             [
                 '{"action":"write","path":"made.txt","content":"made"}',
@@ -1111,19 +1261,27 @@ class AgentWorkerTests(unittest.TestCase):
             )
             job_id = worker.submit("write a file")
             approval, _ = collect_until(worker, "approval_required")
-            self.assertEqual(approval.payload["job_id"], job_id)
-            self.assertTrue(
-                worker.respond_approval(approval.payload["approval_id"], True),
+            self.equal(approval.payload["job_id"], job_id)
+            self.require(
+                worker.respond_approval(
+                    integer_field(
+                        approval.payload["approval_id"],
+                        "approval_id",
+                        minimum=1,
+                    ),
+                    approved=True,
+                ),
             )
             completed, _ = collect_until(worker, "completed")
-            self.assertEqual(completed.payload["result"], "verified")
-            self.assertEqual((Path(directory) / "made.txt").read_text(), "made")
+            self.equal(completed.payload["result"], "verified")
+            self.equal((Path(directory) / "made.txt").read_text(), "made")
             worker.stop()
-            self.assertTrue(worker.join(2))
+            self.require(worker.join(2))
 
     def test_default_worker_reuses_history_across_jobs_and_reset_clears_it(
         self,
     ) -> None:
+        """Check default worker reuses history across jobs and reset clears it."""
         calls = []
 
         def chat(messages: Messages) -> str:
@@ -1132,7 +1290,9 @@ class AgentWorkerTests(unittest.TestCase):
                 message["content"]
                 for message in messages
                 if message["role"] == "user"
-                and not message["content"].startswith(RESULT_PREFIX)
+                and not message["content"].startswith(
+                    SETTINGS.chat.protocol.result_prefix,
+                )
             ]
             current = prompts[-1]
             return '{"action":"done","message":' + repr(current).replace("'", '"') + "}"
@@ -1145,31 +1305,33 @@ class AgentWorkerTests(unittest.TestCase):
         try:
             first_id = worker.submit("first prompt")
             first, _ = collect_until(worker, "completed")
-            self.assertEqual(first.payload["job_id"], first_id)
+            self.equal(first.payload["job_id"], first_id)
 
             second_id = worker.submit("second prompt")
             second, _ = collect_until(worker, "completed")
-            self.assertEqual(second.payload["job_id"], second_id)
-            self.assertIn("first prompt", [item["content"] for item in calls[-1]])
-            self.assertIn(
-                '{"action":"done","message":"first prompt"}',
-                [item["content"] for item in calls[-1]],
+            self.equal(second.payload["job_id"], second_id)
+            self.require(("first prompt") in ([item["content"] for item in calls[-1]]))
+            self.require(
+                ('{"action":"done","message":"first prompt"}')
+                in ([item["content"] for item in calls[-1]]),
             )
-            self.assertIn("second prompt", [item["content"] for item in calls[-1]])
+            self.require(("second prompt") in ([item["content"] for item in calls[-1]]))
 
             worker.reset()
             collect_until(worker, "reset")
             worker.submit("fresh prompt")
             collect_until(worker, "completed")
             rendered = [item["content"] for item in calls[-1]]
-            self.assertIn("fresh prompt", rendered)
-            self.assertNotIn("first prompt", rendered)
-            self.assertNotIn("second prompt", rendered)
+            self.require(("fresh prompt") in (rendered))
+            self.require(("first prompt") not in (rendered))
+            self.require(("second prompt") not in (rendered))
         finally:
             worker.stop()
-            self.assertTrue(worker.join(2))
+            self.require(worker.join(2))
 
     def test_worker_is_non_daemon_and_forwards_events_then_completes(self) -> None:
+        """Check worker is non daemon and forwards events then completes."""
+
         def send(task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
             nested = {"value": 1}
             payload = {"step": 1, "nested": nested}
@@ -1179,92 +1341,138 @@ class AgentWorkerTests(unittest.TestCase):
 
         worker = workers.AgentWorker(
             None,
-            session_factory=lambda: ScriptedConversation(send),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(send),
+            ),
         )
-        self.assertFalse(worker.thread.daemon)
+        self.require(not (worker.thread.daemon))
         job_id = worker.submit("job")
         completed, seen = collect_until(worker, "completed")
         request = next(event for event in seen if event.kind == "request")
-        self.assertEqual(request.payload["nested"]["value"], 1)
-        self.assertEqual(request.payload["job_id"], job_id)
-        self.assertEqual(
-            completed.payload,
-            {"job_id": job_id, "result": "finished job"},
-        )
+        self.equal(object_field(request.payload["nested"], "nested")["value"], 1)
+        self.equal(request.payload["job_id"], job_id)
+        self.equal(completed.payload, {"job_id": job_id, "result": "finished job"})
         worker.stop()
-        self.assertTrue(worker.join(2))
+        self.require(worker.join(2))
 
     def test_approval_round_trip_and_monotonic_ids(self) -> None:
+        """Check approval round trip and monotonic ids."""
+
         def send(task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
             approved = kwargs["approval_callback"]({"action": "write", "path": task})
             return "yes" if approved else "no"
 
         worker = workers.AgentWorker(
             None,
-            session_factory=lambda: ScriptedConversation(send),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(send),
+            ),
         )
         first_job = worker.submit("one")
         first, _ = collect_until(worker, "approval_required")
-        self.assertEqual(first.payload["job_id"], first_job)
-        self.assertTrue(worker.respond_approval(first.payload["approval_id"], True))
-        self.assertFalse(worker.respond_approval(first.payload["approval_id"], False))
+        self.equal(first.payload["job_id"], first_job)
+        self.require(
+            worker.respond_approval(
+                integer_field(first.payload["approval_id"], "approval_id", minimum=1),
+                approved=True,
+            ),
+        )
+        self.require(
+            not (
+                worker.respond_approval(
+                    integer_field(
+                        first.payload["approval_id"],
+                        "approval_id",
+                        minimum=1,
+                    ),
+                    approved=False,
+                )
+            ),
+        )
         completed, _ = collect_until(worker, "completed")
-        self.assertEqual(completed.payload["result"], "yes")
+        self.equal(completed.payload["result"], "yes")
 
         worker.submit("two")
         second, _ = collect_until(worker, "approval_required")
-        self.assertGreater(second.payload["approval_id"], first.payload["approval_id"])
-        self.assertTrue(worker.respond_approval(second.payload["approval_id"], False))
+        self.require(
+            (integer_field(second.payload["approval_id"], "approval_id", minimum=1))
+            > (integer_field(first.payload["approval_id"], "approval_id", minimum=1)),
+        )
+        self.require(
+            worker.respond_approval(
+                integer_field(second.payload["approval_id"], "approval_id", minimum=1),
+                approved=False,
+            ),
+        )
         completed, _ = collect_until(worker, "completed")
-        self.assertEqual(completed.payload["result"], "no")
+        self.equal(completed.payload["result"], "no")
         worker.stop()
-        self.assertTrue(worker.join(2))
+        self.require(worker.join(2))
 
     def test_conversation_error_is_notification_and_worker_returns_idle(self) -> None:
-        def send(task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
+        """Check conversation error is notification and worker returns idle."""
+
+        def send(_task: str, **_kwargs: Unpack[WorkerCallbacks]) -> str:
             error_message = "bad run"
             raise ValueError(error_message)
 
         worker = workers.AgentWorker(
             None,
-            session_factory=lambda: ScriptedConversation(send),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(send),
+            ),
         )
         worker.submit("job")
         error, _ = collect_until(worker, "error")
-        self.assertEqual(error.payload["error_type"], "ValueError")
-        self.assertEqual(error.payload["message"], "bad run")
+        self.equal(error.payload["error_type"], "ValueError")
+        self.equal(error.payload["message"], "bad run")
         idle, _ = collect_until(worker, "idle")
-        self.assertEqual(idle.payload, {})
+        self.equal(idle.payload, {})
         worker.stop()
-        self.assertTrue(worker.join(2))
+        self.require(worker.join(2))
 
     def test_stop_unblocks_pending_approval_and_cancels(self) -> None:
+        """Check stop unblocks pending approval and cancels."""
         entered = threading.Event()
 
-        def send(task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
+        def send(_task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
             entered.set()
             kwargs["approval_callback"]({"action": "run", "argv": ["x"]})
             return "unreachable"
 
         worker = workers.AgentWorker(
             None,
-            session_factory=lambda: ScriptedConversation(send),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(send),
+            ),
             approval_poll_seconds=0.005,
         )
         worker.submit("job")
         approval, _ = collect_until(worker, "approval_required")
-        self.assertTrue(entered.is_set())
+        self.require(entered.is_set())
         worker.stop()
-        self.assertTrue(worker.join(2))
-        self.assertFalse(worker.respond_approval(approval.payload["approval_id"], True))
+        self.require(worker.join(2))
+        self.require(
+            not (
+                worker.respond_approval(
+                    integer_field(
+                        approval.payload["approval_id"],
+                        "approval_id",
+                        minimum=1,
+                    ),
+                    approved=True,
+                )
+            ),
+        )
         remaining = worker.drain_events()
-        self.assertIn("cancelled", [event.kind for event in remaining])
-        self.assertIn("stopped", [event.kind for event in remaining])
+        self.require(("cancelled") in ([event.kind for event in remaining]))
+        self.require(("stopped") in ([event.kind for event in remaining]))
 
     def test_stop_cooperatively_cancels_a_custom_conversation(self) -> None:
+        """Check stop cooperatively cancels a custom conversation."""
         entered = threading.Event()
 
-        def send(task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
+        def send(_task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
             entered.set()
             while True:
                 kwargs["cancel_check"]()
@@ -1272,89 +1480,105 @@ class AgentWorkerTests(unittest.TestCase):
 
         worker = workers.AgentWorker(
             None,
-            session_factory=lambda: ScriptedConversation(send),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(send),
+            ),
         )
         job_id = worker.submit("long custom task")
-        self.assertTrue(entered.wait(1))
+        self.require(entered.wait(1))
 
         started = time.monotonic()
         worker.stop()
-        self.assertTrue(worker.join(1))
-        self.assertLess(time.monotonic() - started, 0.5)
+        self.require(worker.join(1))
+        maximum_stop_seconds = 0.5
+        self.require((time.monotonic() - started) < maximum_stop_seconds)
 
         events = worker.drain_events()
-        self.assertTrue(
+        self.require(
             any(
                 event.kind == "cancelled" and event.payload.get("job_id") == job_id
                 for event in events
             ),
         )
-        self.assertEqual(events[-1].kind, "stopped")
+        self.equal(events[-1].kind, "stopped")
 
     def test_stop_reports_every_job_that_was_accepted_before_it(self) -> None:
+        """Check stop reports every job that was accepted before it."""
         entered = threading.Event()
         release = threading.Event()
 
-        def send(task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
+        def send(_task: str, **_kwargs: Unpack[WorkerCallbacks]) -> str:
             entered.set()
             release.wait(2)
             return "late result"
 
         worker = workers.AgentWorker(
             None,
-            session_factory=lambda: ScriptedConversation(send),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(send),
+            ),
         )
         first = worker.submit("first")
-        self.assertTrue(entered.wait(2))
+        self.require(entered.wait(2))
         second = worker.submit("second")
         worker.stop()
-        with self.assertRaisesRegex(RuntimeError, "stopping"):
+        with self.rejected(RuntimeError, "stopping"):
             worker.submit("too late")
         release.set()
-        self.assertTrue(worker.join(2))
+        self.require(worker.join(2))
 
         cancelled = {
             event.payload["job_id"]
             for event in worker.drain_events()
             if event.kind == "cancelled"
         }
-        self.assertEqual(cancelled, {first, second})
+        self.equal(cancelled, {first, second})
 
     def test_run_options_forward_but_managed_callbacks_are_reserved(self) -> None:
+        """Check run options forward but managed callbacks are reserved."""
         captured: dict[str, object] = {}
 
-        def send(task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
+        def send(_task: str, **kwargs: Unpack[WorkerCallbacks]) -> str:
             captured.update(kwargs)
             return "ok"
 
         worker = workers.AgentWorker(
             None,
             workspace="here",
-            session_factory=lambda: ScriptedConversation(send),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(send),
+            ),
             run_options={"max_steps": 7},
         )
         worker.submit("job")
         collect_until(worker, "completed")
         worker.stop()
         worker.join(2)
-        self.assertEqual(worker.workspace, "here")
-        self.assertEqual(captured["max_steps"], 7)
-        self.assertTrue(callable(captured["event_callback"]))
-        with self.assertRaises(ValueError):
+        self.equal(worker.workspace, "here")
+        self.equal(captured["max_steps"], 7)
+        self.require(callable(captured["event_callback"]))
+        with self.rejected(ValueError):
             workers.AgentWorker(
                 lambda _messages: "",
                 run_options={"event_callback": lambda: None},
             )
 
     def test_context_manager_starts_and_stops_idle_worker(self) -> None:
+        """Check context manager starts and stops idle worker."""
+
+        def send(_task: str, **_options: Unpack[WorkerCallbacks]) -> str:
+            return "ok"
+
         worker = workers.AgentWorker(
             None,
-            session_factory=lambda: ScriptedConversation(lambda *a, **k: "ok"),
+            execution=workers.WorkerExecution(
+                factory=lambda: ScriptedConversation(send),
+            ),
         )
         with worker:
-            self.assertTrue(worker.is_alive)
+            self.require(worker.is_alive)
             collect_until(worker, "idle")
-        self.assertFalse(worker.is_alive)
+        self.require(not (worker.is_alive))
 
 
 if __name__ == "__main__":

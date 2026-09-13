@@ -9,35 +9,55 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import json
 import threading
 import time
 import zipfile
-from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from .drive_tui import TerminalChat
 
 from raychat.type_support import override
+from raychat.validation import object_field
 
 from .accept_tui import SOURCE, Case, wait_file
+from .acceptance_support import (
+    json_text,
+    read_object,
+    require,
+    verification_paths,
+    write_report,
+)
 from .adversarial_agents_tui import choose, wait_for
-from .drive_tui import TerminalChat
 
 
 def package_bytes() -> bytes:
+    """Build an independently generated package that records its own activation.
+
+    Returns
+    -------
+    bytes
+        The complete ZIP bytes served by the controlled HTTP fixture.
+
+    """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr(
             "plugin.json",
-            json.dumps(
+            json_text(
                 {
                     "id": "downloaded_plugin",
                     "version": "1.0.0",
                     "sdk": 4,
                     "entrypoint": "__init__:register",
                     "description": "Cancellable package download acceptance fixture",
-                    "instructions": "Operator command /download-ready reports readiness.",
+                    ("instructions"): (
+                        "Operator command /download-ready reports readiness."
+                    ),
                     "requires": {},
                 },
             ),
@@ -54,7 +74,10 @@ def package_bytes() -> bytes:
 
 
 class StalledPackage:
+    """Control response timing while real TUI commands perform package downloads."""
+
     def __init__(self, *, body: bool) -> None:
+        """Start a server that pauses before headers or inside the response body."""
         self.entered = threading.Event()
         self.release = threading.Event()
         self.finished = threading.Event()
@@ -63,31 +86,34 @@ class StalledPackage:
 
         class Handler(BaseHTTPRequestHandler):
             @override
-            def log_message(self, format: str, *args: object) -> None:
+            def log_message(self, _format: str, *args: object) -> None:
                 pass
 
             def do_GET(self) -> None:
                 try:
-                    if not body:
-                        owner.entered.set()
-                        if not owner.release.wait(45):
-                            return
-                    self.send_response(200)
-                    self.send_header("Content-Length", str(len(raw)))
-                    self.end_headers()
-                    if body:
-                        self.wfile.write(raw[:16])
-                        self.wfile.flush()
-                        owner.entered.set()
-                        if not owner.release.wait(45):
-                            return
-                        self.wfile.write(raw[16:])
-                    else:
-                        self.wfile.write(raw)
+                    self._response()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 finally:
                     owner.finished.set()
+
+            def _response(self) -> None:
+                if not body:
+                    owner.entered.set()
+                    if not owner.release.wait(45):
+                        return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                if body:
+                    self.wfile.write(raw[:16])
+                    self.wfile.flush()
+                    owner.entered.set()
+                    if not owner.release.wait(45):
+                        return
+                    self.wfile.write(raw[16:])
+                else:
+                    self.wfile.write(raw)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -96,6 +122,7 @@ class StalledPackage:
         self.url = f"http://127.0.0.1:{self.server.server_port}/plugin.zip"
 
     def close(self) -> None:
+        """Release pending responses and close the local server thread."""
         self.release.set()
         self.server.shutdown()
         self.server.server_close()
@@ -103,47 +130,88 @@ class StalledPackage:
 
 
 def assert_not_installed(case: Case) -> None:
-    assert not (case.work / "PLUGIN_ACTIVATED").exists()
+    """Verify cancelled downloads created neither activation nor a package receipt."""
+    require(
+        not (case.work / ("PLUGIN_ACTIVATED")).exists(),
+        ("package_download_tui: not (case.work / 'PLUGIN_ACTIVATED').exists()"),
+    )
     for path in case.home.rglob("plugins.lock.json"):
-        assert "downloaded_plugin" not in json.loads(path.read_text())["packages"]
+        require(
+            ("downloaded_plugin")
+            not in object_field(read_object(path)[("packages")], ("packages")),
+            (
+                "package_download_tui: 'downloaded_plugin' not in json_object"
+                "(path.read_text())['packages']"
+            ),
+        )
 
 
 def cancel_download(chat: TerminalChat, case: Case, server: StalledPackage) -> float:
+    """Cancel a stalled download and verify an immediate replacement prompt.
+
+    Returns
+    -------
+    float
+        The elapsed seconds between cancellation input and the stopped status.
+
+    """
     chat.send("/plugins install " + server.url + "\r")
     wait_for(chat, server.entered.is_set, 15)
-    assert not server.release.is_set()
+    require(
+        not server.release.is_set(),
+        ("package_download_tui: not server.release.is_set()"),
+    )
     chat.wait("[RUNNING")
     started = time.monotonic()
     chat.send(b"\x1b\x1b")
     chat.wait("Task stopped", 5)
     elapsed = time.monotonic() - started
     assert_not_installed(case)
-    assert not server.release.is_set()
+    require(
+        not server.release.is_set(),
+        ("package_download_tui: not server.release.is_set()"),
+    )
     chat.command_complete("AFTER_DOWNLOAD_CANCEL", "ANSWER_AFTER_DOWNLOAD_CANCEL", 5)
-    assert not server.release.is_set()
+    require(
+        not server.release.is_set(),
+        ("package_download_tui: not server.release.is_set()"),
+    )
     assert_not_installed(case)
     return elapsed
 
 
 def download(case: Case, *, body: bool) -> None:
+    """Check cancellation, absent installation state and successful retry."""
     server = StalledPackage(body=body)
     chat = case.chat()
     try:
         chat.wait("Main chat", 30)
         elapsed = cancel_download(chat, case, server)
         case.checks += [
-            f"stalled {'body' if body else 'headers'} download stopped in {elapsed:.3f}s",
-            "replacement prompt completes while the original server response is still blocked",
-            "cancelled download does not register code or create an installation receipt",
+            (
+                f"stalled {'body' if body else 'headers'} download stopped "
+                f"in {elapsed:.3f}s"
+            ),
+            (
+                "replacement prompt completes while the original server respo"
+                "nse is still blocked"
+            ),
+            (
+                "cancelled download does not register code or create an insta"
+                "llation receipt"
+            ),
         ]
         server.release.set()
         wait_for(chat, server.finished.is_set)
         assert_not_installed(case)
         chat.command_complete("/plugins install " + server.url, '"downloaded_plugin"')
         chat.command_complete("/download-ready", "DOWNLOAD_COMMAND_READY")
-        assert (case.work / "PLUGIN_ACTIVATED").exists()
+        require(
+            (case.work / ("PLUGIN_ACTIVATED")).exists(),
+            ("package_download_tui: (case.work / 'PLUGIN_ACTIVATED').exists()"),
+        )
         case.checks.append(
-            "retry installs the same URL and activates its new command live"
+            "retry installs the same URL and activates its new command live",
         )
     finally:
         server.close()
@@ -151,6 +219,7 @@ def download(case: Case, *, body: bool) -> None:
 
 
 def focused_child(case: Case) -> None:
+    """Check download cancellation preserves sibling work and session navigation."""
     server = StalledPackage(body=True)
     chat = case.chat()
     try:
@@ -164,23 +233,47 @@ def focused_child(case: Case) -> None:
         elapsed = cancel_download(chat, case, server)
         chat.command_complete("LEFT_STILL_USABLE", "ANSWER_LEFT_STILL_USABLE")
         chat.command("/parent", "Main chat")
-        assert "[RUNNING" in chat.screen()
-        assert "WORKFLOW_FINISHED" not in chat.screen()
+        require(
+            ("[RUNNING") in chat.screen(),
+            ("package_download_tui: '[RUNNING' in chat.screen()"),
+        )
+        require(
+            ("WORKFLOW_FINISHED") not in chat.screen(),
+            ("package_download_tui: 'WORKFLOW_FINISHED' not in chat.screen()"),
+        )
         choose(chat, "right")
-        assert "[RUNNING" in chat.screen()
-        assert not (case.work / "BLOCK_RIGHT.release").exists()
+        require(
+            ("[RUNNING") in chat.screen(),
+            ("package_download_tui: '[RUNNING' in chat.screen()"),
+        )
+        require(
+            not (case.work / ("BLOCK_RIGHT.release")).exists(),
+            ("package_download_tui: not (case.work / 'BLOCK_RIGHT.release').exists()"),
+        )
         case.checks += [
-            f"focused workflow child's package download stops in {elapsed:.3f}s and its chat accepts replacements",
+            (
+                f"focused workflow child's package download stops in {elapsed:.3f}s "
+                "and its chat accepts replacements"
+            ),
             "focused command cancellation leaves the parent and sibling running",
-            "keyboard and mouse navigation remain responsive while the download server is blocked",
+            (
+                "keyboard and mouse navigation remain responsive while the do"
+                "wnload server is blocked"
+            ),
         ]
         chat.command("/parent", "Main chat")
         (case.work / "BLOCK_RIGHT.release").touch()
         chat.wait("WORKFLOW_FINISHED", 20)
-        assert not server.release.is_set()
+        require(
+            not server.release.is_set(),
+            ("package_download_tui: not server.release.is_set()"),
+        )
         assert_not_installed(case)
         case.checks.append(
-            "parent workflow completes before the cancelled download server is released"
+            (
+                "parent workflow completes before the cancelled download serv"
+                "er is released"
+            ),
         )
         server.release.set()
         wait_for(chat, server.finished.is_set)
@@ -202,23 +295,31 @@ SCENARIOS: dict[str, Callable[[Case], None]] = {
 
 
 def main() -> None:
+    """Run requested stalled-download scenarios and record their results.
+
+    Raises
+    ------
+    SystemExit
+        At least one scenario failed.
+
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
-    args = parser.parse_args()
-    results: dict[str, Any] = {}
+    args = verification_paths(parser.parse_args())
+    results: dict[str, object] = {}
     failures = []
-    for name in args.scenario or SCENARIOS:
-        case = Case(args.root.resolve(), args.output.resolve() / name)
+    for name in args.scenarios or SCENARIOS:
+        case = Case(args.root, args.output / name)
         try:
             SCENARIOS[name](case)
             results[name] = case.result()
         except (AssertionError, OSError, ValueError) as exc:
             failures.append(name)
             results[name] = {"passed": False, "error": str(exc), "checks": case.checks}
-    (args.output / "result.json").write_text(json.dumps(results, indent=2))
-    print(json.dumps(results, indent=2), flush=True)
+    (args.output / "result.json").write_text(json_text(results, indent=2))
+    write_report(results, indent=2)
     if failures:
         raise SystemExit(1)
 

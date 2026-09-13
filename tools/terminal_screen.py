@@ -1,4 +1,3 @@
-# Copyright 2026
 """Interpret RayChat's terminal output independently of its cell renderer."""
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ class TerminalScreen:
     """Retain visible cells across full frames, cursor updates and split reads."""
 
     def __init__(self, columns: int, rows: int) -> None:
-        """Create an empty viewport with the application's no-wrap behavior."""
+        """Create an empty viewport with ordinary terminal autowrap enabled."""
         self.columns = columns
         self.rows = rows
         self.cells = [[" "] * columns for _ in range(rows)]
@@ -63,7 +62,7 @@ class TerminalScreen:
             elif char == "\n":
                 self._linefeed()
             elif char == "\b":
-                self.column = max(0, self.column - 1)
+                self.column = max(0, min(self.column, self.columns - 1) - 1)
             elif char >= " " and char != "\x7f":
                 self._paint(char)
             offset += 1
@@ -82,12 +81,7 @@ class TerminalScreen:
 
     def _control(self, parameters: str, command: str) -> None:
         if parameters.startswith("?"):
-            if parameters == "?7" and command in {"h", "l"}:
-                self.autowrap = command == "h"
-            if parameters == "?1049" and command == "h":
-                self.cells = [[" "] * self.columns for _ in range(self.rows)]
-                self.styles = [[""] * self.columns for _ in range(self.rows)]
-                self.row = self.column = 0
+            self._private_mode(parameters[1:], command)
             return
         if command in {"H", "f"}:
             parts = parameters.split(";")
@@ -102,14 +96,38 @@ class TerminalScreen:
             self.cells = [[" "] * self.columns for _ in range(self.rows)]
             self.styles = [[""] * self.columns for _ in range(self.rows)]
 
+    def _private_mode(self, parameters: str, command: str) -> None:
+        if command not in {"h", "l"}:
+            return
+        for mode in parameters.split(";"):
+            if mode == "7":
+                self.autowrap = command == "h"
+                self.column = min(self.column, self.columns - 1)
+            elif mode == "1049" and command == "h":
+                self.cells = [[" "] * self.columns for _ in range(self.rows)]
+                self.styles = [[""] * self.columns for _ in range(self.rows)]
+                self.row = self.column = 0
+
     def _linefeed(self) -> None:
+        self.column = min(self.column, self.columns - 1)
         if self.row < self.rows - 1:
             self.row += 1
-        else:
-            self.cells.pop(0)
-            self.styles.pop(0)
-            self.cells.append([" "] * self.columns)
-            self.styles.append([""] * self.columns)
+            return
+        self.cells.pop(0)
+        self.styles.pop(0)
+        self.cells.append([" "] * self.columns)
+        self.styles.append([""] * self.columns)
+
+    def _advance_before_glyph(self, width: int) -> None:
+        if self.column >= self.columns:
+            if self.autowrap:
+                self.column = 0
+                self._linefeed()
+            else:
+                self.column = self.columns - 1
+        elif width == _WIDE and self.column + width > self.columns and self.autowrap:
+            self.column = 0
+            self._linefeed()
 
     def _paint(self, char: str) -> None:
         if unicodedata.category(char).startswith("M"):
@@ -119,12 +137,8 @@ class TerminalScreen:
                     column -= 1
                 self.cells[self.row][column] += char
             return
-        if self.column >= self.columns:
-            if not self.autowrap:
-                return
-            self.column = 0
-            self._linefeed()
         width = _WIDE if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+        self._advance_before_glyph(width)
         self.cells[self.row][self.column] = char
         self.styles[self.row][self.column] = self.style
         if width == _WIDE and self.column + 1 < self.columns:

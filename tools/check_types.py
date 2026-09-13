@@ -1,4 +1,3 @@
-# Copyright 2026
 """Check every source, including the launcher that shares the package's name."""
 
 from __future__ import annotations

@@ -6,22 +6,44 @@ import hashlib
 import threading
 import time
 import unittest
-from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
+from typing import TYPE_CHECKING
 from unittest import mock
 
 import raychat.ui.state as tui_state
+from tests.assertions import TypedTestCase
+from tests.transport_support import captured
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+_C0_END = 0x1F
+_C1_START = 0x7F
+_C1_END = 0x9F
+_WRAP_WIDTH = 5
+_APPROVAL_WIDTH = 37
+_ENTRY_WIDTH = 12
+_MIN_ENTRY_LINES = 2
+_MAX_CACHED_READ_SECONDS = 0.25
 
 
-def assert_terminal_inert(test: unittest.TestCase, text: str) -> None:
+def assert_terminal_inert(test: TypedTestCase, text: str) -> None:
+    """Reject terminal controls and bidi directives in already sanitized text."""
     for character in text:
         codepoint = ord(character)
-        test.assertFalse(codepoint <= 0x1F or 0x7F <= codepoint <= 0x9F)
-        test.assertNotIn(codepoint, tui_state._BIDI_CONTROLS)
+        test.require(not (codepoint <= _C0_END or _C1_START <= codepoint <= _C1_END))
+        test.require((codepoint) not in (tui_state.BIDI_CONTROLS))
 
 
-class SanitizingTests(unittest.TestCase):
+def _assign_field(value: object, name: str, item: object) -> None:
+    setattr(value, name, item)
+
+
+class SanitizingTests(TypedTestCase):
+    """Check Sanitizing behavior and failure boundaries."""
+
     def test_consumes_csi_osc_and_other_terminal_strings(self) -> None:
+        """Check consumes csi osc and other terminal strings."""
         hostile = (
             "plain "
             "\x1b[31mred\x1b[0m "
@@ -33,14 +55,16 @@ class SanitizingTests(unittest.TestCase):
 
         safe = tui_state.sanitize_text(hostile)
 
-        self.assertEqual(safe, "plain red after link green end")
+        self.equal(safe, "plain red after link green end")
         assert_terminal_inert(self, safe)
 
     def test_unterminated_control_string_cannot_leak_payload(self) -> None:
-        self.assertEqual(tui_state.sanitize_text("before\x1b]2;hidden"), "before")
-        self.assertEqual(tui_state.sanitize_text("before\x9dhidden"), "before")
+        """Check unterminated control string cannot leak payload."""
+        self.equal(tui_state.sanitize_text("before\x1b]2;hidden"), "before")
+        self.equal(tui_state.sanitize_text("before\x9dhidden"), "before")
 
     def test_replaces_every_remaining_c0_c1_and_bidi_control(self) -> None:
+        """Check replaces every remaining c0 c1 and bidi control."""
         raw = (
             "A\x00\n\t\x7f\x80\x9cB"
             "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
@@ -49,25 +73,27 @@ class SanitizingTests(unittest.TestCase):
 
         safe = tui_state.sanitize_text(raw)
 
-        self.assertIn("A", safe)
-        self.assertIn("B", safe)
-        self.assertIn("C D", safe)
-        self.assertIn("\u2400", safe)
-        self.assertIn("\u240a", safe)
-        self.assertIn("\u2409", safe)
-        self.assertIn("\u2421", safe)
+        self.require(("A") in (safe))
+        self.require(("B") in (safe))
+        self.require(("C D") in (safe))
+        self.require(("\u2400") in (safe))
+        self.require(("\u240a") in (safe))
+        self.require(("\u2409") in (safe))
+        self.require(("\u2421") in (safe))
         assert_terminal_inert(self, safe)
 
     def test_caps_source_and_replaces_unpaired_surrogates(self) -> None:
+        """Check caps source and replaces unpaired surrogates."""
         safe = tui_state.sanitize_text("abc\ud800xyz", max_chars=4)
-        self.assertEqual(safe, "abc�…")
+        self.equal(safe, "abc�…")
         safe.encode("utf-8")
 
     def test_validation(self) -> None:
-        self.assertRaises(TypeError, tui_state.sanitize_text, 1)
+        """Check validation."""
+        self.reject_unchecked_call(TypeError, tui_state.sanitize_text, 1)
         for limit in (-1, 1.5, True):
             with self.subTest(limit=limit):
-                self.assertRaises(
+                self.reject_unchecked_call(
                     (TypeError, ValueError),
                     tui_state.sanitize_text,
                     "x",
@@ -75,66 +101,84 @@ class SanitizingTests(unittest.TestCase):
                 )
 
 
-class DisplayGeometryTests(unittest.TestCase):
+class DisplayGeometryTests(TypedTestCase):
+    """Check DisplayGeometry behavior and failure boundaries."""
+
     def test_display_width_approximates_wide_and_combining_text(self) -> None:
-        self.assertEqual(tui_state.display_width("abc"), 3)
-        self.assertEqual(tui_state.display_width("界"), 2)
-        self.assertEqual(tui_state.display_width("e\u0301"), 1)
-        self.assertEqual(tui_state.display_width("\x1b"), 0)
+        """Check display width approximates wide and combining text."""
+        self.equal(tui_state.display_width("abc"), 3)
+        self.equal(tui_state.display_width("界"), 2)
+        self.equal(tui_state.display_width("e\u0301"), 1)
+        self.equal(tui_state.display_width("\x1b"), 0)
 
     def test_truncation_is_sanitized_bounded_and_cluster_safe(self) -> None:
+        """Check truncation is sanitized bounded and cluster safe."""
         value = tui_state.truncate_display("e\u0301clair\x1b[31m!", 5)
-        self.assertEqual(value, "e\u0301cla…")
-        self.assertLessEqual(tui_state.display_width(value), 5)
+        self.equal(value, "e\u0301cla…")
+        self.require((tui_state.display_width(value)) <= _WRAP_WIDTH)
         assert_terminal_inert(self, value)
-        self.assertEqual(tui_state.truncate_display("界", 1), "…")
-        self.assertEqual(tui_state.truncate_display("abc", 0), "")
+        self.equal(tui_state.truncate_display("界", 1), "…")
+        self.equal(tui_state.truncate_display("abc", 0), "")
 
     def test_wrap_is_word_aware_and_never_exceeds_width(self) -> None:
+        """Check wrap is word aware and never exceeds width."""
         lines = tui_state.wrap_display("one two superlongword 界", 5)
-        self.assertEqual(lines[:2], ("one", "two"))
-        self.assertEqual("".join(lines[2:4]), "superlongw")
-        self.assertTrue(all(tui_state.display_width(line) <= 5 for line in lines))
-        self.assertEqual(tui_state.wrap_display("界界", 1), ("�", "�"))
+        self.equal(lines[:2], ("one", "two"))
+        self.equal("".join(lines[2:4]), "superlongw")
+        self.require(
+            all(tui_state.display_width(line) <= _WRAP_WIDTH for line in lines),
+        )
+        self.equal(tui_state.wrap_display("界界", 1), ("�", "�"))
 
     def test_long_unbroken_wrap_clusters_once_and_completes_quickly(self) -> None:
+        """Check long unbroken wrap clusters once and completes quickly."""
         source = "x" * 4_096
         original_clusters = tui_state.display_clusters
+        inspected_characters = 0
+
+        def clusters(text: str) -> list[str]:
+            nonlocal inspected_characters
+            inspected_characters += len(text)
+            return original_clusters(text)
+
         started = time.perf_counter()
-        with mock.patch.object(
-            tui_state,
-            "display_clusters",
-            wraps=original_clusters,
-        ) as clusters:
+        with mock.patch.object(tui_state, "display_clusters", new=clusters):
             lines = tui_state.wrap_display(source, 1)
         elapsed = time.perf_counter() - started
 
-        self.assertEqual(lines, ("x",) * len(source))
+        self.equal(lines, ("x",) * len(source))
         # Count text inspected, allowing width checks on individual clusters.
-        self.assertLessEqual(
-            sum(len(call.args[0]) for call in clusters.call_args_list),
-            3 * len(source),
+        self.require(
+            inspected_characters <= (3 * len(source)),
         )
         # This is intentionally loose for slow CI.  The former implementation
         # repeatedly reclustered every remaining suffix and takes several
         # seconds for this input instead of scaling linearly.
-        self.assertLess(elapsed, 1.0)
+        self.require((elapsed) < (1.0))
 
     def test_wrapping_turns_untrusted_newlines_into_visible_data(self) -> None:
+        """Check wrapping turns untrusted newlines into visible data."""
         lines = tui_state.wrap_display("line1\nline2\x1b[2J", 40)
-        self.assertEqual(lines, ("line1\u240aline2",))
+        self.equal(lines, ("line1\u240aline2",))
         assert_terminal_inert(self, lines[0])
 
     def test_width_arguments_are_checked(self) -> None:
+        """Check width arguments are checked."""
         for width in (0, -1, True, 1.5):
             with self.subTest(width=width):
-                self.assertRaises(
-                    (TypeError, ValueError), tui_state.wrap_display, "x", width
+                self.reject_unchecked_call(
+                    (TypeError, ValueError),
+                    tui_state.wrap_display,
+                    "x",
+                    width,
                 )
 
 
-class FormattingTests(unittest.TestCase):
+class FormattingTests(TypedTestCase):
+    """Check Formatting behavior and failure boundaries."""
+
     def test_formats_every_supported_action_concisely(self) -> None:
+        """Check formats every supported action concisely."""
         actions = (
             ({"action": "list", "path": "."}, "List files"),
             ({"action": "read", "path": "a.py"}, "Read file"),
@@ -160,13 +204,14 @@ class FormattingTests(unittest.TestCase):
         for action, title in actions:
             with self.subTest(action=action):
                 summary = tui_state.format_action(action)
-                self.assertEqual(summary.title, title)
-                self.assertLessEqual(
-                    tui_state.display_width(summary.detail),
-                    tui_state.MAX_DETAIL_CELLS,
+                self.equal(summary.title, title)
+                self.require(
+                    (tui_state.display_width(summary.detail))
+                    <= (tui_state.MAX_DETAIL_CELLS),
                 )
 
     def test_action_fields_are_sanitized_and_capped(self) -> None:
+        """Check action fields are sanitized and capped."""
         summary = tui_state.format_action(
             {
                 "action": "write",
@@ -175,34 +220,34 @@ class FormattingTests(unittest.TestCase):
             },
         )
         assert_terminal_inert(self, summary.title + summary.detail)
-        self.assertNotIn("title", summary.detail)
-        self.assertLessEqual(
-            tui_state.display_width(summary.detail),
-            tui_state.MAX_DETAIL_CELLS,
+        self.require(("title") not in (summary.detail))
+        self.require(
+            (tui_state.display_width(summary.detail)) <= (tui_state.MAX_DETAIL_CELLS),
         )
 
     def test_result_formatting_prioritizes_failure_and_caps_lists(self) -> None:
+        """Check result formatting prioritizes failure and caps lists."""
         failed = tui_state.format_result(
             {"action": "run"},
             {"ok": False, "error": "boom\x1b[2J" + "x" * 10_000},
         )
-        self.assertEqual(failed.title, "Action failed")
-        self.assertFalse(failed.ok)
+        self.equal(failed.title, "Action failed")
+        self.require(not (failed.ok))
         assert_terminal_inert(self, failed.detail)
-        self.assertLessEqual(
-            tui_state.display_width(failed.detail),
-            tui_state.MAX_DETAIL_CELLS,
+        self.require(
+            (tui_state.display_width(failed.detail)) <= (tui_state.MAX_DETAIL_CELLS),
         )
 
         listed = tui_state.format_result(
             {"action": "list"},
             {"ok": True, "entries": [f"file-{index}" for index in range(30)]},
         )
-        self.assertTrue(listed.ok)
-        self.assertIn("30 entries", listed.detail)
-        self.assertIn("… +18", listed.detail)
+        self.require(listed.ok)
+        self.require(("30 entries") in (listed.detail))
+        self.require(("… +18") in (listed.detail))
 
     def test_run_result_exposes_useful_bounded_facts(self) -> None:
+        """Check run result exposes useful bounded facts."""
         summary = tui_state.format_result(
             {"action": "run"},
             {
@@ -213,14 +258,17 @@ class FormattingTests(unittest.TestCase):
                 "stdout_truncated": True,
             },
         )
-        self.assertEqual(summary.title, "Completed")
-        self.assertIn("exit 0", summary.detail)
-        self.assertIn("hello\u240aworld", summary.detail)
-        self.assertIn("stdout truncated", summary.detail)
+        self.equal(summary.title, "Completed")
+        self.require(("exit 0") in (summary.detail))
+        self.require(("hello\u240aworld") in (summary.detail))
+        self.require(("stdout truncated") in (summary.detail))
 
 
-class ApprovalDetailTests(unittest.TestCase):
+class ApprovalDetailTests(TypedTestCase):
+    """Check ApprovalDetail behavior and failure boundaries."""
+
     def test_run_preserves_every_argument_and_cwd_without_summary_caps(self) -> None:
+        """Check run preserves every argument and cwd without summary caps."""
         argv = ["program"] + [f"argument-{index}-" + "x" * 90 for index in range(24)]
         argv.append('quote " slash \\ and \x1b]2;title\x07')
         cwd = "nested/" + "directory-" * 80
@@ -228,30 +276,31 @@ class ApprovalDetailTests(unittest.TestCase):
 
         details = tui_state.approval_details(action, width=37)
 
-        self.assertTrue(details.valid)
-        self.assertTrue(details.all_critical_displayable)
-        self.assertTrue(details.can_approve)
-        self.assertEqual(details.omitted_lines, 0)
-        self.assertEqual(details.records[0], f"argument count = {len(argv)}")
+        self.require(details.valid)
+        self.require(details.all_critical_displayable)
+        self.require(details.can_approve)
+        self.equal(details.omitted_lines, 0)
+        self.equal(details.records[0], f"argument count = {len(argv)}")
         for index, argument in enumerate(argv[:-1]):
-            self.assertEqual(
-                details.records[index + 1],
-                f'argv[{index}] = "{argument}"',
-            )
-        self.assertEqual(
+            self.equal(details.records[index + 1], f'argv[{index}] = "{argument}"')
+        self.equal(
             details.records[-2],
             f'argv[{len(argv) - 1}] = "quote \\" slash \\\\ and '
             r'\u001b]2;title\u0007"',
         )
-        self.assertEqual(details.records[-1], f'cwd = "{cwd}"')
-        self.assertNotIn("…", "".join(details.records))
-        self.assertTrue(
-            all(tui_state.display_width(line) <= 37 for line in details.lines),
+        self.equal(details.records[-1], f'cwd = "{cwd}"')
+        self.require(("…") not in ("".join(details.records)))
+        self.require(
+            all(
+                tui_state.display_width(line) <= _APPROVAL_WIDTH
+                for line in details.lines
+            ),
         )
         for value in (*details.records, *details.lines):
             assert_terminal_inert(self, value)
 
     def test_viewport_limit_is_explicit_without_discarding_full_lines(self) -> None:
+        """Check viewport limit is explicit without discarding full lines."""
         action = {
             "action": "run",
             "argv": ["program", "first", "second", "third"],
@@ -260,18 +309,19 @@ class ApprovalDetailTests(unittest.TestCase):
         complete = tui_state.approval_details(action, width=18)
         constrained = tui_state.approval_details(action, width=18, max_lines=2)
 
-        self.assertEqual(constrained.records, complete.records)
-        self.assertEqual(constrained.lines, complete.lines)
-        self.assertEqual(constrained.visible_lines, complete.lines[:2])
-        self.assertEqual(constrained.required_lines, len(complete.lines))
-        self.assertEqual(
+        self.equal(constrained.records, complete.records)
+        self.equal(constrained.lines, complete.lines)
+        self.equal(constrained.visible_lines, complete.lines[:2])
+        self.equal(constrained.required_lines, len(complete.lines))
+        self.equal(
             constrained.omitted_lines,
             len(complete.lines) - len(constrained.visible_lines),
         )
-        self.assertFalse(constrained.all_critical_displayable)
-        self.assertFalse(constrained.can_approve)
+        self.require(not (constrained.all_critical_displayable))
+        self.require(not (constrained.can_approve))
 
     def test_write_uses_full_path_utf8_counts_and_content_digest(self) -> None:
+        """Check write uses full path utf8 counts and content digest."""
         path = "deep/" + "very-long-directory/" * 40 + "output.txt"
         content = "snowman ☃\nemoji U0001f680"
         encoded = content.encode("utf-8")
@@ -282,15 +332,18 @@ class ApprovalDetailTests(unittest.TestCase):
             width=31,
         )
 
-        self.assertTrue(details.can_approve)
-        self.assertEqual(details.records[0], f'path = "{path}"')
-        self.assertIn(f"content characters = {len(content)}", details.records)
-        self.assertIn(f"content UTF-8 bytes = {len(encoded)}", details.records)
-        self.assertIn(f"content SHA-256 = {digest}", details.records)
-        self.assertIn(r'content = "snowman \u2603\nemoji U0001f680"', details.records)
-        self.assertNotIn("…", "".join(details.records))
+        self.require(details.can_approve)
+        self.equal(details.records[0], f'path = "{path}"')
+        self.require((f"content characters = {len(content)}") in (details.records))
+        self.require((f"content UTF-8 bytes = {len(encoded)}") in (details.records))
+        self.require((f"content SHA-256 = {digest}") in (details.records))
+        self.require(
+            (r'content = "snowman \u2603\nemoji U0001f680"') in (details.records),
+        )
+        self.require(("…") not in ("".join(details.records)))
 
     def test_edit_exposes_range_precondition_and_replacement_digest(self) -> None:
+        """Check edit exposes range precondition and replacement digest."""
         action = {
             "action": "edit",
             "path": "src/important.py",
@@ -303,19 +356,20 @@ class ApprovalDetailTests(unittest.TestCase):
         details = tui_state.approval_details(action, 200)
 
         joined = "\n".join(details.records)
-        self.assertIn('path = "src/important.py"', joined)
-        self.assertIn("byte range = [10, 20)", joined)
-        self.assertIn("expected file SHA-256 = " + "b" * 64, joined)
-        self.assertIn(
-            "replacement SHA-256 = " + hashlib.sha256(b"replacement").hexdigest(),
-            joined,
+        self.require(('path = "src/important.py"') in (joined))
+        self.require(("byte range = [10, 20)") in (joined))
+        self.require(("expected file SHA-256 = " + "b" * 64) in (joined))
+        self.require(
+            ("replacement SHA-256 = " + hashlib.sha256(b"replacement").hexdigest())
+            in (joined),
         )
-        self.assertTrue(details.can_approve)
+        self.require(details.can_approve)
 
         malformed = dict(action, start=True, expected_sha256="BAD")
-        self.assertFalse(tui_state.approval_details(malformed, 200).can_approve)
+        self.require(not (tui_state.approval_details(malformed, 200).can_approve))
 
     def test_approval_escapes_all_non_ascii_including_visual_blanks(self) -> None:
+        """Check approval escapes all non ascii including visual blanks."""
         details = tui_state.approval_details(
             {
                 "action": "run",
@@ -334,9 +388,10 @@ class ApprovalDetailTests(unittest.TestCase):
             r"\U0001f680",
             r"caf\u00e9",
         ):
-            self.assertIn(escaped, rendered)
+            self.require((escaped) in (rendered))
 
     def test_remember_and_forget_show_full_escaped_relevant_data(self) -> None:
+        """Check remember and forget show full escaped relevant data."""
         memory = (
             "literal \\u001b; actual \x1b]2;visible-payload\x07; "
             "bidi \u202e; combining e\u0301; nonbreaking\u00a0space; end"
@@ -351,24 +406,26 @@ class ApprovalDetailTests(unittest.TestCase):
             width=24,
         )
 
-        self.assertTrue(remember.can_approve)
-        self.assertEqual(
+        self.require(remember.can_approve)
+        self.equal(
             remember.records,
             (
                 (
                     r'memory = "literal \\u001b; actual \u001b]2;visible-payload'
-                    r'\u0007; bidi \u202e; combining e\u0301; nonbreaking\u00a0space; end"'
+                    r"\u0007; bidi \u202e; combining e\u0301; "
+                    r'nonbreaking\u00a0space; end"'
                 ),
             ),
         )
-        self.assertIn("visible-payload", remember.records[0])
-        self.assertTrue(forget.can_approve)
-        self.assertEqual(forget.records, (f'memory id = "{identifier}"',))
-        self.assertNotIn("…", forget.records[0])
+        self.require(("visible-payload") in (remember.records[0]))
+        self.require(forget.can_approve)
+        self.equal(forget.records, (f'memory id = "{identifier}"',))
+        self.require(("…") not in (forget.records[0]))
         for value in (*remember.records, *forget.records):
             assert_terminal_inert(self, value)
 
     def test_pending_state_retains_full_records_and_can_fit_a_viewport(self) -> None:
+        """Check pending state retains full records and can fit a viewport."""
         action = {
             "action": "run",
             "argv": ["program", "--destructive", "target/" + "x" * 500],
@@ -378,19 +435,21 @@ class ApprovalDetailTests(unittest.TestCase):
         state.start("task")
         state.begin_approval(action)
         pending = state.pending_approval
-        assert pending is not None
+        if pending is None:
+            self.fail("The approval request was not retained.")
 
         direct = tui_state.approval_details(action, width=32)
         fitted = pending.view(width=32, max_lines=3)
 
-        self.assertEqual(pending.critical_records, direct.records)
-        self.assertTrue(pending.details_valid)
-        self.assertEqual(fitted.records, direct.records)
-        self.assertEqual(fitted.lines, direct.lines)
-        self.assertFalse(fitted.can_approve)
-        self.assertGreater(fitted.omitted_lines, 0)
+        self.equal(pending.critical_records, direct.records)
+        self.require(pending.details_valid)
+        self.equal(fitted.records, direct.records)
+        self.equal(fitted.lines, direct.lines)
+        self.require(not (fitted.can_approve))
+        self.require((fitted.omitted_lines) > (0))
 
     def test_malformed_details_are_never_approvable(self) -> None:
+        """Check malformed details are never approvable."""
         actions: tuple[Mapping[str, object] | None, ...] = (
             None,
             {},
@@ -402,30 +461,33 @@ class ApprovalDetailTests(unittest.TestCase):
         for action in actions:
             with self.subTest(action=action):
                 details = tui_state.approval_details(action, 40, 100)
-                self.assertFalse(details.valid)
-                self.assertFalse(details.can_approve)
+                self.require(not (details.valid))
+                self.require(not (details.can_approve))
 
     def test_width_one_uses_exact_unicode_escape_instead_of_lossy_replacement(
         self,
     ) -> None:
+        """Check width one uses exact unicode escape instead of lossy replacement."""
         details = tui_state.approval_details({"action": "forget", "id": "界"}, width=1)
         joined = "".join(details.lines)
-        self.assertIn(r"\u754c", joined)
-        self.assertNotIn("�", joined)
-        self.assertTrue(
-            all(tui_state.display_width(line) <= 1 for line in details.lines),
-        )
+        self.require((r"\u754c") in (joined))
+        self.require(("�") not in (joined))
+        self.require(all(tui_state.display_width(line) <= 1 for line in details.lines))
 
     def test_approval_detail_dimensions_are_validated(self) -> None:
+        """Check approval detail dimensions are validated."""
         action = {"action": "forget", "id": "1"}
         for width in (0, -1, True, 1.5):
             with self.subTest(width=width):
-                self.assertRaises(
-                    (TypeError, ValueError), tui_state.approval_details, action, width
+                self.reject_unchecked_call(
+                    (TypeError, ValueError),
+                    tui_state.approval_details,
+                    action,
+                    width,
                 )
         for height in (-1, True, 1.5):
             with self.subTest(height=height):
-                self.assertRaises(
+                self.reject_unchecked_call(
                     (TypeError, ValueError),
                     tui_state.approval_details,
                     action,
@@ -434,32 +496,36 @@ class ApprovalDetailTests(unittest.TestCase):
                 )
 
 
-class StateTests(unittest.TestCase):
+class StateTests(TypedTestCase):
+    """Check State behavior and failure boundaries."""
+
     def test_complete_worker_and_approval_lifecycle(self) -> None:
+        """Check complete worker and approval lifecycle."""
         state = tui_state.TuiState()
-        self.assertEqual(state.phase, tui_state.Phase.IDLE)
+        self.equal(state.phase, tui_state.Phase.IDLE)
         state.start("Create a file", max_steps=8)
-        self.assertEqual(state.phase, tui_state.Phase.RUNNING)
+        self.equal(state.phase, tui_state.Phase.RUNNING)
 
         action = {"action": "write", "path": "a.txt", "content": "hello"}
         state.apply_worker_event(
             "request",
             {"step": 1, "max_steps": 8, "action": action},
         )
-        self.assertEqual(state.step, 1)
-        self.assertEqual(state.max_steps, 8)
-        self.assertEqual([entry.kind for entry in state.entries], ["user"])
+        self.equal(state.step, 1)
+        self.equal(state.max_steps, 8)
+        self.equal([entry.kind for entry in state.entries], ["user"])
         state.apply_worker_event(
             "approval_required",
             {"step": 1, "max_steps": 8, "action": action},
         )
-        self.assertEqual(state.phase, tui_state.Phase.APPROVAL)
-        assert state.pending_approval is not None
-        self.assertEqual(state.pending_approval.action_name, "write")
+        self.equal(state.phase, tui_state.Phase.APPROVAL)
+        if state.pending_approval is None:
+            self.fail("The approval request was not retained.")
+        self.equal(state.pending_approval.action_name, "write")
 
-        state.resolve_approval(True)
-        self.assertEqual(state.phase, tui_state.Phase.RUNNING)
-        self.assertEqual([entry.kind for entry in state.entries], ["user"])
+        state.resolve_approval(approved=True)
+        self.equal(state.phase, tui_state.Phase.RUNNING)
+        self.equal([entry.kind for entry in state.entries], ["user"])
         state.apply_worker_event(
             "result",
             {
@@ -469,32 +535,30 @@ class StateTests(unittest.TestCase):
                 "result": {"ok": True, "path": "a.txt", "bytes_written": 5},
             },
         )
-        self.assertEqual([entry.kind for entry in state.entries], ["user"])
+        self.equal([entry.kind for entry in state.entries], ["user"])
         state.apply_worker_event(
             "done",
             {"step": 2, "max_steps": 8, "message": "Created a.txt"},
         )
 
         snapshot = state.snapshot()
-        self.assertEqual(snapshot.phase, tui_state.Phase.DONE)
-        self.assertEqual(snapshot.step, 2)
-        self.assertIsNone(snapshot.pending_approval)
-        self.assertEqual(
-            [entry.kind for entry in snapshot.entries],
-            ["user", "assistant"],
-        )
-        self.assertEqual([entry.sequence for entry in snapshot.entries], [1, 2])
+        self.equal(snapshot.phase, tui_state.Phase.DONE)
+        self.equal(snapshot.step, 2)
+        self.require((snapshot.pending_approval) is None)
+        self.equal([entry.kind for entry in snapshot.entries], ["user", "assistant"])
+        self.equal([entry.sequence for entry in snapshot.entries], [1, 2])
 
     def test_denial_and_stop_phases(self) -> None:
+        """Check denial and stop phases."""
         state = tui_state.TuiState()
         state.start("task")
         state.begin_approval({"action": "run", "argv": ["program"]})
-        state.resolve_approval(False)
-        self.assertIsNone(state.pending_approval)
-        self.assertEqual(state.phase, tui_state.Phase.RUNNING)
-        self.assertEqual([entry.kind for entry in state.entries], ["user"])
+        state.resolve_approval(approved=False)
+        self.require((state.pending_approval) is None)
+        self.equal(state.phase, tui_state.Phase.RUNNING)
+        self.equal([entry.kind for entry in state.entries], ["user"])
         state.request_stop()
-        self.assertEqual(state.phase, tui_state.Phase.STOPPING)
+        self.equal(state.phase, tui_state.Phase.STOPPING)
         state.apply_worker_event(
             "result",
             {
@@ -502,20 +566,22 @@ class StateTests(unittest.TestCase):
                 "result": {"ok": False, "error": "cancelled"},
             },
         )
-        self.assertEqual(state.phase, tui_state.Phase.STOPPING)
-        self.assertEqual([entry.kind for entry in state.entries], ["user"])
+        self.equal(state.phase, tui_state.Phase.STOPPING)
+        self.equal([entry.kind for entry in state.entries], ["user"])
 
     def test_error_event_is_terminal_and_sanitized(self) -> None:
+        """Check error event is terminal and sanitized."""
         state = tui_state.TuiState()
         state.start("task\x1b[2J")
         state.apply_worker_event("error", {"error": "bad\x1b]2;title\x07thing\u202e"})
-        self.assertEqual(state.phase, tui_state.Phase.ERROR)
-        self.assertEqual([entry.kind for entry in state.entries], ["user", "error"])
-        self.assertEqual(state.entries[-1].body, "badthing�")
+        self.equal(state.phase, tui_state.Phase.ERROR)
+        self.equal([entry.kind for entry in state.entries], ["user", "error"])
+        self.equal(state.entries[-1].body, "badthing�")
         for entry in state.entries:
             assert_terminal_inert(self, entry.title + entry.body)
 
     def test_recoverable_invalid_reply_result_stays_out_of_transcript(self) -> None:
+        """Check recoverable invalid reply result stays out of transcript."""
         state = tui_state.TuiState()
         state.start("task")
         state.apply_worker_event(
@@ -526,12 +592,13 @@ class StateTests(unittest.TestCase):
                 "result": {"ok": False, "error": "JSONDecodeError"},
             },
         )
-        self.assertEqual(state.phase, tui_state.Phase.RUNNING)
-        self.assertEqual(state.step, 3)
-        self.assertEqual(state.max_steps, 7)
-        self.assertEqual([entry.kind for entry in state.entries], ["user"])
+        self.equal(state.phase, tui_state.Phase.RUNNING)
+        self.equal(state.step, 3)
+        self.equal(state.max_steps, 7)
+        self.equal([entry.kind for entry in state.entries], ["user"])
 
     def test_run_request_keeps_the_complete_command_but_hides_its_result(self) -> None:
+        """Check run request keeps the complete command but hides its result."""
         argument = "x" * 20_000
         action = {
             "action": "run",
@@ -545,14 +612,14 @@ class StateTests(unittest.TestCase):
             {"step": 1, "max_steps": 0, "action": action},
         )
 
-        self.assertEqual([entry.kind for entry in state.entries], ["user", "command"])
+        self.equal([entry.kind for entry in state.entries], ["user", "command"])
         command = state.entries[-1]
         expected = tui_state.format_command(action)
-        self.assertEqual(command.body, expected)
-        self.assertIn(argument, command.body)
-        self.assertNotIn("…", command.body)
-        self.assertIsNone(command.step)
-        self.assertNotIn("\n", command.body)
+        self.equal(command.body, expected)
+        self.require((argument) in (command.body))
+        self.require(("…") not in (command.body))
+        self.require((command.step) is None)
+        self.require(("\n") not in (command.body))
 
         state.apply_worker_event(
             "result",
@@ -562,64 +629,78 @@ class StateTests(unittest.TestCase):
                 "result": {"ok": True, "stdout": "very verbose output"},
             },
         )
-        self.assertEqual([entry.kind for entry in state.entries], ["user", "command"])
-        self.assertNotIn("very verbose output", command.body)
+        self.equal([entry.kind for entry in state.entries], ["user", "command"])
+        self.require(("very verbose output") not in (command.body))
 
     def test_command_format_is_exact_ascii_and_terminal_inert(self) -> None:
+        """Check command format is exact ascii and terminal inert."""
         action = {
             "action": "run",
             "argv": ["program", "snowman ☃", "line\nfeed", "\x1b]2;title\x07"],
         }
         rendered = tui_state.format_command(action)
-        self.assertEqual(
+        self.equal(
             rendered,
-            '["program","snowman \\u2603","line\\nfeed","\\u001b]2;title\\u0007"]  cwd="."',
+            (
+                '["program","snowman \\u2603","line\\nfeed",'
+                '"\\u001b]2;title\\u0007"]  cwd="."'
+            ),
         )
         assert_terminal_inert(self, rendered)
 
     def test_entries_are_frozen_and_snapshots_do_not_expose_the_list(self) -> None:
+        """Check entries are frozen and snapshots do not expose the list."""
         state = tui_state.TuiState()
         state.start("task")
         snapshot = state.snapshot()
-        self.assertIsInstance(snapshot.entries, tuple)
-        self.assertRaises(
-            FrozenInstanceError, setattr, snapshot.entries[0], "body", "mutated"
+        self.require(isinstance(snapshot.entries, tuple))
+        self.reject_unchecked_call(
+            FrozenInstanceError,
+            _assign_field,
+            snapshot.entries[0],
+            "body",
+            "mutated",
         )
 
     def test_transcript_count_is_capped(self) -> None:
+        """Check transcript count is capped."""
         state = tui_state.TuiState(max_entries=3)
         for index in range(3):
             state.start(f"task {index}")
             state.apply_worker_event("done", {"message": f"reply {index}"})
         snapshot = state.snapshot()
-        self.assertEqual(len(snapshot.entries), 3)
-        self.assertEqual(snapshot.dropped_entries, 3)
-        self.assertEqual(
+        self.equal(len(snapshot.entries), 3)
+        self.equal(snapshot.dropped_entries, 3)
+        self.equal(
             [(entry.kind, entry.body) for entry in snapshot.entries],
             [("assistant", "reply 1"), ("user", "task 2"), ("assistant", "reply 2")],
         )
 
     def test_default_transcript_retains_every_entry(self) -> None:
+        """Check default transcript retains every entry."""
         state = tui_state.TuiState()
         for index in range(tui_state.MAX_TRANSCRIPT_ENTRIES + 25):
             state.start(f"task {index}")
             state.apply_worker_event("done", {"message": f"reply {index}"})
 
         snapshot = state.snapshot()
-        self.assertEqual(
-            len(snapshot.entries),
-            2 * (tui_state.MAX_TRANSCRIPT_ENTRIES + 25),
-        )
-        self.assertEqual(snapshot.dropped_entries, 0)
-        self.assertEqual(snapshot.entries[0].body, "task 0")
-        self.assertEqual(snapshot.entries[-1].body, "reply 524")
+        self.equal(len(snapshot.entries), 2 * (tui_state.MAX_TRANSCRIPT_ENTRIES + 25))
+        self.equal(snapshot.dropped_entries, 0)
+        self.equal(snapshot.entries[0].body, "task 0")
+        self.equal(snapshot.entries[-1].body, "reply 524")
 
     def test_invalid_optional_transcript_limits_are_rejected(self) -> None:
+        """Check invalid optional transcript limits are rejected."""
         for limit in (0, -1, True, 1.5):
             with self.subTest(limit=limit):
-                self.assertRaises(ValueError, tui_state.TuiState, max_entries=limit)
+                self.reject_unchecked_call(
+                    ValueError,
+                    tui_state.TuiState,
+                    max_entries=limit,
+                )
 
     def test_hidden_activity_does_not_consume_transcript_capacity(self) -> None:
+        """Check hidden activity does not consume transcript capacity."""
         state = tui_state.TuiState(max_entries=2)
         state.start("tool-heavy task", max_steps=100)
         for step in range(1, 101):
@@ -639,73 +720,74 @@ class StateTests(unittest.TestCase):
             )
 
         snapshot = state.snapshot()
-        self.assertEqual(snapshot.step, 100)
-        self.assertEqual(snapshot.max_steps, 100)
-        self.assertEqual([entry.kind for entry in snapshot.entries], ["user"])
-        self.assertEqual(snapshot.dropped_entries, 0)
+        self.equal(snapshot.step, 100)
+        self.equal(snapshot.max_steps, 100)
+        self.equal([entry.kind for entry in snapshot.entries], ["user"])
+        self.equal(snapshot.dropped_entries, 0)
 
         state.apply_worker_event("done", {"message": "finished"})
-        self.assertEqual([entry.kind for entry in state.entries], ["user", "assistant"])
-        self.assertEqual(state.snapshot().dropped_entries, 0)
+        self.equal([entry.kind for entry in state.entries], ["user", "assistant"])
+        self.equal(state.snapshot().dropped_entries, 0)
 
     def test_mutation_from_worker_thread_is_rejected(self) -> None:
+        """Check mutation from worker thread is rejected."""
         state = tui_state.TuiState()
-        errors = []
+        errors: list[RuntimeError] = []
 
         def mutate() -> None:
-            try:
-                state.start("unsafe")
-            except Exception as exc:  # the assertion below checks exact behavior
-                errors.append(exc)
+            errors.append(captured(RuntimeError, lambda: state.start("unsafe")))
 
         worker = threading.Thread(target=mutate)
         worker.start()
         worker.join()
-        self.assertEqual(len(errors), 1)
-        self.assertIsInstance(errors[0], RuntimeError)
-        self.assertEqual(state.phase, tui_state.Phase.IDLE)
+        self.equal(len(errors), 1)
+        self.require(isinstance(errors[0], RuntimeError))
+        self.equal(state.phase, tui_state.Phase.IDLE)
 
     def test_terminal_state_can_start_another_task_without_losing_transcript(
         self,
     ) -> None:
+        """Check terminal state can start another task without losing transcript."""
         state = tui_state.TuiState()
         state.start("one")
         state.apply_worker_event("done", {"message": "first done"})
         state.start("two", max_steps=5)
-        self.assertEqual(state.phase, tui_state.Phase.RUNNING)
-        self.assertEqual(state.step, 0)
-        self.assertEqual(state.max_steps, 5)
-        self.assertEqual(state.entries[-1].body, "two")
-        self.assertEqual(len(state.entries), 3)
+        self.equal(state.phase, tui_state.Phase.RUNNING)
+        self.equal(state.step, 0)
+        self.equal(state.max_steps, 5)
+        self.equal(state.entries[-1].body, "two")
+        self.equal(len(state.entries), 3)
 
         state.apply_worker_event("error", {"error": "second failed"})
         state.start("three")
-        self.assertEqual(state.entries[-1].body, "three")
+        self.equal(state.entries[-1].body, "three")
 
     def test_active_state_rejects_a_second_start_and_reset_clears_history(self) -> None:
+        """Check active state rejects a second start and reset clears history."""
         state = tui_state.TuiState()
         state.start("one")
-        with self.assertRaises(RuntimeError):
+        with self.rejected(RuntimeError):
             state.start("two")
         state.reset()
         state.start("two")
-        self.assertEqual(state.entries[0].body, "two")
+        self.equal(state.entries[0].body, "two")
 
     def test_chat_entries_keep_long_messages_and_use_clean_labels(self) -> None:
+        """Check chat entries keep long messages and use clean labels."""
         user_message = "u" * 2_000
         agent_message = "a" * 3_000
         state = tui_state.TuiState()
         state.start(user_message)
         state.apply_worker_event("done", {"step": 23, "message": agent_message})
 
-        self.assertEqual(state.entries[0].body, user_message)
-        self.assertEqual(state.entries[1].body, agent_message)
-        self.assertEqual(state.entries[1].step, None)
-        self.assertEqual(
+        self.equal(state.entries[0].body, user_message)
+        self.equal(state.entries[1].body, agent_message)
+        self.equal(state.entries[1].step, None)
+        self.equal(
             [line.text for line in tui_state.entry_lines(state.entries[0], 80)[:1]],
             ["YOU"],
         )
-        self.assertEqual(
+        self.equal(
             [line.text for line in tui_state.entry_lines(state.entries[1], 80)[:1]],
             ["AGENT"],
         )
@@ -713,31 +795,41 @@ class StateTests(unittest.TestCase):
     def test_chat_bodies_are_not_truncated_and_hard_breaks_render_as_lines(
         self,
     ) -> None:
+        """Check chat bodies are not truncated and hard breaks render as lines."""
         response = "a" * 40_000 + "\n\nfinal line"
         state = tui_state.TuiState()
         state.start("question")
         state.apply_worker_event("done", {"message": response})
 
         entry = state.entries[-1]
-        self.assertEqual(entry.body, response)
-        self.assertNotIn("…", entry.body)
+        self.equal(entry.body, response)
+        self.require(("…") not in (entry.body))
         rendered = tui_state.entry_lines(entry, 82)
         body = [line.text for line in rendered[1:]]
-        self.assertEqual(
-            "".join(line.removeprefix("  ") for line in body[:-2]),
-            "a" * 40_000,
-        )
-        self.assertEqual(body[-2:], ["  ", "  final line"])
+        self.equal("".join(line.removeprefix("  ") for line in body[:-2]), "a" * 40_000)
+        self.equal(body[-2:], ["  ", "  final line"])
 
 
-class TranscriptViewportTests(unittest.TestCase):
-    def make_entries(self) -> tuple[tui_state.TranscriptEntry, ...]:
+class TranscriptViewportTests(TypedTestCase):
+    """Check TranscriptViewport behavior and failure boundaries."""
+
+    @staticmethod
+    def make_entries() -> tuple[tui_state.TranscriptEntry, ...]:
+        """Create the six ordered entries used by viewport checks.
+
+        Returns
+        -------
+        tuple[tui_state.TranscriptEntry, ...]
+            The same numbered transcript entries for every layout case.
+
+        """
         return tuple(
             tui_state.TranscriptEntry(index, "status", f"item {index}")
             for index in range(1, 7)
         )
 
     def test_entry_and_transcript_lines_are_width_bounded(self) -> None:
+        """Check entry and transcript lines are width bounded."""
         entry = tui_state.TranscriptEntry(
             1,
             "assistant",
@@ -745,39 +837,42 @@ class TranscriptViewportTests(unittest.TestCase):
             "wide 界 and a long explanation",
         )
         lines = tui_state.entry_lines(entry, 12)
-        self.assertGreater(len(lines), 2)
-        self.assertTrue(lines[0].text.startswith("AGENT"))
-        self.assertTrue(lines[-1].continuation)
+        self.require((len(lines)) > _MIN_ENTRY_LINES)
+        self.require(lines[0].text.startswith("AGENT"))
+        self.require(lines[-1].continuation)
         for line in lines:
-            self.assertLessEqual(tui_state.display_width(line.text), 12)
+            self.require((tui_state.display_width(line.text)) <= _ENTRY_WIDTH)
             assert_terminal_inert(self, line.text)
 
     def test_viewport_is_bottom_anchored_and_scrolls_toward_older_lines(self) -> None:
+        """Check viewport is bottom anchored and scrolls toward older lines."""
         lines = tui_state.transcript_lines(self.make_entries(), 80)
         tail = tui_state.viewport_lines(lines, 3)
-        self.assertEqual([line.sequence for line in tail.lines], [4, 5, 6])
-        self.assertTrue(tail.can_scroll_up)
-        self.assertFalse(tail.can_scroll_down)
+        self.equal([line.sequence for line in tail.lines], [4, 5, 6])
+        self.require(tail.can_scroll_up)
+        self.require(not (tail.can_scroll_down))
 
         older = tui_state.viewport_lines(lines, 3, scroll_offset=2)
-        self.assertEqual([line.sequence for line in older.lines], [2, 3, 4])
-        self.assertTrue(older.can_scroll_up)
-        self.assertTrue(older.can_scroll_down)
-        self.assertEqual(older.scroll_offset, 2)
+        self.equal([line.sequence for line in older.lines], [2, 3, 4])
+        self.require(older.can_scroll_up)
+        self.require(older.can_scroll_down)
+        self.equal(older.scroll_offset, 2)
 
         top = tui_state.viewport_lines(lines, 3, scroll_offset=10_000)
-        self.assertEqual([line.sequence for line in top.lines], [1, 2, 3])
-        self.assertFalse(top.can_scroll_up)
+        self.equal([line.sequence for line in top.lines], [1, 2, 3])
+        self.require(not (top.can_scroll_up))
 
     def test_zero_height_viewport_is_empty(self) -> None:
+        """Check zero height viewport is empty."""
         lines = tui_state.transcript_lines(self.make_entries(), 80)
         viewport = tui_state.viewport_lines(lines, 0)
-        self.assertEqual(viewport.lines, ())
-        self.assertEqual(viewport.start, viewport.end)
+        self.equal(viewport.lines, ())
+        self.equal(viewport.start, viewport.end)
 
     def test_state_viewport_reuses_one_width_and_invalidates_on_entry_changes(
         self,
     ) -> None:
+        """Check state viewport reuses one width and invalidates on entry changes."""
         state = tui_state.TuiState()
         state.start("first prompt")
         original = tui_state.transcript_lines
@@ -791,31 +886,32 @@ class TranscriptViewportTests(unittest.TestCase):
             )
             third = state.viewport(20, 3)
 
-            self.assertEqual(render.call_count, 1)
-            self.assertEqual(first.total, third.total)
-            self.assertEqual(second.scroll_offset, 1)
+            self.equal(render.call_count, 1)
+            self.equal(first.total, third.total)
+            self.equal(second.scroll_offset, 1)
 
             state.apply_worker_event("done", {"message": "first response"})
             updated = state.viewport(20, 3)
-            self.assertEqual(render.call_count, 1)
-            self.assertGreater(updated.total, first.total)
+            self.equal(render.call_count, 1)
+            self.require((updated.total) > (first.total))
 
             state.viewport(21, 3)
             state.viewport(20, 3)
-            self.assertEqual(render.call_count, 3)
+            self.equal(render.call_count, 3)
 
             state.reset()
             empty = state.viewport(20, 3)
-            self.assertEqual(render.call_count, 4)
-            self.assertEqual(empty.lines, ())
+            self.equal(render.call_count, 4)
+            self.equal(empty.lines, ())
 
         # Validation must not be bypassed merely because bool compares equal to
         # a previously cached integer width.
         state.viewport(1, 1)
-        with self.assertRaises(ValueError):
-            state.viewport(True, 1)
+        with self.rejected(ValueError):
+            state.viewport(width=True, height=1)
 
     def test_repeated_long_chat_viewports_fit_an_animation_frame_budget(self) -> None:
+        """Check repeated long chat viewports fit an animation frame budget."""
         state = tui_state.TuiState(max_entries=100)
         for index in range(16):
             state.start(("prompt" + str(index) + "-") * 400)
@@ -829,63 +925,87 @@ class TranscriptViewportTests(unittest.TestCase):
         views = [state.viewport(80, 20) for _ in range(300)]
         elapsed = time.perf_counter() - started
 
-        self.assertTrue(warm.lines)
-        self.assertTrue(all(view.lines == warm.lines for view in views))
+        self.require(warm.lines)
+        self.require(all(view.lines == warm.lines for view in views))
         # Three hundred cached reads should cost far less than one 60 Hz frame
         # apiece, even on deliberately slow CI workers.
-        self.assertLess(elapsed, 0.25)
+        self.require((elapsed) < _MAX_CACHED_READ_SECONDS)
 
 
-class LayoutTests(unittest.TestCase):
+class LayoutTests(TypedTestCase):
+    """Check Layout behavior and failure boundaries."""
+
     def assert_inside(self, rect: tui_state.Rect, columns: int, rows: int) -> None:
-        self.assertGreaterEqual(rect.x, 0)
-        self.assertGreaterEqual(rect.y, 0)
-        self.assertGreaterEqual(rect.width, 0)
-        self.assertGreaterEqual(rect.height, 0)
-        self.assertLessEqual(rect.right, columns)
-        self.assertLessEqual(rect.bottom, rows)
+        """Require a nonnegative rectangle within every terminal boundary."""
+        self.require((rect.x) >= (0))
+        self.require((rect.y) >= (0))
+        self.require((rect.width) >= (0))
+        self.require((rect.height) >= (0))
+        self.require((rect.right) <= (columns))
+        self.require((rect.bottom) <= (rows))
 
     def test_narrow_layout_uses_full_width_transcript(self) -> None:
+        """Check narrow layout uses full width transcript."""
         layout = tui_state.calculate_layout(70, 20)
-        self.assertFalse(layout.wide)
-        self.assertIsNone(layout.sidebar)
-        self.assertEqual(layout.transcript.width, 70)
+        self.require(not (layout.wide))
+        self.require((layout.sidebar) is None)
+        self.equal(layout.transcript.width, 70)
         for rect in (layout.header, layout.transcript, layout.composer, layout.status):
             self.assert_inside(rect, 70, 20)
-        self.assertEqual(layout.status.bottom, 20)
+        self.equal(layout.status.bottom, 20)
 
     def test_wide_layout_uses_full_width_until_system_panel_is_requested(self) -> None:
+        """Check wide layout uses full width until system panel is requested."""
         default_layout = tui_state.calculate_layout(120, 32)
-        self.assertFalse(default_layout.wide)
-        self.assertIsNone(default_layout.sidebar)
-        self.assertEqual(default_layout.transcript.width, 120)
+        self.require(not (default_layout.wide))
+        self.require((default_layout.sidebar) is None)
+        self.equal(default_layout.transcript.width, 120)
 
-        layout = tui_state.calculate_layout(120, 32, show_system=True)
-        self.assertTrue(layout.wide)
-        self.assertIsNotNone(layout.sidebar)
+        layout = tui_state.calculate_layout(
+            120,
+            32,
+            options=tui_state.LayoutOptions(show_system=True),
+        )
+        self.require(layout.wide)
+        self.require((layout.sidebar) is not None)
         sidebar = layout.sidebar
-        assert sidebar is not None
-        self.assertEqual(layout.transcript.right + 1, sidebar.x)
-        self.assertEqual(sidebar.right, 120)
-        self.assertEqual(sidebar.y, layout.transcript.y)
-        self.assertEqual(sidebar.height, layout.transcript.height)
+        if sidebar is None:
+            self.fail("The requested system sidebar was not created.")
+        self.equal(layout.transcript.right + 1, sidebar.x)
+        self.equal(sidebar.right, 120)
+        self.equal(sidebar.y, layout.transcript.y)
+        self.equal(sidebar.height, layout.transcript.height)
 
     def test_composer_grows_for_wrapped_lines_and_leaves_chat_space(self) -> None:
-        single = tui_state.calculate_layout(100, 30, composer_lines=1)
-        wrapped = tui_state.calculate_layout(100, 30, composer_lines=4)
-        capped = tui_state.calculate_layout(100, 30, composer_lines=100)
-        self.assertEqual(single.composer.height, 3)
-        self.assertEqual(wrapped.composer.height, 6)
-        self.assertEqual(capped.composer.height, 7)
-        self.assertEqual(
+        """Check composer grows for wrapped lines and leaves chat space."""
+        single = tui_state.calculate_layout(
+            100,
+            30,
+            options=tui_state.LayoutOptions(composer_lines=1),
+        )
+        wrapped = tui_state.calculate_layout(
+            100,
+            30,
+            options=tui_state.LayoutOptions(composer_lines=4),
+        )
+        capped = tui_state.calculate_layout(
+            100,
+            30,
+            options=tui_state.LayoutOptions(composer_lines=100),
+        )
+        self.equal(single.composer.height, 3)
+        self.equal(wrapped.composer.height, 6)
+        self.equal(capped.composer.height, 7)
+        self.equal(
             single.transcript.height - wrapped.transcript.height,
             wrapped.composer.height - single.composer.height,
         )
-        self.assertGreater(capped.transcript.height, 0)
+        self.require((capped.transcript.height) > (0))
 
     def test_tiny_layouts_never_produce_negative_or_out_of_bounds_rectangles(
         self,
     ) -> None:
+        """Check tiny layouts never produce negative or out of bounds rectangles."""
         for columns, rows in ((1, 1), (2, 2), (5, 3), (10, 4)):
             with self.subTest(columns=columns, rows=rows):
                 layout = tui_state.calculate_layout(columns, rows)
@@ -899,17 +1019,22 @@ class LayoutTests(unittest.TestCase):
                     rects.append(layout.sidebar)
                 for rect in rects:
                     self.assert_inside(rect, columns, rows)
-                self.assertEqual(layout.status.bottom, rows)
+                self.equal(layout.status.bottom, rows)
 
     def test_layout_validates_dimensions(self) -> None:
+        """Check layout validates dimensions."""
         for dimensions in ((0, 1), (1, 0), (-1, 4), (80.0, 20)):
-            with self.subTest(dimensions=dimensions):
-                with self.assertRaises((TypeError, ValueError)):
-                    tui_state.calculate_layout(*dimensions)
+            with (
+                self.subTest(dimensions=dimensions),
+                self.rejected((TypeError, ValueError)),
+            ):
+                tui_state.calculate_layout(*dimensions)
         for invalid in (None, 0, 1, "yes"):
             with self.subTest(show_system=invalid):
-                self.assertRaises(
-                    TypeError, tui_state.calculate_layout, 120, 32, show_system=invalid
+                self.reject_unchecked_call(
+                    TypeError,
+                    tui_state.LayoutOptions,
+                    show_system=invalid,
                 )
 
 

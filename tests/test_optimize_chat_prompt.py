@@ -1,4 +1,3 @@
-# Copyright 2026
 """Offline conformance and integration tests for the launch GEPA port."""
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ if TYPE_CHECKING:
 
     from plugins.chat_completions import client as _rc_chat_completions
     from plugins.optimization import optimize_chat_prompt
-    from plugins.optimization.gepa.strategies.instruction_proposal import (
+    from plugins.optimization.gepa.instruction_proposal import (
         InstructionProposalSignature,
     )
 else:

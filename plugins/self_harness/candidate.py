@@ -1,98 +1,164 @@
 """Small prompt overlays and explicitly editable plugin source files."""
 
-from collections.abc import Callable, Mapping, Sequence
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
-from raychat.sdk import API_VERSION, PluginContext, workspace_path
-from raychat.validation import json_object
+from raychat.sdk import API_VERSION, workspace_path
+from raychat.service_contracts import ATOMIC_WRITE
+from raychat.validation import json_object, object_field
 
-from .configuration import SelfHarnessSettings
+from .evidence import signature
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+    from raychat.sdk import PluginContext
+
+    from .configuration import SelfHarnessSettings
+    from .records import FailureCluster, Proposal
+
+_PROPOSAL_ERROR = (
+    "Proposal requires a rationale, an observed signature, overlay "
+    "text and optional files."
+)
 
 
-def parse(
-    text: str,
-    workspace: Path,
-    config: SelfHarnessSettings,
-    clusters: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], dict[str, bytes]]:
+def _proposal_value(text: str, clusters: Sequence[FailureCluster]) -> object:
     try:
-        value = json_object(text)
+        return json_object(text)
     except ValueError:
-        # Nano's plain-text response format remains accepted for overlays.
         why, marker, body = text.partition("HARNESS:")
         if (
             not marker
             or not why.strip().startswith("WHY:")
             or not body.rstrip().endswith("END")
         ):
-            error_message = "Expected a JSON proposal or WHY:/HARNESS:/END response."
-            raise ValueError(
-                error_message,
-            ) from None
+            message = "Expected a JSON proposal or WHY:/HARNESS:/END response."
+            raise ValueError(message) from None
         overlay = body.rstrip()[:-3].strip()
         if overlay.startswith("```") and overlay.endswith("```"):
             overlay = overlay.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        value = {
+        value: dict[str, object] = {
             "rationale": why.strip()[4:].strip(),
             "overlay": overlay,
             "signature": clusters[0]["signature"],
         }
+        return value
+
+
+def _proposal_fields(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return object_field(value, "proposal")
+    raise ValueError(_PROPOSAL_ERROR)
+
+
+def _rationale(value: object) -> str:
+    if isinstance(value, str) and value.strip():
+        return value
+    raise ValueError(_PROPOSAL_ERROR)
+
+
+def _source_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    message = "Plugin edits must map relative filenames to source text."
+    raise ValueError(message)
+
+
+def _proposal(value: object, clusters: Sequence[FailureCluster]) -> Proposal:
+    fields = _proposal_fields(value)
+    rationale = _rationale(fields.get("rationale"))
+    overlay = fields.get("overlay")
+    observed = signature(fields.get("signature"))
     if (
-        not isinstance(value, dict)
-        or set(value) - {"rationale", "signature", "overlay", "files"}
-        or not isinstance(value.get("rationale"), str)
-        or not value["rationale"].strip()
-        or value.get("signature") not in [cluster["signature"] for cluster in clusters]
-        or not isinstance(value.get("overlay"), str)
-        or not isinstance(value.get("files", {}), dict)
+        set(fields) - {"rationale", "signature", "overlay", "files"}
+        or not isinstance(overlay, str)
+        or observed is None
+        or observed not in [cluster["signature"] for cluster in clusters]
     ):
-        error_message = "Proposal requires a rationale, an observed signature, overlay text and optional files."
-        raise ValueError(
-            error_message,
-        )
-    if len(value["overlay"].encode("utf-8")) > config.max_overlay_bytes:
-        error_message = "Proposed overlay exceeds its byte limit."
-        raise ValueError(error_message)
-    roots = [workspace_path(workspace, root) for root in config.editable_roots]
-    changes = {config.overlay_path: value["overlay"].encode("utf-8")}
-    total = 0
-    for name, content in value.get("files", {}).items():
-        if not isinstance(name, str) or not isinstance(content, str):
-            error_message = "Plugin edits must map relative filenames to source text."
-            raise ValueError(error_message)
-        path = Path(name)
-        target = workspace_path(workspace, name)
+        raise ValueError(_PROPOSAL_ERROR)
+    result: Proposal = {
+        "rationale": rationale,
+        "overlay": overlay,
+        "signature": observed,
+    }
+    if "files" in fields:
+        result["files"] = _source_files(_proposal_fields(fields["files"]))
+    return result
+
+
+def _source_files(fields: Mapping[str, object]) -> dict[str, str]:
+    return {name: _source_text(value) for name, value in fields.items()}
+
+
+def _checked_source(
+    name: str,
+    content: str,
+    workspace: Path,
+    roots: list[Path],
+) -> bytes:
+    path = Path(name)
+    target = workspace_path(workspace, name)
+    allowed_kind = path.suffix == ".py" or path.name == "plugin.json"
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or not allowed_kind
+        or not any(target.is_relative_to(root) for root in roots)
+        or "self_harness" in path.parts
+    ):
+        message = "Proposal may edit only Python files inside configured plugin roots."
+        raise ValueError(message)
+    if path.name == "plugin.json":
+        value = json_object(content)
         if (
-            path.is_absolute()
-            or ".." in path.parts
-            or (path.suffix != ".py" and path.name != "plugin.json")
-            or not any(target.is_relative_to(root) for root in roots)
-            or "self_harness" in path.parts
+            not isinstance(value, dict)
+            or object_field(value, "manifest").get("sdk") != API_VERSION
         ):
-            error_message = (
-                "Proposal may edit only Python files inside configured plugin roots."
-            )
-            raise ValueError(
-                error_message,
-            )
-        if path.name == "plugin.json":
-            ctx_manifest = json_object(content)
-            if (
-                not isinstance(ctx_manifest, dict)
-                or ctx_manifest.get("sdk") != API_VERSION
-            ):
-                error_message = "Expected an SDK v4 plugin manifest."
-                raise ValueError(error_message)
-        else:
-            compile(content, str(target), "exec")
-        data = content.encode("utf-8")
+            message = "Expected an SDK v4 plugin manifest."
+            raise ValueError(message)
+    else:
+        compile(content, str(target), "exec")
+    return content.encode("utf-8")
+
+
+def parse(
+    text: str,
+    workspace: Path,
+    config: SelfHarnessSettings,
+    clusters: Sequence[FailureCluster],
+) -> tuple[Proposal, dict[str, bytes]]:
+    """Validate a bounded observed proposal before exposing any source changes.
+
+    Returns
+    -------
+    tuple[Proposal, dict[str, bytes]]
+        The checked result described above.
+
+    Raises
+    ------
+    ValueError
+        If the requested operation violates its validation contract.
+
+    """
+    proposal = _proposal(_proposal_value(text, clusters), clusters)
+    overlay = proposal["overlay"].encode("utf-8")
+    if len(overlay) > config.max_overlay_bytes:
+        message = "Proposed overlay exceeds its byte limit."
+        raise ValueError(message)
+    roots = [workspace_path(workspace, root) for root in config.editable_roots]
+    changes = {config.overlay_path: overlay}
+    total = 0
+    for name, content in proposal.get("files", {}).items():
+        data = _checked_source(name, content, workspace, roots)
         total += len(data)
         if total > config.max_patch_bytes:
-            error_message = "Proposed plugin patch exceeds its byte limit."
-            raise ValueError(error_message)
+            message = "Proposed plugin patch exceeds its byte limit."
+            raise ValueError(message)
         changes[name] = data
-    return value, changes
+    return proposal, changes
 
 
 def promote(
@@ -102,8 +168,15 @@ def promote(
     ctx: PluginContext,
     record: Callable[[str, str], None],
 ) -> bool:
-    """Check for intervening edits, replace atomically, reload, then record acceptance."""
-    write = ctx.service("atomic_write")
+    """Check intervening edits before atomic replacement and validated activation.
+
+    Returns
+    -------
+    bool
+        The checked result described above.
+
+    """
+    write = ctx.require_service(ATOMIC_WRITE).write
     applied: list[str] = []
 
     def prepare() -> None:
@@ -122,10 +195,11 @@ def promote(
     def rollback(error: BaseException) -> None:
         for name in reversed(applied):
             path = workspace_path(ctx.workspace, name)
-            if originals[name] is None:
+            original = originals[name]
+            if original is None:
                 path.unlink(missing_ok=True)
             else:
-                write(path, originals[name])
+                write(path, original)
         record("rejected", str(error))
 
     def commit() -> None:
@@ -137,6 +211,19 @@ def promote(
             "Self-harness candidate accepted; the next message uses the new harness.",
         )
 
+    return ctx.update_plugins(
+        add=_added_plugins(changes, config, ctx),
+        prepare=prepare,
+        commit=commit,
+        rollback=rollback,
+    )
+
+
+def _added_plugins(
+    changes: Mapping[str, bytes],
+    config: SelfHarnessSettings,
+    ctx: PluginContext,
+) -> list[str]:
     known = {snapshot["path"] for snapshot in ctx.plugin_sources()["packages"]}
     added = []
     for name in changes:
@@ -149,9 +236,4 @@ def promote(
                 manifest_name = str((plugin / "plugin.json").relative_to(ctx.workspace))
                 if str(plugin) not in known and manifest_name in changes:
                     added.append(str(plugin))
-    return ctx.update_plugins(
-        add=added,
-        prepare=prepare,
-        commit=commit,
-        rollback=rollback,
-    )
+    return added

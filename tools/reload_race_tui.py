@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import json
+import sys
 from pathlib import Path
 
 from .accept_tui import SOURCE, Case, wait_file
+from .acceptance_support import json_text, read_object, require, verification_paths
 
 PLUGIN = """import json
 import threading
@@ -43,22 +44,32 @@ def register(api: PluginAPI) -> None:
     api.configure(configure)
     api.register_service('race_revision', f"REV_{api.context.settings['revision']}")
     api.register_command(CommandDefinition('tick', tick, while_running=True))
-    api.register_command(CommandDefinition('observe', observe, while_running=True, scope='application'))
+    api.register_command(CommandDefinition(
+        'observe', observe, while_running=True, scope='application'))
     api.register_command(CommandDefinition('hold', hold))
 """
 
 DEPENDENT = """from raychat.sdk import CommandDefinition, PluginAPI
 def register(api: PluginAPI) -> None:
     revision = api.require_service('race_revision')
-    api.register_command(CommandDefinition('dependent', lambda args, ctx: str(revision), while_running=True))
+    api.register_command(CommandDefinition(
+        'dependent', lambda args, ctx: str(revision), while_running=True))
 """
 
 
 def run(case: Case) -> dict[str, object]:
+    """Verify twenty overlapping plugin reloads and deferred dependency rejection.
+
+    Returns
+    -------
+    dict[str, object]
+        The recorded outcome of every retained acceptance gate.
+
+    """
     package = case.work / "race"
     dependency = case.work / "dependent"
     defaults = {"revision": 0}
-    manifest = {
+    manifest: dict[str, object] = {
         "id": "race",
         "version": "1.0.0",
         "sdk": 4,
@@ -74,32 +85,43 @@ def run(case: Case) -> dict[str, object]:
     ):
         path.mkdir()
         (path / "plugin.json").write_text(
-            json.dumps({**manifest, "id": identifier, "requires": requires}),
+            json_text({**manifest, "id": identifier, "requires": requires}),
         )
         (path / "__init__.py").write_text(implementation)
     chat = case.chat()
-    observed = []
+    observed: list[dict[str, object]] = []
     try:
         chat.wait("Main chat", 30)
         chat.command_complete("/plugins link race", "packages")
         chat.command_complete("/plugins link dependent", "packages")
         for revision in range(1, 21):
             defaults["revision"] = revision
-            (package / "plugin.json").write_text(json.dumps(manifest))
+            (package / "plugin.json").write_text(json_text(manifest))
             # Deliberately overlap a worker's refresh with an application command.
             chat.send("/tick\t\r")
             marker = case.work / f"reload-{revision}.json"
             wait_file(chat, marker)
             chat.command("/observe", f"REV_{revision}")
             chat.wait(f"TICK_{revision}_{revision}")
-            observed.append(json.loads(marker.read_text()))
-        assert any(item["thread"] == "chat-agent-worker" for item in observed), observed
+            observed.append(read_object(marker))
+        require(
+            any(item["thread"] == "chat-agent-worker" for item in observed),
+            observed,
+        )
         chat.command_complete("/dependent", "REV_20")
         case.checks.append(
-            "20 rapid live edits preserve state and concurrent commands see complete generations",
+            (
+                "20 rapid live edits preserve state and concurrent "
+                "commands see complete "
+                "generations"
+            ),
         )
         case.checks.append(
-            "a worker-thread reload overlaps application input without transient runtime errors",
+            (
+                "a worker-thread reload overlaps application input "
+                "without transient runtime "
+                "errors"
+            ),
         )
 
         chat.send("/hold\t\r")
@@ -117,9 +139,9 @@ def run(case: Case) -> dict[str, object]:
             "Plugin replacement requires a turn boundary",
             "Runtime is closed or changing generations",
         ):
-            assert failure not in transcript, failure
+            require(failure not in transcript, failure)
         (case.output / "reload-observations.json").write_text(
-            json.dumps(observed, indent=2),
+            json_text(observed, indent=2),
         )
     finally:
         (case.work / "hold-release").write_text("release")
@@ -128,16 +150,12 @@ def run(case: Case) -> dict[str, object]:
 
 
 def main() -> None:
+    """Run the terminal acceptance command and emit its observed report."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, required=True)
-    arguments = parser.parse_args()
-    print(
-        json.dumps(
-            run(Case(arguments.root.resolve(), arguments.output.resolve())),
-            indent=2,
-        ),
-    )
+    paths = verification_paths(parser.parse_args())
+    sys.stdout.write(json_text(run(Case(paths.root, paths.output)), indent=2) + "\n")
 
 
 if __name__ == "__main__":

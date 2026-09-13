@@ -2,61 +2,187 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
+import contextvars
 import ctypes
 import hashlib
 import io
-import json
 import os
-import subprocess
+import re
 import sys
 import tempfile
 import time
 import unittest
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from raychat.sdk import workspace_path
 from raychat.type_support import override
-from raychat.validation import string_list_field, text_field
+from raychat.validation import (
+    json_object,
+    object_field,
+    string_list_field,
+    text_field,
+)
 
 if TYPE_CHECKING:
-    from typing_extensions import Buffer
+    from collections.abc import Sequence
+    from types import TracebackType
 
-    from plugins import filesystem as _rc_filesystem
-    from plugins import process as _rc_process
+    from typing_extensions import Buffer, Self
+
+    from plugins.filesystem import operations as _rc_filesystem
+    from plugins.process import runner as _rc_process
+    from plugins.process import windows as _windows
+    from raychat.service_contracts import CommandResult
 from pathlib import Path
-from types import TracebackType
 from unittest import mock
 
-from tests.plugin_support import plugin_module, registered_execute
+from tests.plugin_support import create_runtime, plugin_module, registered_execute
 
 if not TYPE_CHECKING:
-    _rc_filesystem = plugin_module("filesystem")
-    _rc_process = plugin_module("process")
+    _rc_filesystem = plugin_module("filesystem.operations")
+    _rc_process = plugin_module("process.runner")
+    _windows = plugin_module("process.windows")
 
 
-class WorkspaceAndExecutionTests(unittest.TestCase):
+_CANCELLATION_DEADLINE = 2
+_POINTER_BYTES_64 = 8
+_PROCESS_HANDLE = 202
+
+
+class _ExpectedFailure:
+    def __init__(
+        self,
+        expected: type[Exception] | tuple[type[Exception], ...],
+        pattern: str,
+    ) -> None:
+        """Retain concrete recorded state for this lifecycle test double."""
+        self.expected = expected
+        self.pattern = pattern
+        self.caught: Exception | None = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    @property
+    def exception(self) -> Exception:
+        """The exact exception observed by this failure guard.
+
+        Returns
+        -------
+        Exception
+            The original exception instance caught by the guarded operation.
+
+        Raises
+        ------
+        AssertionError
+            If the guarded operation has not raised an exception yet.
+
+        """
+        if self.caught is None:
+            message = "The expected exception has not been observed."
+            raise AssertionError(message)
+        return self.caught
+
+    def __exit__(
+        self,
+        _kind: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> bool:
+        if error is None:
+            message = f"Expected {self.expected!r}, but the operation succeeded."
+            raise AssertionError(message)
+        if not isinstance(error, self.expected):
+            return False
+        if self.pattern and re.search(self.pattern, str(error)) is None:
+            message = f"Expected {self.pattern!r} in {str(error)!r}."
+            raise AssertionError(message)
+        self.caught = error
+        return True
+
+
+class _Assertions(unittest.TestCase):
+    def equal(self, actual: object, expected: object) -> None:
+        """Record equal behavior for this operation check."""
+        if actual != expected:
+            self.fail(f"Expected {expected!r}, got {actual!r}.")
+
+    def same(self, actual: object, expected: object) -> None:
+        """Check identity across an intentionally replaced runtime boundary."""
+        if actual is not expected:
+            self.fail(f"Expected the original {expected!r} object, got {actual!r}.")
+
+    def check(self, *, condition: bool) -> None:
+        """Record check behavior for this operation check."""
+        if not condition:
+            self.fail("The expected operation behavior was not observed.")
+
+    @staticmethod
+    def rejecting(
+        expected: type[Exception] | tuple[type[Exception], ...],
+        pattern: str = "",
+    ) -> _ExpectedFailure:
+        """Record rejecting behavior for this operation check.
+
+        Returns
+        -------
+        _ExpectedFailure
+            The guard that retains a matching exception.
+
+        """
+        return _ExpectedFailure(expected, pattern)
+
+
+class _MemoryOutput:
+    def __init__(self, value: bytes = b"") -> None:
+        """Retain concrete recorded state for this lifecycle test double."""
+        self.stream = io.BytesIO(value)
+
+    async def read(self, count: int) -> bytes:
+        """Record read behavior for this operation check.
+
+        Returns
+        -------
+        bytes
+            The next bytes from the deterministic output stream.
+
+        """
+        return self.stream.read(count)
+
+
+class _WorkspaceFixture(_Assertions):
     @override
     def setUp(self) -> None:
+        """Create an independent workspace for this operation check."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
 
     @override
     def tearDown(self) -> None:
+        """Remove the workspace after all operation checks finish."""
         self.temporary.cleanup()
 
+
+class WorkspaceFilesystemTests(_WorkspaceFixture):
+    """Check exact filesystem results and all atomic mutation guards."""
+
     def test_workspace_path_accepts_relative_and_rejects_escape(self) -> None:
-        self.assertEqual(workspace_path(self.root, "."), self.root)
-        self.assertEqual(
+        """Workspace path accepts relative and rejects escape."""
+        self.equal(workspace_path(self.root, "."), self.root)
+        self.equal(
             workspace_path(self.root, "nested/file.txt"),
             (self.root / "nested" / "file.txt").resolve(),
         )
-        for value in ("", str(self.root), os.path.join("..", "outside.txt")):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+        for value in ("", str(self.root), str(Path("..") / "outside.txt")):
+            with self.subTest(value=value), self.rejecting(ValueError):
                 workspace_path(self.root, value)
 
     def test_workspace_path_rejects_symlink_escape_when_supported(self) -> None:
+        """Workspace path rejects symlink escape when supported."""
         outside = self.root.parent / (self.root.name + "-outside")
         outside.mkdir(exist_ok=True)
         link = self.root / "escape"
@@ -65,35 +191,37 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
         except (OSError, NotImplementedError):
             self.skipTest("Directory symlinks are unavailable")
         try:
-            with self.assertRaises(ValueError):
+            with self.rejecting(ValueError):
                 workspace_path(self.root, "escape/file.txt")
         finally:
             with contextlib.suppress(OSError):
                 outside.rmdir()
 
     def test_write_read_and_nested_parent_creation(self) -> None:
+        """Write read and nested parent creation."""
         write = {"action": "write", "path": "nested/file.txt", "content": "café ☃"}
         raw = "café ☃".encode()
         written = registered_execute(write, self.root, 1)
-        self.assertEqual(written["bytes_written"], len(raw))
-        self.assertEqual(written["sha256"], hashlib.sha256(raw).hexdigest())
+        self.equal(written["bytes_written"], len(raw))
+        self.equal(written["sha256"], hashlib.sha256(raw).hexdigest())
 
         result = registered_execute(
             {"action": "read", "path": "nested/file.txt"},
             self.root,
             1,
         )
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["content"], "café ☃")
-        self.assertEqual(result["offset"], 0)
-        self.assertEqual(result["bytes_read"], len(raw))
-        self.assertEqual(result["size"], len(raw))
-        self.assertIsNone(result["next_offset"])
-        self.assertFalse(result["truncated"])
-        self.assertFalse(result["encoding_errors"])
-        self.assertEqual(result["sha256"], hashlib.sha256(raw).hexdigest())
+        self.check(condition=bool(result["ok"]))
+        self.equal(result["content"], "café ☃")
+        self.equal(result["offset"], 0)
+        self.equal(result["bytes_read"], len(raw))
+        self.equal(result["size"], len(raw))
+        self.check(condition=result["next_offset"] is None)
+        self.check(condition=not (result["truncated"]))
+        self.check(condition=not (result["encoding_errors"]))
+        self.equal(result["sha256"], hashlib.sha256(raw).hexdigest())
 
     def test_read_pages_on_utf8_boundaries_and_continues_by_byte_offset(self) -> None:
+        """Read pages on utf8 boundaries and continues by byte offset."""
         path = self.root / "large.bin"
         prefix = b"a" * (_rc_filesystem.OUTPUT_BYTES - 1)
         raw = prefix + "☃".encode() + b"tail"
@@ -104,12 +232,12 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             self.root,
             1,
         )
-        self.assertEqual(first["content"], prefix.decode("ascii"))
-        self.assertEqual(first["bytes_read"], len(prefix))
-        self.assertEqual(first["next_offset"], len(prefix))
-        self.assertTrue(first["truncated"])
-        self.assertFalse(first["encoding_errors"])
-        self.assertEqual(first["sha256"], hashlib.sha256(raw).hexdigest())
+        self.equal(first["content"], prefix.decode("ascii"))
+        self.equal(first["bytes_read"], len(prefix))
+        self.equal(first["next_offset"], len(prefix))
+        self.check(condition=bool(first["truncated"]))
+        self.check(condition=not (first["encoding_errors"]))
+        self.equal(first["sha256"], hashlib.sha256(raw).hexdigest())
 
         second = registered_execute(
             {
@@ -121,14 +249,15 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             self.root,
             1,
         )
-        self.assertEqual(second["content"], "☃tail")
-        self.assertEqual(second["bytes_read"], 7)
-        self.assertIsNone(second["next_offset"])
-        self.assertNotIn("sha256", second)
+        self.equal(second["content"], "☃tail")
+        self.equal(second["bytes_read"], 7)
+        self.check(condition=second["next_offset"] is None)
+        self.check(condition="sha256" not in second)
 
     def test_read_preserves_arbitrary_bytes_with_base64_and_always_progresses(
         self,
     ) -> None:
+        """Read preserves arbitrary bytes with base64 and always progresses."""
         raw = b"\xff\x00a\xfe"
         (self.root / "binary.dat").write_bytes(raw)
         result = registered_execute(
@@ -137,14 +266,14 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             1,
         )
 
-        self.assertEqual(result["bytes_read"], 1)
-        self.assertEqual(result["next_offset"], 1)
-        self.assertTrue(result["encoding_errors"])
-        self.assertEqual(
+        self.equal(result["bytes_read"], 1)
+        self.equal(result["next_offset"], 1)
+        self.check(condition=bool(result["encoding_errors"]))
+        self.equal(
             base64.b64decode(text_field(result["content_base64"], "content_base64")),
             raw[:1],
         )
-        self.assertEqual(result["sha256"], hashlib.sha256(raw).hexdigest())
+        self.equal(result["sha256"], hashlib.sha256(raw).hexdigest())
 
         continuation = registered_execute(
             {
@@ -156,27 +285,28 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             self.root,
             1,
         )
-        self.assertTrue(continuation["encoding_errors"])
-        self.assertEqual(
+        self.check(condition=bool(continuation["encoding_errors"]))
+        self.equal(
             base64.b64decode(
                 text_field(continuation["content_base64"], "content_base64"),
             ),
             raw[1:],
         )
-        self.assertNotIn("sha256", continuation)
+        self.check(condition="sha256" not in continuation)
 
     def test_read_rejects_an_offset_past_eof_and_accepts_exact_eof(self) -> None:
+        """Read rejects an offset past eof and accepts exact eof."""
         (self.root / "short.txt").write_bytes(b"abc")
         eof = registered_execute(
             {"action": "read", "path": "short.txt", "offset": 3},
             self.root,
             1,
         )
-        self.assertEqual(eof["content"], "")
-        self.assertEqual(eof["bytes_read"], 0)
-        self.assertIsNone(eof["next_offset"])
-        self.assertNotIn("sha256", eof)
-        with self.assertRaisesRegex(ValueError, "exceeds file size"):
+        self.equal(eof["content"], "")
+        self.equal(eof["bytes_read"], 0)
+        self.check(condition=eof["next_offset"] is None)
+        self.check(condition="sha256" not in eof)
+        with self.rejecting(ValueError, "exceeds file size"):
             registered_execute(
                 {"action": "read", "path": "short.txt", "offset": 4},
                 self.root,
@@ -184,15 +314,16 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             )
 
     def test_list_is_globally_sorted_capped_and_cursor_paginated(self) -> None:
+        """List is globally sorted capped and cursor paginated."""
         for index in reversed(range(202)):
             (self.root / f"item-{index:03}.txt").write_text("", encoding="utf-8")
         expected = [f"item-{index:03}.txt" for index in range(202)]
 
         legacy = registered_execute({"action": "list", "path": "."}, self.root, 1)
-        self.assertTrue(legacy["ok"])
-        self.assertTrue(legacy["truncated"])
-        self.assertEqual(legacy["entries"], expected[:200])
-        self.assertEqual(legacy["next_cursor"], expected[199])
+        self.check(condition=bool(legacy["ok"]))
+        self.check(condition=bool(legacy["truncated"]))
+        self.equal(legacy["entries"], expected[:200])
+        self.equal(legacy["next_cursor"], expected[199])
 
         entries: list[str] = []
         cursor = None
@@ -206,30 +337,35 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             )
             cursor = page["next_cursor"]
             if cursor is None:
-                self.assertFalse(page["truncated"])
+                self.check(condition=not (page["truncated"]))
                 break
-        self.assertEqual(entries, expected)
-        self.assertEqual(len(entries), len(set(entries)))
+        self.equal(entries, expected)
+        self.equal(len(entries), len(set(entries)))
 
     def test_atomic_write_failure_preserves_original_and_cleans_temporary(self) -> None:
+        """Atomic write failure preserves original and cleans temporary."""
         path = self.root / "stable.txt"
         path.write_bytes(b"original")
         before_mode = path.stat().st_mode
 
-        with mock.patch.object(os, "replace", side_effect=OSError("failed")):
-            with self.assertRaisesRegex(OSError, "failed"):
-                registered_execute(
-                    {"action": "write", "path": "stable.txt", "content": "new"},
-                    self.root,
-                    1,
-                )
+        with (
+            mock.patch.object(os, "replace", side_effect=OSError("failed")),
+            self.rejecting(OSError, "failed"),
+        ):
+            registered_execute(
+                {"action": "write", "path": "stable.txt", "content": "new"},
+                self.root,
+                1,
+            )
 
-        self.assertEqual(path.read_bytes(), b"original")
-        self.assertEqual(path.stat().st_mode, before_mode)
-        self.assertEqual(list(self.root.glob(".stable.txt.chat-agent-*.tmp")), [])
+        self.equal(path.read_bytes(), b"original")
+        self.equal(path.stat().st_mode, before_mode)
+        self.equal(list(self.root.glob(".stable.txt.chat-agent-*.tmp")), [])
 
-    @unittest.skipUnless(os.name == "posix", "POSIX mode bits are required")
     def test_atomic_write_and_edit_preserve_existing_mode(self) -> None:
+        """Atomic write and edit preserve existing mode."""
+        if os.name != "posix":
+            self.skipTest("POSIX mode bits are required")
         path = self.root / "executable.py"
         path.write_text("old\n", encoding="utf-8")
         path.chmod(0o751)
@@ -239,7 +375,7 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             self.root,
             1,
         )
-        self.assertEqual(path.stat().st_mode & 0o777, 0o751)
+        self.equal(path.stat().st_mode & 0o777, 0o751)
         edited = registered_execute(
             {
                 "action": "edit",
@@ -252,10 +388,11 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             self.root,
             1,
         )
-        self.assertTrue(edited["ok"])
-        self.assertEqual(path.stat().st_mode & 0o777, 0o751)
+        self.check(condition=bool(edited["ok"]))
+        self.equal(path.stat().st_mode & 0o777, 0o751)
 
     def test_streaming_hash_checked_edit_replaces_only_the_byte_range(self) -> None:
+        """Streaming hash checked edit replaces only the byte range."""
         prefix = ("prefix-☃\n" * 8_000).encode("utf-8")
         removed = "REMOVE-é".encode()
         suffix = ("\nsuffix-λ" * 8_000).encode("utf-8")
@@ -279,14 +416,15 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
         )
 
         expected = prefix + replacement.encode("utf-8") + suffix
-        self.assertEqual(path.read_bytes(), expected)
-        self.assertEqual(result["bytes_removed"], len(removed))
-        self.assertEqual(result["bytes_inserted"], len(replacement.encode("utf-8")))
-        self.assertEqual(result["size"], len(expected))
-        self.assertEqual(result["sha256"], hashlib.sha256(expected).hexdigest())
-        self.assertEqual(result["path"], "large.txt")
+        self.equal(path.read_bytes(), expected)
+        self.equal(result["bytes_removed"], len(removed))
+        self.equal(result["bytes_inserted"], len(replacement.encode("utf-8")))
+        self.equal(result["size"], len(expected))
+        self.equal(result["sha256"], hashlib.sha256(expected).hexdigest())
+        self.equal(result["path"], "large.txt")
 
     def test_edit_supports_insert_and_delete(self) -> None:
+        """Edit supports insert and delete."""
         path = self.root / "changes.txt"
         path.write_text("abcd", encoding="utf-8")
         digest = hashlib.sha256(b"abcd").hexdigest()
@@ -302,7 +440,7 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             self.root,
             1,
         )
-        self.assertEqual(path.read_text(encoding="utf-8"), "abXYcd")
+        self.equal(path.read_text(encoding="utf-8"), "abXYcd")
         deleted = registered_execute(
             {
                 "action": "edit",
@@ -315,10 +453,11 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             self.root,
             1,
         )
-        self.assertEqual(path.read_text(encoding="utf-8"), "abcd")
-        self.assertEqual(deleted["bytes_inserted"], 0)
+        self.equal(path.read_text(encoding="utf-8"), "abcd")
+        self.equal(deleted["bytes_inserted"], 0)
 
     def test_edit_rejects_stale_hash_split_offsets_and_invalid_utf8(self) -> None:
+        """Edit rejects stale hash split offsets and invalid utf8."""
         path = self.root / "guarded.txt"
         original = "a☃b".encode()
         path.write_bytes(original)
@@ -336,17 +475,14 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
         )
         for action, message in cases:
             with self.subTest(message=message):
-                with self.assertRaisesRegex(ValueError, message):
+                with self.rejecting(ValueError, message):
                     registered_execute(action, self.root, 1)
-                self.assertEqual(path.read_bytes(), original)
-                self.assertEqual(
-                    list(self.root.glob(".guarded.txt.chat-agent-*.tmp")),
-                    [],
-                )
+                self.equal(path.read_bytes(), original)
+                self.equal(list(self.root.glob(".guarded.txt.chat-agent-*.tmp")), [])
 
         invalid = b"a\xffb"
         path.write_bytes(invalid)
-        with self.assertRaisesRegex(ValueError, "valid UTF-8"):
+        with self.rejecting(ValueError, "valid UTF-8"):
             registered_execute(
                 {
                     **valid,
@@ -357,11 +493,12 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
                 self.root,
                 1,
             )
-        self.assertEqual(path.read_bytes(), invalid)
+        self.equal(path.read_bytes(), invalid)
 
     def test_atomic_edit_replace_failure_preserves_original_and_cleans_temporary(
         self,
     ) -> None:
+        """Atomic edit replace failure preserves original and cleans temporary."""
         path = self.root / "stable-edit.txt"
         original = b"before"
         path.write_bytes(original)
@@ -374,14 +511,17 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             "expected_sha256": hashlib.sha256(original).hexdigest(),
         }
 
-        with mock.patch.object(os, "replace", side_effect=OSError("failed")):
-            with self.assertRaisesRegex(OSError, "failed"):
-                registered_execute(action, self.root, 1)
+        with (
+            mock.patch.object(os, "replace", side_effect=OSError("failed")),
+            self.rejecting(OSError, "failed"),
+        ):
+            registered_execute(action, self.root, 1)
 
-        self.assertEqual(path.read_bytes(), original)
-        self.assertEqual(list(self.root.glob(".stable-edit.txt.chat-agent-*.tmp")), [])
+        self.equal(path.read_bytes(), original)
+        self.equal(list(self.root.glob(".stable-edit.txt.chat-agent-*.tmp")), [])
 
     def test_file_operation_errors_and_unknown_execute_action(self) -> None:
+        """File operation errors and unknown execute action."""
         directory = self.root / "directory"
         directory.mkdir()
         for action in (
@@ -399,27 +539,35 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             },
             {"action": "other", "path": "x"},
         ):
-            with self.subTest(action=action):
-                with self.assertRaises((ValueError, OSError)):
-                    registered_execute(action, self.root, 1)
+            with (
+                self.subTest(action=action),
+                self.rejecting((ValueError, OSError)),
+            ):
+                registered_execute(action, self.root, 1)
+
+
+class ProcessExecutionTests(_WorkspaceFixture):
+    """Check real child execution, bounded output and process-tree cleanup."""
 
     def test_run_command_captures_output_exit_and_cwd(self) -> None:
+        """Run command captures output exit and cwd."""
         code = (
             "import os,sys; "
             "print('out-☃'); print('err-☃', file=sys.stderr); "
             "print(os.getcwd()); raise SystemExit(3)"
         )
         result = _rc_process.run_command([sys.executable, "-c", code], self.root, 5)
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["returncode"], 3)
-        self.assertIn("out-☃", result["stdout"])
-        self.assertIn(str(self.root), result["stdout"])
-        self.assertIn("err-☃", result["stderr"])
-        self.assertFalse(result["timed_out"])
-        self.assertFalse(result["stdout_truncated"])
-        self.assertFalse(result["stderr_truncated"])
+        self.check(condition=not (result["ok"]))
+        self.equal(result["returncode"], 3)
+        self.check(condition="out-☃" in result["stdout"])
+        self.check(condition=str(self.root) in result["stdout"])
+        self.check(condition="err-☃" in result["stderr"])
+        self.check(condition=not (result["timed_out"]))
+        self.check(condition=not (result["stdout_truncated"]))
+        self.check(condition=not (result["stderr_truncated"]))
 
     def test_run_command_does_not_use_a_shell_and_stdin_is_eof(self) -> None:
+        """Run command does not use a shell and stdin is eof."""
         argument = "; echo this-must-not-run"
         code = "import json,sys; print(json.dumps([sys.argv[1], sys.stdin.read()]))"
         result = _rc_process.run_command(
@@ -427,10 +575,11 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             self.root,
             5,
         )
-        self.assertTrue(result["ok"])
-        self.assertEqual(json.loads(result["stdout"]), [argument, ""])
+        self.check(condition=bool(result["ok"]))
+        self.equal(json_object(result["stdout"]), [argument, ""])
 
     def test_run_command_filters_credentials_from_child_environment(self) -> None:
+        """Run command filters credentials from child environment."""
         code = (
             "import json,os; print(json.dumps({"
             "'fireworks': os.getenv('FIREWORK_API_KEY'),"
@@ -443,25 +592,22 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             "'java_home': os.getenv('JAVA_HOME'),"
             "'cargo_home': os.getenv('CARGO_HOME')}))"
         )
-        with mock.patch.dict(
-            os.environ,
-            {
-                "FIREWORK_API_KEY": "super-secret",
-                "CHAT_AGENT_TEST_SECRET": "hidden",
-                "HOME": "portable-home",
-                "USERPROFILE": "portable-profile",
-                "COMSPEC": "portable-comspec",
-                "APPDATA": "portable-appdata",
-                "LOCALAPPDATA": "portable-localappdata",
-                "JAVA_HOME": "portable-java",
-                "CARGO_HOME": "portable-cargo",
-            },
-            clear=False,
-        ):
+        environment = {
+            "FIREWORK_API_KEY": "super-secret",
+            "CHAT_AGENT_TEST_SECRET": "hidden",
+            "HOME": "portable-home",
+            "USERPROFILE": "portable-profile",
+            "COMSPEC": "portable-comspec",
+            "APPDATA": "portable-appdata",
+            "LOCALAPPDATA": "portable-localappdata",
+            "JAVA_HOME": "portable-java",
+            "CARGO_HOME": "portable-cargo",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
             result = _rc_process.run_command([sys.executable, "-c", code], self.root, 5)
-        self.assertTrue(result["ok"])
-        self.assertEqual(
-            json.loads(result["stdout"]),
+        self.check(condition=bool(result["ok"]))
+        self.equal(
+            json_object(result["stdout"]),
             {
                 "fireworks": None,
                 "other": None,
@@ -474,29 +620,31 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
                 "cargo_home": "portable-cargo",
             },
         )
-        self.assertNotIn("super-secret", result["stdout"] + result["stderr"])
+        self.check(condition="super-secret" not in result["stdout"] + result["stderr"])
 
     def test_run_command_marks_timeout(self) -> None:
+        """Run command marks timeout."""
         result = _rc_process.run_command(
             [sys.executable, "-c", "import time; time.sleep(10)"],
             self.root,
             0.1,
         )
-        self.assertTrue(result["timed_out"])
-        self.assertFalse(result["ok"])
-        self.assertIsNotNone(result["returncode"])
+        self.check(condition=bool(result["timed_out"]))
+        self.check(condition=not (result["ok"]))
+        self.check(condition=result["returncode"] is not None)
 
     def test_run_command_rejects_nonfinite_and_boolean_timeouts(self) -> None:
+        """Run command rejects nonfinite and boolean timeouts."""
         for timeout in (0, -1, float("nan"), float("inf"), True):
-            with self.subTest(timeout=timeout):
-                with self.assertRaises(ValueError):
-                    _rc_process.run_command(
-                        [sys.executable, "-c", "pass"],
-                        self.root,
-                        timeout,
-                    )
+            with self.subTest(timeout=timeout), self.rejecting(ValueError):
+                _rc_process.run_command(
+                    [sys.executable, "-c", "pass"],
+                    self.root,
+                    timeout,
+                )
 
     def test_run_command_truncates_stdout_and_stderr(self) -> None:
+        """Run command truncates stdout and stderr."""
         head = _rc_process.COMMAND_OUTPUT_BYTES // 2
         tail = _rc_process.COMMAND_OUTPUT_BYTES - head
         omitted = 41
@@ -508,64 +656,84 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             f"os.write(2,base64.b64decode({base64.b64encode(stderr)!r}))"
         )
         result = _rc_process.run_command([sys.executable, "-c", code], self.root, 5)
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["stdout"].startswith("H" * head))
-        self.assertTrue(result["stdout"].endswith("T" * tail))
-        self.assertTrue(result["stderr"].startswith("h" * head))
-        self.assertTrue(result["stderr"].endswith("t" * tail))
-        self.assertTrue(result["stdout_truncated"])
-        self.assertTrue(result["stderr_truncated"])
-        self.assertEqual(result["stdout_omitted_bytes"], len(stdout) - head - tail)
-        self.assertEqual(result["stderr_omitted_bytes"], len(stderr) - head - tail)
-        self.assertIn(
-            f"<{result['stdout_omitted_bytes']} bytes omitted>",
-            result["stdout"],
+        self.check(condition=bool(result["ok"]))
+        self.check(condition=bool(result["stdout"].startswith("H" * head)))
+        self.check(condition=bool(result["stdout"].endswith("T" * tail)))
+        self.check(condition=bool(result["stderr"].startswith("h" * head)))
+        self.check(condition=bool(result["stderr"].endswith("t" * tail)))
+        self.check(condition=bool(result["stdout_truncated"]))
+        self.check(condition=bool(result["stderr_truncated"]))
+        self.equal(result["stdout_omitted_bytes"], len(stdout) - head - tail)
+        self.equal(result["stderr_omitted_bytes"], len(stderr) - head - tail)
+        self.check(
+            condition=f"<{result['stdout_omitted_bytes']} bytes omitted>"
+            in result["stdout"],
         )
-        self.assertFalse(result["stdout_encoding_errors"])
-        self.assertFalse(result["stderr_encoding_errors"])
+        self.check(condition=not (result["stdout_encoding_errors"]))
+        self.check(condition=not (result["stderr_encoding_errors"]))
 
     def test_run_command_renders_invalid_bytes_without_replacement_loss(self) -> None:
+        """Run command renders invalid bytes without replacement loss."""
         code = "import os; os.write(1,b'head\\xfftail'); os.write(2,b'err\\x80end')"
         result = _rc_process.run_command([sys.executable, "-c", code], self.root, 5)
 
-        self.assertEqual(result["stdout"], r"head\xfftail")
-        self.assertEqual(result["stderr"], r"err\x80end")
-        self.assertNotIn("\ufffd", result["stdout"] + result["stderr"])
-        self.assertTrue(result["stdout_encoding_errors"])
-        self.assertTrue(result["stderr_encoding_errors"])
-        self.assertEqual(result["stdout_omitted_bytes"], 0)
-        self.assertEqual(result["stderr_omitted_bytes"], 0)
+        self.equal(result["stdout"], r"head\xfftail")
+        self.equal(result["stderr"], r"err\x80end")
+        self.check(condition="\ufffd" not in result["stdout"] + result["stderr"])
+        self.check(condition=bool(result["stdout_encoding_errors"]))
+        self.check(condition=bool(result["stderr_encoding_errors"]))
+        self.equal(result["stdout_omitted_bytes"], 0)
+        self.equal(result["stderr_omitted_bytes"], 0)
 
     def test_run_command_checks_cancellation_before_spawning(self) -> None:
+        """Run command checks cancellation before spawning."""
         cancelled = OSError("cancel before spawn")
 
         def cancel() -> None:
+            """Record cancel behavior for this operation check."""
             raise cancelled
 
-        with mock.patch.object(subprocess, "Popen") as popen:
-            with self.assertRaises(OSError) as caught:
-                _rc_process.run_command(
-                    [sys.executable, "-c", "pass"],
-                    self.root,
-                    5,
-                    cancel,
-                )
-        self.assertIs(caught.exception, cancelled)
+        with (
+            mock.patch.object(asyncio, "create_subprocess_exec") as popen,
+            self.rejecting(OSError) as caught,
+        ):
+            _rc_process.run_command(
+                [sys.executable, "-c", "pass"],
+                self.root,
+                5,
+                cancel,
+            )
+        self.check(condition=caught.exception is cancelled)
         popen.assert_not_called()
 
     def test_run_command_cleanup_failure_does_not_mask_cancellation(self) -> None:
+        """Run command cleanup failure does not mask cancellation."""
         cancelled = RuntimeError("cancel during command")
         cleanup_error = OSError("cleanup failed")
         calls = 0
 
         class FakeProcess:
+            """Provide fake process behavior for lifecycle checks."""
+
             pid = 123
             stdin = None
-            stdout = io.BytesIO()
-            stderr = io.BytesIO()
-            returncode = None
+            stdout = _MemoryOutput()
+            stderr = _MemoryOutput()
+            returncode: int | None = None
+
+            async def wait(self) -> int:
+                """Provide the async exit notification consumed by the runner.
+
+                Returns
+                -------
+                int
+                    A deterministic exit code if cancellation does not win first.
+
+                """
+                return 0 if self.returncode is None else self.returncode
 
         def cancel() -> None:
+            """Record cancel behavior for this operation check."""
             nonlocal calls
             calls += 1
             if calls > 1:
@@ -574,21 +742,21 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
         with (
             mock.patch.object(
                 _rc_process,
-                "_spawn_command",
+                "spawn_command",
                 return_value=(FakeProcess(), None),
             ),
             mock.patch.object(
                 _rc_process,
-                "_terminate_posix_process_group",
+                "terminate_posix_process_group",
                 side_effect=cleanup_error,
             ),
             mock.patch.object(os, "name", "posix"),
+            self.rejecting(RuntimeError) as caught,
         ):
-            with self.assertRaises(RuntimeError) as caught:
-                _rc_process.run_command(["program"], self.root, 5, cancel)
+            _rc_process.run_command(["program"], self.root, 5, cancel)
 
-        self.assertIs(caught.exception, cancelled)
-        self.assertIs(caught.exception.__cause__, cleanup_error)
+        self.check(condition=caught.exception is cancelled)
+        self.check(condition=caught.exception.__cause__ is cleanup_error)
 
     @staticmethod
     def _descendant_command(
@@ -610,31 +778,36 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
         )
         return [sys.executable, "-c", leader]
 
-    @unittest.skipUnless(os.name == "posix", "POSIX process groups are required")
     def test_posix_cancellation_kills_foreground_process_and_descendant(self) -> None:
+        """Posix cancellation kills foreground process and descendant."""
+        if os.name != "posix":
+            self.skipTest("POSIX process groups are required")
         ready = self.root / "cancel-ready"
         marker = self.root / "cancel-orphan"
         cancelled = RuntimeError("cancel running command")
 
         def cancel() -> None:
+            """Record cancel behavior for this operation check."""
             if ready.exists():
                 raise cancelled
 
         started = time.monotonic()
-        with self.assertRaises(RuntimeError) as caught:
+        with self.rejecting(RuntimeError) as caught:
             _rc_process.run_command(
                 self._descendant_command(ready, marker, wait_for_leader=True),
                 self.root,
                 5,
                 cancel,
             )
-        self.assertIs(caught.exception, cancelled)
-        self.assertLess(time.monotonic() - started, 2)
+        self.check(condition=caught.exception is cancelled)
+        self.check(condition=time.monotonic() - started < _CANCELLATION_DEADLINE)
         time.sleep(0.55)
-        self.assertFalse(marker.exists())
+        self.check(condition=not (marker.exists()))
 
-    @unittest.skipUnless(os.name == "posix", "POSIX process groups are required")
     def test_posix_timeout_kills_foreground_process_and_descendant(self) -> None:
+        """Posix timeout kills foreground process and descendant."""
+        if os.name != "posix":
+            self.skipTest("POSIX process groups are required")
         ready = self.root / "timeout-ready"
         marker = self.root / "timeout-orphan"
         result = _rc_process.run_command(
@@ -643,12 +816,14 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             0.15,
         )
 
-        self.assertTrue(result["timed_out"])
+        self.check(condition=bool(result["timed_out"]))
         time.sleep(0.55)
-        self.assertFalse(marker.exists())
+        self.check(condition=not (marker.exists()))
 
-    @unittest.skipUnless(os.name == "posix", "POSIX process groups are required")
     def test_posix_normal_leader_exit_still_kills_background_descendant(self) -> None:
+        """Posix normal leader exit still kills background descendant."""
+        if os.name != "posix":
+            self.skipTest("POSIX process groups are required")
         ready = self.root / "normal-ready"
         marker = self.root / "normal-orphan"
         result = _rc_process.run_command(
@@ -657,13 +832,15 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             5,
         )
 
-        self.assertTrue(result["ok"])
-        self.assertTrue(ready.exists())
+        self.check(condition=bool(result["ok"]))
+        self.check(condition=bool(ready.exists()))
         time.sleep(0.55)
-        self.assertFalse(marker.exists())
+        self.check(condition=not (marker.exists()))
 
-    @unittest.skipUnless(os.name == "nt", "Windows Job Objects are required")
     def test_windows_job_kills_descendants_after_timeout_and_normal_exit(self) -> None:
+        """Windows job kills descendants after timeout and normal exit."""
+        if os.name != "nt":
+            self.skipTest("Windows Job Objects are required")
         for label, wait_for_leader, timeout in (
             ("timeout", True, 0.6),
             ("normal", False, 5),
@@ -681,14 +858,15 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
                     self.root,
                     timeout,
                 )
-                self.assertEqual(result["timed_out"], wait_for_leader)
-                self.assertTrue(ready.exists())
+                self.equal(result["timed_out"], wait_for_leader)
+                self.check(condition=bool(ready.exists()))
                 if not wait_for_leader:
-                    self.assertTrue(result["ok"])
+                    self.check(condition=bool(result["ok"]))
                 time.sleep(1.65)
-                self.assertFalse(marker.exists())
+                self.check(condition=not (marker.exists()))
 
     def test_execute_run_uses_checked_relative_cwd(self) -> None:
+        """Execute run uses checked relative cwd."""
         subdir = self.root / "sub"
         subdir.mkdir()
         action = {
@@ -697,119 +875,182 @@ class WorkspaceAndExecutionTests(unittest.TestCase):
             "cwd": "sub",
         }
         result = registered_execute(action, self.root, 5)
-        self.assertTrue(result["ok"])
-        self.assertEqual(
+        self.check(condition=bool(result["ok"]))
+        self.equal(
             os.path.normcase(text_field(result["stdout"], "stdout").strip()),
             os.path.normcase(str(subdir.resolve())),
         )
-        with self.assertRaises(ValueError):
+        with self.rejecting(ValueError):
             registered_execute({**action, "cwd": ".."}, self.root, 5)
 
     def test_execute_forwards_command_cancellation_callback(self) -> None:
-        action = {"action": "run", "argv": ["program"], "cwd": "."}
+        """Execute forwards command cancellation callback."""
+        action: dict[str, object] = {
+            "action": "run",
+            "argv": ["program"],
+            "cwd": ".",
+        }
         cancel = mock.Mock()
         expected = {"ok": True}
-        from tests.plugin_support import create_runtime
-
         runtime = create_runtime(self.root, plugins=["process"], timeout=5)
         self.addCleanup(runtime.close)
         with mock.patch.object(
-            runtime.modules["process"],
+            plugin_module("process.registration", runtime=runtime),
             "run_command",
             return_value=expected,
         ) as run:
-            result = runtime.execute(action, cancel_check=cancel)
+            result: object = runtime.execute(action, cancel_check=cancel)
 
-        self.assertEqual(result, expected)
-        self.assertIsNot(result, expected)
+        self.equal(result, expected)
+        self.check(condition=result is not expected)
+        expected_argv = ["program"]
         run.assert_called_once_with(
-            ["program"],
+            expected_argv,
             workspace_path(self.root, "."),
             5,
             cancel,
         )
 
 
-class WindowsJobTests(unittest.TestCase):
+class WindowsJobTests(_Assertions):
+    """Check portable Windows ABI, handle ownership and gate ordering."""
+
     class FakeApi:
+        """Provide fake api behavior for lifecycle checks."""
+
         def __init__(self, calls: list[tuple[object, ...]]) -> None:
+            """Retain concrete recorded state for this lifecycle test double."""
             self.calls = calls
 
         def create(self) -> int:
+            """Record create behavior for this operation check.
+
+            Returns
+            -------
+            int
+                The fixed full-width job handle.
+
+            """
             self.calls.append(("create",))
             return 101
 
         def set_kill_on_close(self, handle: int) -> None:
+            """Record set kill on close behavior for this operation check."""
             self.calls.append(("set_kill_on_close", handle))
 
         def open_process(self, process_id: int) -> int:
+            """Record open process behavior for this operation check.
+
+            Returns
+            -------
+            int
+                The fixed process handle whose closure is checked.
+
+            """
             self.calls.append(("open_process", process_id))
             return 202
 
         def assign(self, job: int, process: int) -> None:
+            """Record assign behavior for this operation check."""
             self.calls.append(("assign", job, process))
 
         def terminate(self, job: int) -> None:
+            """Record terminate behavior for this operation check."""
             self.calls.append(("terminate", job))
 
         def close(self, handle: int) -> None:
+            """Record close behavior for this operation check."""
             self.calls.append(("close", handle))
 
     class RecordingInput(io.BytesIO):
+        """Provide recording input behavior for lifecycle checks."""
+
         def __init__(self, calls: list[tuple[object, ...]]) -> None:
+            """Retain concrete recorded state for this lifecycle test double."""
             super().__init__()
             self.calls = calls
 
         @override
         def write(self, data: Buffer) -> int:
+            """Record write behavior for this operation check.
+
+            Returns
+            -------
+            int
+                The number of recorded input bytes.
+
+            """
             self.calls.append(("gate_write", bytes(data)))
             return super().write(data)
 
+        async def drain(self) -> None:
+            """Allow inspection after all queued gate bytes have been written."""
+
+        async def wait_closed(self) -> None:
+            """Report closure while retaining gate bytes for assertions."""
+
         @override
         def close(self) -> None:
+            """Record close behavior for this operation check."""
             self.calls.append(("gate_close",))
             # Keep bytes inspectable by the test.
 
     class FakeProcess:
+        """Provide fake process behavior for lifecycle checks."""
+
         def __init__(self, calls: list[tuple[object, ...]]) -> None:
+            """Retain concrete recorded state for this lifecycle test double."""
             self.calls = calls
             self.pid = 303
             self.input_pipe = WindowsJobTests.RecordingInput(calls)
             self.stdin = self.input_pipe
-            self.stdout = io.BytesIO()
-            self.stderr = io.BytesIO()
+            self.stdout = _MemoryOutput()
+            self.stderr = _MemoryOutput()
             self.returncode: int | None = None
 
         def poll(self) -> int | None:
+            """Record poll behavior for this operation check.
+
+            Returns
+            -------
+            int | None
+                The current simulated exit code.
+
+            """
             return self.returncode
 
         def kill(self) -> None:
+            """Record kill behavior for this operation check."""
             self.calls.append(("process_kill",))
             self.returncode = 1
 
-        def wait(self, timeout: float | None = None) -> int:
-            self.calls.append(("process_wait", timeout))
+        async def wait(self) -> int:
+            """Record wait behavior for this operation check.
+
+            Returns
+            -------
+            int
+                The exit code after the simulated process was reaped.
+
+            """
+            self.calls.append(("process_wait", None))
             if self.returncode is None:
                 self.returncode = 1
             return self.returncode
 
     def test_job_object_uses_pointer_sized_layout_and_closes_every_handle(self) -> None:
-        self.assertEqual(ctypes.sizeof(_rc_process._IoCounters), 48)
-        self.assertEqual(
-            _rc_process._JobObjectBasicLimitInformation.LimitFlags.offset,
-            16,
-        )
-        expected = 144 if ctypes.sizeof(ctypes.c_void_p) == 8 else 112
-        self.assertEqual(
-            ctypes.sizeof(_rc_process._JobObjectExtendedLimitInformation),
-            expected,
-        )
+        """Job object uses pointer sized layout and closes every handle."""
+        layout = _windows.job_layout()
+        self.equal(layout.io_counters_size, 48)
+        self.equal(layout.limit_flags_offset, 16)
+        expected = 144 if ctypes.sizeof(ctypes.c_void_p) == _POINTER_BYTES_64 else 112
+        self.equal(layout.extended_limits_size, expected)
 
         calls: list[tuple[object, ...]] = []
-        job = _rc_process._WindowsJob(self.FakeApi(calls))
+        job = _windows.WindowsJob(self.FakeApi(calls))
         job.assign(303)
-        self.assertIsNone(job.terminate_and_close())
-        self.assertEqual(
+        self.check(condition=job.terminate_and_close() is None)
+        self.equal(
             calls,
             [
                 ("create",),
@@ -821,58 +1062,65 @@ class WindowsJobTests(unittest.TestCase):
                 ("close", 101),
             ],
         )
-        self.assertIsNone(job.terminate_and_close())
+        self.check(condition=job.terminate_and_close() is None)
 
     def test_job_setup_failure_closes_handle_without_masking_primary(self) -> None:
+        """Job setup failure closes handle without masking primary."""
         calls: list[tuple[object, ...]] = []
         setup_error = OSError("set limits failed")
         close_error = RuntimeError("close failed")
 
         class FailingApi(WindowsJobTests.FakeApi):
+            """Provide failingapi behavior for lifecycle checks."""
+
             @override
             def set_kill_on_close(self, handle: int) -> None:
+                """Record set kill on close behavior for this operation check."""
                 super().set_kill_on_close(handle)
                 raise setup_error
 
             @override
             def close(self, handle: int) -> None:
+                """Record close behavior for this operation check."""
                 super().close(handle)
                 raise close_error
 
-        with self.assertRaises(OSError) as caught:
-            _rc_process._WindowsJob(FailingApi(calls))
+        with self.rejecting(OSError) as caught:
+            _windows.WindowsJob(FailingApi(calls))
 
-        self.assertIs(caught.exception, setup_error)
-        self.assertIs(caught.exception.__cause__, close_error)
-        self.assertEqual(
-            calls,
-            [("create",), ("set_kill_on_close", 101), ("close", 101)],
-        )
+        self.check(condition=caught.exception is setup_error)
+        self.check(condition=caught.exception.__cause__ is close_error)
+        self.equal(calls, [("create",), ("set_kill_on_close", 101), ("close", 101)])
 
     def test_assignment_failure_closes_process_handle_and_keeps_primary(self) -> None:
+        """Assignment failure closes process handle and keeps primary."""
         calls: list[tuple[object, ...]] = []
         assignment_error = OSError("assign failed")
         close_error = RuntimeError("process handle close failed")
 
         class FailingApi(WindowsJobTests.FakeApi):
+            """Provide failingapi behavior for lifecycle checks."""
+
             @override
             def assign(self, job: int, process: int) -> None:
+                """Record assign behavior for this operation check."""
                 super().assign(job, process)
                 raise assignment_error
 
             @override
             def close(self, handle: int) -> None:
+                """Record close behavior for this operation check."""
                 super().close(handle)
-                if handle == 202:
+                if handle == _PROCESS_HANDLE:
                     raise close_error
 
-        job = _rc_process._WindowsJob(FailingApi(calls))
-        with self.assertRaises(OSError) as caught:
+        job = _windows.WindowsJob(FailingApi(calls))
+        with self.rejecting(OSError) as caught:
             job.assign(303)
 
-        self.assertIs(caught.exception, assignment_error)
-        self.assertIs(caught.exception.__cause__, close_error)
-        self.assertEqual(
+        self.check(condition=caught.exception is assignment_error)
+        self.check(condition=caught.exception.__cause__ is close_error)
+        self.equal(
             calls,
             [
                 ("create",),
@@ -882,101 +1130,159 @@ class WindowsJobTests(unittest.TestCase):
                 ("close", 202),
             ],
         )
-        self.assertIsNone(job.terminate_and_close())
+        self.check(condition=job.terminate_and_close() is None)
 
     def test_windows_helper_releases_specification_only_after_job_assignment(
         self,
     ) -> None:
+        """Windows helper releases specification only after job assignment."""
         calls: list[tuple[object, ...]] = []
         process = self.FakeProcess(calls)
 
         class FakeJob:
-            def assign(self, process_id: int) -> None:
+            """Provide fake job behavior for lifecycle checks."""
+
+            @staticmethod
+            def assign(process_id: int) -> None:
+                """Record assign behavior for this operation check."""
                 calls.append(("job_assign", process_id))
 
-            def terminate_and_close(
-                self,
-            ) -> tuple[type[BaseException], BaseException, TracebackType | None] | None:
+            @staticmethod
+            def terminate_and_close() -> (
+                tuple[type[BaseException], BaseException, TracebackType | None] | None
+            ):
+                """Record terminate and close behavior for this operation check.
+
+                Returns
+                -------
+                tuple[type[BaseException], BaseException, TracebackType | None] | None
+                    The recorded cleanup failure, when this test injects one.
+
+                """
                 calls.append(("job_cleanup",))
                 return None
 
         job = FakeJob()
 
         def create_job() -> FakeJob:
+            """Record create job behavior for this operation check.
+
+            Returns
+            -------
+            FakeJob
+                The exact job instance whose assignment order is recorded.
+
+            """
             calls.append(("job_create",))
             return job
 
-        def popen(command: list[str], **kwargs: object) -> WindowsJobTests.FakeProcess:
-            calls.append(("helper_spawn", command, kwargs))
+        async def popen(*command: str, **kwargs: object) -> WindowsJobTests.FakeProcess:
+            """Record popen behavior for this operation check.
+
+            Returns
+            -------
+            WindowsJobTests.FakeProcess
+                The deterministic child process used for gate-order checks.
+
+            """
+            calls.append(("helper_spawn", list(command), kwargs))
+            await asyncio.sleep(0)
             return process
 
         def cancel() -> None:
+            """Record cancel behavior for this operation check."""
             calls.append(("cancel_check",))
 
         with (
-            mock.patch.object(_rc_process, "_WindowsJob", side_effect=create_job),
-            mock.patch.object(subprocess, "Popen", side_effect=popen),
+            mock.patch.object(_rc_process, "WindowsJob", side_effect=create_job),
+            mock.patch.object(asyncio, "create_subprocess_exec", side_effect=popen),
         ):
-            spawned, owner = _rc_process._spawn_windows_command(
-                ["tool", "argument"],
-                Path("C:/workspace"),
-                {"PATH": "bin"},
-                cancel,
+            spawned, owner = asyncio.run(
+                _rc_process.spawn_windows_command(
+                    ["tool", "argument"],
+                    Path("C:/workspace"),
+                    {"PATH": "bin"},
+                    cancel,
+                ),
             )
 
-        self.assertIs(spawned, process)
-        self.assertIs(owner, job)
+        self.check(condition=spawned is process)
+        self.same(owner, job)
         names = [call[0] for call in calls]
-        self.assertLess(names.index("job_create"), names.index("helper_spawn"))
-        self.assertLess(names.index("helper_spawn"), names.index("job_assign"))
-        self.assertLess(names.index("job_assign"), names.index("cancel_check"))
-        self.assertLess(names.index("cancel_check"), names.index("gate_write"))
-        specification = json.loads(process.input_pipe.getvalue().decode("ascii"))
-        self.assertEqual(specification["argv"], ["tool", "argument"])
-        self.assertEqual(specification["cwd"], os.fspath(Path("C:/workspace")))
+        self.check(condition=names.index("job_create") < names.index("helper_spawn"))
+        self.check(condition=names.index("helper_spawn") < names.index("job_assign"))
+        self.check(condition=names.index("job_assign") < names.index("cancel_check"))
+        self.check(condition=names.index("cancel_check") < names.index("gate_write"))
+        specification = object_field(
+            json_object(process.input_pipe.getvalue()),
+            "helper specification",
+        )
+        self.equal(specification["argv"], ["tool", "argument"])
+        self.equal(specification["cwd"], os.fspath(Path("C:/workspace")))
         helper_call = next(call for call in calls if call[0] == "helper_spawn")
         command, options = helper_call[1:3]
-        assert isinstance(command, list)
-        assert isinstance(options, dict)
-        self.assertEqual(command[:4], [sys.executable, "-I", "-S", "-c"])
-        self.assertEqual(
-            options["creationflags"],
-            _rc_process._CREATE_NEW_PROCESS_GROUP,
-        )
-        self.assertTrue(options["close_fds"])
+        command = string_list_field(command, "helper argv")
+        options = object_field(options, "helper options")
+        self.equal(command[:4], [sys.executable, "-I", "-S", "-c"])
+        self.equal(options["creationflags"], _windows.CREATE_NEW_PROCESS_GROUP)
+        self.check(condition=bool(options["close_fds"]))
 
     def test_windows_assignment_failure_is_fail_closed_before_gate_release(
         self,
     ) -> None:
+        """Windows assignment failure is fail closed before gate release."""
         calls: list[tuple[object, ...]] = []
         process = self.FakeProcess(calls)
         assignment_error = OSError("assignment failed")
 
         class FakeJob:
-            def assign(self, process_id: int) -> None:
+            """Provide fake job behavior for lifecycle checks."""
+
+            @staticmethod
+            def assign(process_id: int) -> None:
+                """Record assign behavior for this operation check."""
                 calls.append(("job_assign", process_id))
                 raise assignment_error
 
-            def terminate_and_close(
-                self,
-            ) -> tuple[type[BaseException], BaseException, TracebackType | None] | None:
+            @staticmethod
+            def terminate_and_close() -> (
+                tuple[type[BaseException], BaseException, TracebackType | None] | None
+            ):
+                """Record terminate and close behavior for this operation check.
+
+                Returns
+                -------
+                tuple[type[BaseException], BaseException, TracebackType | None] | None
+                    The recorded cleanup failure, when this test injects one.
+
+                """
                 calls.append(("job_cleanup",))
                 return None
 
         with (
-            mock.patch.object(_rc_process, "_WindowsJob", return_value=FakeJob()),
-            mock.patch.object(subprocess, "Popen", return_value=process),
+            mock.patch.object(_rc_process, "WindowsJob", return_value=FakeJob()),
+            mock.patch.object(asyncio, "create_subprocess_exec", return_value=process),
+            self.rejecting(OSError) as caught,
         ):
-            with self.assertRaises(OSError) as caught:
-                _rc_process._spawn_windows_command(["must-not-run"], Path(), {}, None)
+            asyncio.run(
+                _rc_process.spawn_windows_command(
+                    ["must-not-run"],
+                    Path(),
+                    {},
+                    None,
+                ),
+            )
 
-        self.assertIs(caught.exception, assignment_error)
-        self.assertFalse(any(call[0] == "gate_write" for call in calls))
-        self.assertIn(("job_cleanup",), calls)
-        self.assertIn(("process_kill",), calls)
-        self.assertTrue(process.input_pipe.closed or ("gate_close",) in calls)
+        self.check(condition=caught.exception is assignment_error)
+        self.check(condition=not (any(call[0] == "gate_write" for call in calls)))
+        self.check(condition=("job_cleanup",) in calls)
+        self.check(condition=("process_kill",) in calls)
+        self.check(
+            condition=bool(process.input_pipe.closed or ("gate_close",) in calls),
+        )
 
     def test_windows_cleanup_failure_does_not_mask_cancellation(self) -> None:
+        """Windows cleanup failure does not mask cancellation."""
         calls: list[tuple[object, ...]] = []
         process = self.FakeProcess(calls)
         cancelled = RuntimeError("cancelled")
@@ -984,26 +1290,147 @@ class WindowsJobTests(unittest.TestCase):
         cleanup_failure = (OSError, cleanup_error, None)
 
         class FakeJob:
-            def assign(self, process_id: int) -> None:
+            """Provide fake job behavior for lifecycle checks."""
+
+            @staticmethod
+            def assign(process_id: int) -> None:
+                """Record assign behavior for this operation check."""
                 calls.append(("job_assign", process_id))
 
-            def terminate_and_close(
-                self,
-            ) -> tuple[type[BaseException], BaseException, TracebackType | None] | None:
+            @staticmethod
+            def terminate_and_close() -> (
+                tuple[type[BaseException], BaseException, TracebackType | None] | None
+            ):
+                """Record terminate and close behavior for this operation check.
+
+                Returns
+                -------
+                tuple[type[BaseException], BaseException, TracebackType | None] | None
+                    The recorded cleanup failure, when this test injects one.
+
+                """
                 calls.append(("job_cleanup",))
                 return cleanup_failure
 
         def cancel() -> None:
+            """Record cancel behavior for this operation check."""
             raise cancelled
 
         with (
-            mock.patch.object(_rc_process, "_WindowsJob", return_value=FakeJob()),
-            mock.patch.object(subprocess, "Popen", return_value=process),
+            mock.patch.object(_rc_process, "WindowsJob", return_value=FakeJob()),
+            mock.patch.object(asyncio, "create_subprocess_exec", return_value=process),
+            self.rejecting(RuntimeError) as caught,
         ):
-            with self.assertRaises(RuntimeError) as caught:
-                _rc_process._spawn_windows_command(["must-not-run"], Path(), {}, cancel)
+            asyncio.run(
+                _rc_process.spawn_windows_command(
+                    ["must-not-run"],
+                    Path(),
+                    {},
+                    cancel,
+                ),
+            )
 
-        self.assertIs(caught.exception, cancelled)
-        self.assertIs(caught.exception.__cause__, cleanup_error)
-        self.assertFalse(any(call[0] == "gate_write" for call in calls))
-        self.assertIn(("process_kill",), calls)
+        self.check(condition=caught.exception is cancelled)
+        self.check(condition=caught.exception.__cause__ is cleanup_error)
+        self.check(condition=not (any(call[0] == "gate_write" for call in calls)))
+        self.check(condition=("process_kill",) in calls)
+
+
+class ExistingEventLoopTests(_WorkspaceFixture):
+    """Keep synchronous process execution usable inside an active event loop."""
+
+    def test_run_command_preserves_context_inside_existing_event_loop(self) -> None:
+        """Run an actual child and preserve cancellation context in the worker loop."""
+        marker = contextvars.ContextVar("command_marker", default="missing")
+        observations: list[str] = []
+
+        def cancel() -> None:
+            """Record cancel behavior for this operation check."""
+            observations.append(marker.get())
+
+        async def invoke() -> CommandResult:
+            """Record invoke behavior for this operation check.
+
+            Returns
+            -------
+            CommandResult
+                The actual child-process result from the existing-loop caller.
+
+            """
+            marker.set("caller context")
+            await asyncio.sleep(0)
+            return _rc_process.run_command(
+                [sys.executable, "-c", "print('nested loop')"],
+                self.root,
+                5,
+                cancel,
+            )
+
+        result = asyncio.run(invoke())
+        self.equal(result["stdout"], "nested loop\n")
+        self.check(condition=result["ok"])
+        self.check(condition=len(observations) > 1)
+        self.equal(set(observations), {"caller context"})
+
+
+@dataclass
+class _NativeFunction:
+    result: object
+    argtypes: Sequence[object] = ()
+    restype: object = None
+    calls: list[tuple[object, ...]] = field(default_factory=list)
+
+    def __call__(self, *arguments: object) -> object:
+        self.calls.append(arguments)
+        return self.result
+
+
+class _NativeKernel:
+    def __init__(self, functions: dict[str, _NativeFunction]) -> None:
+        self.functions = functions
+
+    def __getattr__(self, name: str) -> _NativeFunction:
+        return self.functions[name]
+
+
+class WindowsNativeBoundaryTests(_Assertions):
+    """Validate native prototypes, full-width handles and malformed native results."""
+
+    def test_native_calls_keep_pointer_width_and_reject_untyped_results(self) -> None:
+        """Retain wide handles and reject a malformed native return value."""
+        job_handle, process_handle = (1 << 48) + 17, (1 << 48) + 33
+        functions = {
+            name: _NativeFunction(1)
+            for name in (
+                "CreateJobObjectW",
+                "SetInformationJobObject",
+                "OpenProcess",
+                "AssignProcessToJobObject",
+                "TerminateJobObject",
+                "CloseHandle",
+            )
+        }
+        functions["CreateJobObjectW"].result = job_handle
+        functions["OpenProcess"].result = process_handle
+        kernel = _NativeKernel(functions)
+        with mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True):
+            api = _windows.NativeWindowsJobAPI()
+        self.equal(api.create(), job_handle)
+        self.equal(api.open_process(303), process_handle)
+        api.set_kill_on_close(job_handle)
+        api.assign(job_handle, process_handle)
+        api.terminate(job_handle)
+        api.close(process_handle)
+        api.close(job_handle)
+        self.equal(
+            functions["AssignProcessToJobObject"].calls,
+            [(job_handle, process_handle)],
+        )
+        self.equal(functions["CloseHandle"].calls, [(process_handle,), (job_handle,)])
+        self.same(functions["CreateJobObjectW"].restype, ctypes.c_void_p)
+        self.same(functions["OpenProcess"].restype, ctypes.c_void_p)
+        expected_handles = (ctypes.c_void_p, ctypes.c_void_p)
+        self.equal(functions["AssignProcessToJobObject"].argtypes, expected_handles)
+        functions["CreateJobObjectW"].result = "invalid native handle"
+        with self.rejecting(TypeError, "integer or null handle"):
+            api.create()

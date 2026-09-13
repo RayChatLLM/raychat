@@ -1,4 +1,3 @@
-# Copyright 2026
 """Exercise malformed external data at the shared configuration boundary."""
 
 from __future__ import annotations

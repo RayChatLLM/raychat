@@ -1,4 +1,3 @@
-# Copyright 2026
 """Measure animated terminal output with the full plugin profile, without a network."""
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from raychat.validation import (
     text_field,
 )
 
-from .drive_tui import TerminalChat
+from .drive_tui import TerminalChat, TerminalOptions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -258,12 +257,14 @@ def _size_samples(
             "fps_probe",
             "--no-session",
         ],
-        columns=columns,
-        rows=rows,
-        animated=True,
-        fps=None,
-        read_bytes_per_second=read_bytes_per_second,
-        launcher=launcher,
+        options=TerminalOptions(
+            columns=columns,
+            rows=rows,
+            animated=True,
+            fps=None,
+            read_bytes_per_second=read_bytes_per_second,
+            launcher=launcher,
+        ),
     )
     samples = []
     try:

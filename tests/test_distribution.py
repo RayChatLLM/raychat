@@ -1,4 +1,3 @@
-# Copyright 2026
 """Reject malformed JSON before reading distribution metadata fields."""
 
 import json

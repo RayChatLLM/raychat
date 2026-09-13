@@ -1,4 +1,3 @@
-# Copyright 2026
 """Exercise concrete plugin settings across the captured-module boundary."""
 
 from __future__ import annotations

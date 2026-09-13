@@ -11,23 +11,40 @@ import argparse
 import hashlib
 import json
 import shutil
+import sys
 import time
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
+from raychat.validation import json_object, object_field, text_field
+
+from .acceptance_support import ignore_bytecode, read_object, require
 from .bare_tui import PROVIDER_SOURCE
 from .drive_tui import TerminalChat
+from .probe_json import catalog_entries, receipt
+
+if TYPE_CHECKING:
+    from .probe_json import Receipt
 
 SOURCE = Path(__file__).resolve().parents[1]
+CURRENT_FIXTURE_SDK = 4
 IDENTIFIERS = ("alpha", "beta", "edited", "external", "linked", "disabled", "removed")
 
 
-def manifest(identifier: str, version: str = "1.0.0") -> dict[str, Any]:
+def manifest(identifier: str, version: str = "1.0.0") -> dict[str, object]:
+    """Build an independently authored plugin manifest for an upgrade fixture.
+
+    Returns
+    -------
+    dict[str, object]
+        Current-SDK fixture metadata with an explicit package version.
+
+    """
     return {
         "id": identifier,
         "version": version,
-        "sdk": 4,
+        "sdk": CURRENT_FIXTURE_SDK,
         "entrypoint": "__init__:register",
         "description": "Terminal profile upgrade fixture",
         "requires": {},
@@ -37,10 +54,12 @@ def manifest(identifier: str, version: str = "1.0.0") -> dict[str, Any]:
 
 
 def write_json(path: Path, value: object) -> None:
+    """Write deterministic fixture metadata and acceptance results."""
     path.write_text(json.dumps(value, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def command_package(path: Path, identifier: str, reply: str) -> None:
+    """Publish a fixture command whose reply identifies the installed revision."""
     path.mkdir(parents=True, exist_ok=True)
     write_json(path / "plugin.json", manifest(identifier))
     (path / "__init__.py").write_text(
@@ -54,6 +73,14 @@ def command_package(path: Path, identifier: str, reply: str) -> None:
 
 
 def file_state(path: Path) -> dict[str, tuple[str, int]]:
+    """Capture source bytes and modification times independently of the installer.
+
+    Returns
+    -------
+    dict[str, tuple[str, int]]
+        Relative source paths mapped to their digest and modification timestamp.
+
+    """
     return {
         str(item.relative_to(path)): (
             hashlib.sha256(item.read_bytes()).hexdigest(),
@@ -65,7 +92,10 @@ def file_state(path: Path) -> dict[str, tuple[str, int]]:
 
 
 class Scenario:
+    """Exercise upgrades, operator overrides and failed-download retries via TUI."""
+
     def __init__(self, root: Path, output: Path) -> None:
+        """Create isolated installation, publication and workspace fixtures."""
         self.root, self.output = root, output
         output.mkdir(parents=True, exist_ok=False)
         self.home = output / "home"
@@ -82,13 +112,26 @@ class Scenario:
         self.checks: list[str] = []
 
     def configure(self, profile: Path) -> None:
-        config = json.loads((self.root / "raychat.json").read_text())
-        config["storage"]["home_directory"] = str(self.home)
-        config["plugins"].update(profile=str(profile), paths=[], disabled=[])
-        config["tui"]["clipboard"] = "terminal"
+        """Point a launch configuration at the isolated home and release profile."""
+        config = read_object(self.root / "raychat.json")
+        object_field(config["storage"], "storage")["home_directory"] = str(self.home)
+        object_field(config["plugins"], "plugins").update(
+            profile=str(profile),
+            paths=[],
+            disabled=[],
+        )
+        object_field(config["tui"], "tui")["clipboard"] = "terminal"
         write_json(self.config, config)
 
     def chat(self) -> TerminalChat:
+        """Launch the real interface with the local deterministic provider.
+
+        Returns
+        -------
+        TerminalChat
+            A running process attached to a real pseudoterminal.
+
+        """
         return TerminalChat(
             self.root,
             [
@@ -107,6 +150,7 @@ class Scenario:
         )
 
     def commands(self, name: str, commands: list[tuple[str, str]]) -> None:
+        """Check command replies, responsiveness and terminal restoration."""
         chat = self.chat()
         try:
             chat.wait("Start a conversation", 45)
@@ -117,16 +161,24 @@ class Scenario:
             chat.close(self.output / (name + ".ansi"))
 
     def failure(self, name: str, expected: str) -> None:
+        """Require a clean startup rejection with the expected error message.
+
+        Raises
+        ------
+        AssertionError
+            Terminal shutdown fails independently of the expected startup rejection.
+
+        """
         chat = self.chat()
         try:
             deadline = time.monotonic() + 45
             while chat.process.poll() is None and time.monotonic() < deadline:
                 chat.poll()
             chat.poll()
-            assert chat.process.poll() == 1, chat.screen()
+            require(chat.process.poll() == 1, chat.screen())
             text = bytes(chat.output).decode("utf-8", "replace")
-            assert expected in text, text
-            assert "Traceback (most recent call last)" not in text, text
+            require(expected in text, text)
+            require("Traceback (most recent call last)" not in text, text)
         finally:
             try:
                 chat.close(self.output / (name + ".ansi"))
@@ -135,17 +187,20 @@ class Scenario:
                     raise
 
     def publish(self, revision: int, *, version_upgrade: bool = False) -> None:
-        records = []
+        """Publish matching source archives, catalog entries and a release profile."""
+        records: list[dict[str, object]] = []
         for identifier in IDENTIFIERS:
             path = self.sources / identifier
             command_package(path, identifier, identifier.upper() + f"_V{revision}")
-            document = json.loads((path / "plugin.json").read_text())
+            document = read_object(path / "plugin.json")
             if version_upgrade and identifier in {"alpha", "beta"}:
                 document["version"] = "2.0.0"
             if identifier == "alpha":
                 document["requires"] = {"beta": "2.0.0" if version_upgrade else "1.0.0"}
             write_json(path / "plugin.json", document)
-            archive = self.catalog / (identifier + "-" + document["version"] + ".zip")
+            archive = self.catalog / (
+                identifier + "-" + text_field(document["version"], "version") + ".zip"
+            )
             with zipfile.ZipFile(archive, "w") as stream:
                 for item in sorted(path.iterdir()):
                     stream.writestr(item.name, item.read_bytes())
@@ -156,15 +211,16 @@ class Scenario:
                     "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
                 },
             )
-        release = json.loads((self.root / "plugin_catalog/catalog.json").read_text())
         manager = next(
-            item for item in release["plugins"] if item["id"] == "plugin_manager"
+            item
+            for item in catalog_entries(self.root / "plugin_catalog/catalog.json")
+            if item.identifier == "plugin_manager"
         )
         shutil.copyfile(
-            self.root / "plugin_catalog" / manager["url"],
-            self.catalog / manager["url"],
+            self.root / "plugin_catalog" / manager.url,
+            self.catalog / manager.url,
         )
-        records.append(manager)
+        records.append(manager.fields)
         write_json(self.catalog / "catalog.json", {"schema": 1, "plugins": records})
         write_json(
             self.catalog / "profile.json",
@@ -172,18 +228,28 @@ class Scenario:
                 "schema": 1,
                 "id": "upgrade_fixture",
                 "catalog": "catalog.json",
-                "packages": [item["id"] + "@" + item["version"] for item in records],
+                "packages": [
+                    text_field(item["id"], "package id")
+                    + "@"
+                    + text_field(item["version"], "package version")
+                    for item in records
+                ],
             },
         )
 
-    def receipt(self) -> dict[str, Any]:
-        value = json.loads((self.home / "plugins.lock.json").read_text())
-        if not isinstance(value, dict):
-            error_message = "Installation receipt must be a JSON object"
-            raise AssertionError(error_message)
-        return value
+    def receipt(self) -> Receipt:
+        """Read checked package records and persisted operator choices.
+
+        Returns
+        -------
+        Receipt
+            The current installation evidence without invoking runtime APIs.
+
+        """
+        return receipt(json_object((self.home / "plugins.lock.json").read_bytes()))
 
     def preservation_and_retry(self) -> None:
+        """Verify atomic upgrades preserve operator edits and recover after failures."""
         self.publish(1)
         self.configure(self.catalog / "profile.json")
         for identifier in ("external", "linked"):
@@ -230,10 +296,14 @@ class Scenario:
         data = archive.read_bytes()
         archive.write_bytes(b"interrupted release download")
         self.failure("update_failure", "Catalog package digest does not match")
-        assert file_state(self.home / "plugins") == before, (
-            "Failed upgrade changed installed source"
+        require(
+            file_state(self.home / "plugins") == before,
+            "Failed upgrade changed installed source",
         )
-        assert self.receipt()["packages"]["beta"]["catalog"] == "upgrade_fixture"
+        require(
+            self.receipt()["packages"]["beta"]["catalog"] == "upgrade_fixture",
+            "Acceptance condition failed.",
+        )
         archive.write_bytes(data)
         self.commands(
             "updated",
@@ -249,26 +319,46 @@ class Scenario:
         )
         receipt = self.receipt()
         for identifier, unchanged in protected.items():
-            assert (
-                file_state(Path(receipt["packages"][identifier]["path"])) == unchanged
-            ), identifier
-        assert not (self.home / "plugins/removed").exists()
-        assert {"removed", "disabled"} <= set(receipt["disabled"])
-        assert receipt["packages"]["beta"]["catalog"] == "upgrade_fixture"
+            require(
+                file_state(Path(receipt["packages"][identifier]["path"])) == unchanged,
+                identifier,
+            )
+        require(
+            not (self.home / "plugins/removed").exists(),
+            "Acceptance condition failed.",
+        )
+        require(
+            {"removed", "disabled"} <= set(receipt["disabled"]),
+            "Acceptance condition failed.",
+        )
+        require(
+            receipt["packages"]["beta"]["catalog"] == "upgrade_fixture",
+            "Acceptance condition failed.",
+        )
         self.checks.extend(
             [
                 "same-version archive changes upgrade through terminal startup",
                 "unqualified dependency provenance survives failed upgrade and retry",
-                "local edits, external installs, links, disable and removal choices survive",
+                (
+                    "local edits, external installs, links, disable and removal "
+                    "choices survive"
+                ),
                 "failed multi-package staging leaves every installed source unchanged",
             ],
         )
         unchanged = file_state(self.home / "plugins")
         self.commands("unchanged_restart", [("/alpha", "ALPHA_V2")])
-        assert file_state(self.home / "plugins") == unchanged
+        require(
+            file_state(self.home / "plugins") == unchanged,
+            "Acceptance condition failed.",
+        )
         self.checks.append(
             "unchanged release restart does not rewrite installed packages",
         )
+        self._dependency_upgrade_retry()
+        self._bootstrap_retry()
+
+    def _dependency_upgrade_retry(self) -> None:
         beta = self.home / "plugins/beta/__init__.py"
         original = beta.read_bytes()
         beta.write_bytes(original.replace(b"BETA_V2", b"BETA_LOCAL"))
@@ -278,71 +368,94 @@ class Scenario:
             "dependency_conflict",
             "Dependency conflict: alpha requires beta@2.0.0",
         )
-        assert file_state(self.home / "plugins") == before
-        assert self.receipt()["packages"]["alpha"]["version"] == "1.0.0"
+        require(
+            file_state(self.home / "plugins") == before,
+            "Acceptance condition failed.",
+        )
+        require(
+            self.receipt()["packages"]["alpha"]["version"] == "1.0.0",
+            "Acceptance condition failed.",
+        )
         beta.write_bytes(original)
         self.commands(
             "dependency_retry",
             [("/alpha", "ALPHA_V3"), ("/beta", "BETA_V3")],
         )
-        assert all(
-            self.receipt()["packages"][identifier]["version"] == "2.0.0"
-            for identifier in ("alpha", "beta")
+        require(
+            all(
+                self.receipt()["packages"][identifier]["version"] == "2.0.0"
+                for identifier in ("alpha", "beta")
+            ),
+            "Acceptance condition failed.",
         )
         self.checks.append(
-            "dependency version upgrade is atomic and retries after conflicting edit is resolved",
+            "dependency version upgrade is atomic and retries after "
+            "conflicting edit is resolved",
         )
+
+    def _bootstrap_retry(self) -> None:
         self.home = self.output / "fresh_home"
         self.configure(self.catalog / "profile.json")
         archive = self.catalog / "alpha-2.0.0.zip"
         data = archive.read_bytes()
         archive.write_bytes(b"interrupted initial download")
         self.failure("bootstrap_failure", "Catalog package digest does not match")
-        assert not self.receipt()["packages"]
-        assert "upgrade_fixture" not in self.receipt().get("profiles", [])
+        require(not self.receipt()["packages"], "Acceptance condition failed.")
+        require(
+            "upgrade_fixture" not in self.receipt().get("profiles", []),
+            "Acceptance condition failed.",
+        )
         archive.write_bytes(data)
         self.commands("bootstrap_retry", [("/alpha", "ALPHA_V3"), ("/beta", "BETA_V3")])
         self.checks.append(
-            "failed initial bootstrap installs no partial package set and retries successfully",
+            "failed initial bootstrap installs no partial package set and "
+            "retries successfully",
         )
 
     def copied_home(self, installed_home: Path) -> None:
+        """Upgrade an isolated installation copy and prove its source is untouched."""
         installed_home = installed_home.expanduser().resolve()
         self.home.mkdir()
         for name in ("plugins", "catalog-cache"):
             shutil.copytree(
                 installed_home / name,
                 self.home / name,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                ignore=ignore_bytecode,
             )
         original = (installed_home / "plugins.lock.json").read_bytes()
-        receipt = json.loads(original)
-        for record in receipt["packages"].values():
+        copied_receipt = receipt(json_object(original))
+        for record in copied_receipt["packages"].values():
             if not record["linked"]:
                 record["path"] = str(
                     self.home / Path(record["path"]).relative_to(installed_home),
                 )
-        write_json(self.home / "plugins.lock.json", receipt)
+        write_json(self.home / "plugins.lock.json", copied_receipt)
         before = file_state(installed_home / "plugins")
         self.configure(self.root / "plugin_catalog/profile.json")
         self.commands("copied_home_upgrade", [])
-        current = json.loads((self.root / "plugin_catalog/catalog.json").read_text())
+        current = catalog_entries(self.root / "plugin_catalog/catalog.json")
         upgraded = self.receipt()
         changed = []
-        for item in current["plugins"]:
-            prior = receipt["packages"].get(item["id"])
+        for item in current:
+            prior = copied_receipt["packages"].get(item.identifier)
             if (
                 prior is not None
                 and not prior["linked"]
-                and item["id"] not in receipt["disabled"]
+                and item.identifier not in copied_receipt["disabled"]
             ):
-                actual = upgraded["packages"][item["id"]]
-                assert actual["archive_sha256"] == item["sha256"], item["id"]
-                if prior.get("archive_sha256") != item["sha256"]:
-                    changed.append(item["id"])
-        assert changed, "Input home did not contain outdated releases"
-        assert (installed_home / "plugins.lock.json").read_bytes() == original
-        assert file_state(installed_home / "plugins") == before
+                actual = upgraded["packages"][item.identifier]
+                require(actual["archive_sha256"] == item.sha256, item.identifier)
+                if prior.get("archive_sha256") != item.sha256:
+                    changed.append(item.identifier)
+        require(changed, "Input home did not contain outdated releases")
+        require(
+            (installed_home / "plugins.lock.json").read_bytes() == original,
+            "Acceptance condition failed.",
+        )
+        require(
+            file_state(installed_home / "plugins") == before,
+            "Acceptance condition failed.",
+        )
         self.checks.append(
             "isolated copy of existing installation upgraded: " + ", ".join(changed),
         )
@@ -373,13 +486,13 @@ class Scenario:
         historical.mkdir()
         for identifier in ("alpha", "beta", "disabled", "plugin_manager"):
             path = Path(receipt["packages"][identifier]["path"])
-            document = json.loads((path / "plugin.json").read_text())
+            document = read_object(path / "plugin.json")
             document["sdk"] = 3
             write_json(path / "plugin.json", document)
             (path / "__init__.py").write_text(
                 "from pathlib import Path\n"
                 f"Path({str(marker)!r}).write_text('old plugin imported')\n"
-                "raise RuntimeError('SDK2_PACKAGE_EXECUTED')\n",
+                "raise RuntimeError('SDK3_PACKAGE_EXECUTED')\n",
                 encoding="utf-8",
             )
             if identifier == "alpha":
@@ -395,11 +508,10 @@ class Scenario:
                 for name, data in sorted(members.items()):
                     stream.writestr(name, data)
                     hasher.update(name.encode() + b"\0" + data + b"\0")
-            receipt["packages"][identifier].update(
-                digest=hasher.hexdigest(),
-                archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
-                resolved=str(archive),
-            )
+            record = receipt["packages"][identifier]
+            record["digest"] = hasher.hexdigest()
+            record["archive_sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+            record["resolved"] = str(archive)
         edited = self.home / "plugins/edited/__init__.py"
         edited.write_text(
             edited.read_text().replace("EDITED_V1", "EDITED_LOCAL"),
@@ -433,51 +545,88 @@ class Scenario:
             ],
         )
         for identifier in ("alpha", "beta", "plugin_manager"):
-            document = json.loads(
-                (self.home / "plugins" / identifier / "plugin.json").read_text(),
-            )
-            assert document["sdk"] == 4, identifier
+            document = read_object(self.home / "plugins" / identifier / "plugin.json")
+            require(document["sdk"] == CURRENT_FIXTURE_SDK, identifier)
         for identifier, unchanged in protected.items():
             path = Path(receipt["packages"][identifier]["path"])
-            assert file_state(path) == unchanged, identifier
-        assert {"removed", "disabled"} <= set(self.receipt()["disabled"])
-        assert not (self.home / "plugins/removed").exists()
-        assert not marker.exists(), "An SDK 3 package was executed"
+            require(file_state(path) == unchanged, identifier)
+        require(
+            {"removed", "disabled"} <= set(self.receipt()["disabled"]),
+            "Acceptance condition failed.",
+        )
+        require(
+            not (self.home / "plugins/removed").exists(),
+            "Acceptance condition failed.",
+        )
+        require(not marker.exists(), "An SDK 3 package was executed")
         self.checks.extend(
             [
                 "SDK 3 receipts upgrade to SDK 4 without executing old packages",
-                "exact historical Finder-inclusive checksum permits an unchanged release upgrade",
-                "disabled SDK 3 packages, removals, local edits and links survive migration",
-                "checking a current package tolerates unrelated disabled old metadata; installing old SDK code is rejected",
+                (
+                    "exact historical Finder-inclusive checksum permits an unchanged "
+                    "release upgrade"
+                ),
+                (
+                    "disabled SDK 3 packages, removals, local edits and links survive "
+                    "migration"
+                ),
+                (
+                    "checking a current package tolerates unrelated disabled old "
+                    "metadata; installing old SDK code is rejected"
+                ),
             ],
         )
+        self._linked_sdk_retry(marker)
+
+    def _linked_sdk_retry(self, marker: Path) -> None:
         linked_manifest = self.output / "linked/plugin.json"
         current = linked_manifest.read_bytes()
-        document = json.loads(current)
+        document = object_field(json_object(current), "linked manifest")
         document["sdk"] = 3
         write_json(linked_manifest, document)
         unchanged = file_state(self.output / "linked")
         self.failure("sdk_link_requires_operator_update", "Unsupported SDK version")
-        assert file_state(self.output / "linked") == unchanged
-        assert not marker.exists()
+        require(
+            file_state(self.output / "linked") == unchanged,
+            "Acceptance condition failed.",
+        )
+        require(not marker.exists(), "Acceptance condition failed.")
         linked_manifest.write_bytes(current)
         self.commands("sdk_link_repaired", [("/linked", "LINKED_OVERRIDE")])
         self.checks.append(
-            "incompatible linked source is preserved and fails clearly until the operator updates it",
+            "incompatible linked source is preserved and fails clearly until "
+            "the operator updates it",
         )
 
-    def result(self) -> dict[str, Any]:
+    def result(self) -> dict[str, object]:
+        """Persist the independent acceptance conditions established by this run.
+
+        Returns
+        -------
+        dict[str, object]
+            Successful checks and terminal restoration evidence.
+
+        """
         result = {"passed": True, "checks": self.checks, "terminal_restored": True}
         write_json(self.output / "result.json", result)
         return result
 
 
+class Options(argparse.Namespace):
+    """Expose the concrete paths accepted by this command-line probe."""
+
+    root: Path
+    output: Path
+    installed_home: Path | None
+
+
 def main() -> None:
+    """Run synthetic, SDK migration and optional copied-installation scenarios."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--installed-home", type=Path)
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(namespace=Options())
     scenario = Scenario(
         arguments.root.resolve(),
         arguments.output.resolve() / "synthetic",
@@ -498,7 +647,8 @@ def main() -> None:
         copied.copied_home(arguments.installed_home)
         results["existing"] = copied.result()
     write_json(arguments.output / "result.json", results)
-    print(json.dumps(results, indent=2), flush=True)
+    sys.stdout.write(json.dumps(results, indent=2) + "\n")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

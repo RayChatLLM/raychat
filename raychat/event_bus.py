@@ -1,4 +1,3 @@
-# Copyright 2026
 """Typed event contracts and checked handler erasure for heterogeneous registries."""
 
 from __future__ import annotations

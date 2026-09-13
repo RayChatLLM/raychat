@@ -1,4 +1,3 @@
-# Copyright 2026
 """Build shareable, deterministic archives from independent plugin projects."""
 
 from __future__ import annotations
@@ -66,10 +65,12 @@ def build_catalog(source: Path, destination: Path) -> None:
     (destination / "catalog.json").write_text(
         json.dumps(catalog, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     (destination / "profile.json").write_text(
         json.dumps(profile, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
 

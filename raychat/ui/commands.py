@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from raychat.application import SESSION_COMMANDS
-from raychat.plugins import Runtime
 
-from .terminal import LineEditor
+if TYPE_CHECKING:
+    from raychat.plugins import Runtime
+
+    from .terminal import LineEditor
 
 UI_COMMANDS = {
     "system": "Toggle system details",
@@ -19,6 +22,8 @@ UI_COMMANDS = {
 
 @dataclass(frozen=True)
 class CommandChoice:
+    """A discoverable command with its current execution availability."""
+
     name: str
     description: str
     enabled: bool = True
@@ -26,8 +31,20 @@ class CommandChoice:
 
 
 def command_catalog(
-    root: Runtime, focused: Runtime | None, *, busy: bool, application_busy: bool
+    root: Runtime,
+    focused: Runtime | None,
+    *,
+    busy: bool,
+    application_busy: bool,
 ) -> tuple[CommandChoice, ...]:
+    """Combine focused session commands with root application commands.
+
+    Returns
+    -------
+    tuple[CommandChoice, ...]
+        Sorted commands with availability computed for the current session.
+
+    """
     entries = {
         name: CommandChoice(name, description, not busy)
         for name, description in SESSION_COMMANDS.items()
@@ -57,12 +74,16 @@ def command_catalog(
 
 
 class CommandCompletion:
+    """Maintain command selection without executing composer input."""
+
     def __init__(self) -> None:
+        """Start with no visible or dismissed completion."""
         self.choices: tuple[CommandChoice, ...] = ()
         self.selected = 0
         self.dismissed: str | None = None
 
     def update(self, text: str, catalog: tuple[CommandChoice, ...]) -> None:
+        """Refresh matching command names while preserving the selected command."""
         if self.dismissed != text:
             self.dismissed = None
         selected_name = self.choices[self.selected].name if self.choices else None
@@ -84,10 +105,19 @@ class CommandCompletion:
         )
 
     def move(self, direction: int) -> None:
+        """Move the selected completion by the requested offset."""
         if self.choices:
             self.selected = (self.selected + direction) % len(self.choices)
 
     def accept(self, editor: LineEditor, index: int | None = None) -> bool:
+        """Fill the composer with an enabled command and its argument separator.
+
+        Returns
+        -------
+        bool
+            Whether an enabled command replaced the composer text.
+
+        """
         if not self.choices:
             return False
         choice = self.choices[self.selected if index is None else index]
@@ -99,5 +129,6 @@ class CommandCompletion:
         return True
 
     def dismiss(self, text: str) -> None:
+        """Hide suggestions until the composer text changes."""
         self.dismissed = text
         self.choices = ()

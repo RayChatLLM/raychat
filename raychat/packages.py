@@ -1,4 +1,3 @@
-# Copyright 2026
 """SDK v4 package metadata, bounded archives, and deterministic sharing."""
 
 from __future__ import annotations
@@ -568,11 +567,12 @@ def pack(path: str | Path) -> bytes:
     """
     members = files(path)
     output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, data in members.items():
             info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
             info.external_attr = (stat.S_IFREG | 0o644) << 16
-            info.compress_type = zipfile.ZIP_DEFLATED
+            info.compress_type = zipfile.ZIP_STORED
             archive.writestr(info, data)
     return output.getvalue()
 

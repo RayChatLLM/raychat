@@ -1,0 +1,36 @@
+"""Unknown data and misspelled runtime controls cannot bypass SDK checking."""
+
+from raychat.event_types import CONTEXT, Context
+from raychat.sdk import Action, PluginContext, PluginHost, SessionHost
+
+
+def unchecked_state(ctx: PluginContext) -> int:
+    return ctx.state["count"]  # expect-error: return-value
+
+
+def unchecked_service(ctx: PluginContext) -> str:
+    return ctx.service("chat")  # expect-error: return-value
+
+
+def call_unknown_service(ctx: PluginContext) -> None:
+    ctx.service("chat")([])  # expect-error: operator
+
+
+def unchecked_action(action: Action) -> str:
+    return action["message"]  # expect-error: return-value
+
+
+def wrong_event_switch(host: SessionHost) -> None:
+    host.emit(CONTEXT, Context(()), strict="yes")  # expect-error: arg-type
+
+
+def _wrong_hook() -> str:
+    return "not a transaction hook"
+
+
+def wrong_reload_hook(host: PluginHost) -> None:
+    host.request_reload(prepare=_wrong_hook)  # expect-error: arg-type
+
+
+def misspelled_reload_hook(host: PluginHost) -> None:
+    host.request_reload(prapare=lambda: None)  # expect-error: call-arg

@@ -9,92 +9,126 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
-import json
 import re
 import time
 import traceback
 import unicodedata
-from collections.abc import Callable
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+from raychat.validation import (
+    integer_field,
+    object_field,
+)
 
 from .accept_tui import SOURCE, Case, wait_file
-from .drive_tui import TerminalChat
+from .acceptance_support import (
+    json_text,
+    matches,
+    read_messages,
+    read_object,
+    require,
+    verification_paths,
+    write_report,
+)
 
-PROVIDER = """from __future__ import annotations
-import argparse
-import hashlib
-import json
-from pathlib import Path
-import time
-from typing import Mapping
-from raychat.sdk import CancelCheck, Chat, CommandDefinition, Menu, Messages, PluginAPI, PluginContext
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-class Provider:
-    def __init__(self, workspace: str) -> None:
-        self.root = Path(workspace)
-    def __call__(self, messages: Messages) -> str:
-        return self.call_with_cancel(messages, lambda: None)
-    def call_with_cancel(self, messages: Messages, cancel_check: CancelCheck) -> str:
-        with (self.root / "requests.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(messages, ensure_ascii=False) + "\\n")
-        prompt = next(m["content"] for m in reversed(messages) if m["role"] == "user")
-        if prompt == "UI_HOLD":
-            (self.root / "hold.started").touch()
-            while not (self.root / "hold.release").exists():
-                cancel_check()
-                time.sleep(0.01)
-        if prompt == "LONG_OUTPUT":
-            message = "\\n".join(f"QA_ROW_{i:03d} 漢🙂é selectable text" for i in range(55))
-        else:
-            message = "RECEIVED " + hashlib.sha256(prompt.encode()).hexdigest()[:16] + " chars=" + str(len(prompt))
-        return json.dumps({"action":"done", "message":message}, ensure_ascii=False)
+    from .drive_tui import TerminalChat
 
-def register(api: PluginAPI) -> None:
-    def provider(args: argparse.Namespace, env: Mapping[str, str]) -> Chat:
-        return Provider(args.workspace)
-    api.register_provider("probe", provider)
-    api.register_menu("qa_empty", lambda ctx: Menu("QA empty picker", (), lambda key, ctx: None))
-    def empty(arguments: str, ctx: PluginContext) -> str:
-        ctx.emit("ui", {"menu":"qa_empty"})
-        return ""
-    api.register_command(CommandDefinition("qa-empty", empty, while_running=True, scope="application"))
-"""
+_SMALL_INPUT_LIMIT = 48
+
+PROVIDER = (
+    "from __future__ import annotations\nimport argparse\nimport ha"
+    "shlib\nimport json\nfrom pathlib import Path\nimport time\nfrom "
+    "typing import Mapping\nfrom raychat.sdk import CancelCheck, C"
+    "hat, CommandDefinition, Menu, Messages, PluginAPI, PluginCon"
+    "text\n\nclass Provider:\n    def __init__(self, workspace: str)"
+    " -> None:\n        self.root = Path(workspace)\n    def __call"
+    "__(self, messages: Messages) -> str:\n        return self.cal"
+    "l_with_cancel(messages, lambda: None)\n    def call_with_canc"
+    "el(self, messages: Messages, cancel_check: CancelCheck) -> s"
+    'tr:\n        with (self.root / "requests.jsonl").open("a", en'
+    'coding="utf-8") as stream:\n            stream.write(json.dum'
+    'ps(messages, ensure_ascii=False) + "\\n")\n        prompt = ne'
+    'xt(m["content"] for m in reversed(messages) if m["role"] == '
+    '"user")\n        if prompt == "UI_HOLD":\n            (self.ro'
+    'ot / "hold.started").touch()\n            while not (self.roo'
+    't / "hold.release").exists():\n                cancel_check()'
+    '\n                time.sleep(0.01)\n        if prompt == "LONG'
+    '_OUTPUT":\n            message = "\\n".join(f"QA_ROW_{i:03d} 漢'
+    '🙂é selectable text" for i in range(55))\n        else:\n     '
+    '       message = "RECEIVED " + hashlib.sha256(prompt.encode('
+    ')).hexdigest()[:16] + " chars=" + str(len(prompt))\n        r'
+    'eturn json.dumps({"action":"done", "message":message}, ensur'
+    "e_ascii=False)\n\ndef register(api: PluginAPI) -> None:\n    de"
+    "f provider(args: argparse.Namespace, env: Mapping[str, str])"
+    " -> Chat:\n        return Provider(args.workspace)\n    api.re"
+    'gister_provider("probe", provider)\n    api.register_menu("qa'
+    '_empty", lambda ctx: Menu("QA empty picker", (), lambda key,'
+    " ctx: None))\n    def empty(arguments: str, ctx: PluginContex"
+    't) -> str:\n        ctx.emit("ui", {"menu":"qa_empty"})\n     '
+    '   return ""\n    api.register_command(CommandDefinition("qa-'
+    'empty", empty, while_running=True, scope="application"))\n'
+)
 
 
 def fixture(root: Path, output: Path) -> Case:
+    """Prepare an isolated provider that records exact requests for UI checks.
+
+    Returns
+    -------
+    Case
+        The scenario fixture with its external provider replaced.
+
+    """
     case = Case(root, output)
     (case.probe / "__init__.py").write_text(PROVIDER, encoding="utf-8")
     manifest_path = case.probe / "plugin.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = read_object(manifest_path)
     manifest["requires"] = {}
     manifest["instructions"] = (
         "An offline UI QA provider records requests and supplies observable answers."
     )
-    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.write_text(json_text(manifest))
     return case
 
 
 def expected(prompt: str) -> str:
+    """Compute the provider's independently observable reply marker.
+
+    Returns
+    -------
+    str
+        The marker containing the prompt's truncated SHA-256 digest.
+
+    """
     return "RECEIVED " + hashlib.sha256(prompt.encode()).hexdigest()[:16]
 
 
 def requests(case: Case) -> list[list[dict[str, str]]]:
+    """Read complete provider histories recorded by the external fixture.
+
+    Returns
+    -------
+    list[list[dict[str, str]]]
+        The validated histories, or an empty list before the first request.
+
+    """
     path = case.work / "requests.jsonl"
-    return (
-        [json.loads(line) for line in path.read_text().splitlines()]
-        if path.exists()
-        else []
-    )
+    return read_messages(path) if path.exists() else []
 
 
 def settle(chat: TerminalChat, seconds: float = 0.35) -> None:
+    """Drain terminal output for the requested observation interval."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         chat.poll()
 
 
 def paste(chat: TerminalChat, text: str, *, submit: bool = True) -> None:
+    """Send bracketed paste with chunks that can split UTF-8 sequences."""
     data = text.encode()
     chat.send(b"\x1b[200~")
     # Split inside Unicode sequences as real terminal input can do.
@@ -107,11 +141,71 @@ def paste(chat: TerminalChat, text: str, *, submit: bool = True) -> None:
 
 
 class Report(TypedDict):
+    """Record completed UI checks and an optional failure traceback."""
+
     checks: list[str]
     failure: str | None
 
 
-def inputs(case: Case, report: Report) -> None:
+def _oversize_inputs(
+    case: Case,
+    chat: TerminalChat,
+    report: Report,
+) -> dict[str, object]:
+    config = read_object(case.config)
+    tui = object_field(config["tui"], "tui")
+    limit = integer_field(tui["input_max_chars"], "input_max_chars")
+    oversize = "QA_OVERSIZE_" + "漢🙂" * limit + "_TAIL_MUST_SURVIVE"
+    oversize += "\nMUST_NOT_SUBMIT\n/quit\n"
+    chat.send("DRAFT_KEEP_")
+    count = len(requests(case))
+    paste(chat, oversize, submit=False)
+    paste_limit = integer_field(tui["paste_max_bytes"], "paste_max_bytes")
+    chat.wait(f"Paste rejected: exceeds {paste_limit} bytes")
+    settle(chat)
+    require(
+        len(requests(case)) == count,
+        "ui_stress_tui: acceptance check at original line 156",
+    )
+    require(
+        chat.process.poll() is None,
+        "ui_stress_tui: acceptance check at original line 157",
+    )
+    chat.command("RECOVERED", expected("DRAFT_KEEP_RECOVERED"))
+    require(
+        requests(case)[-1][-1]["content"] == "DRAFT_KEEP_RECOVERED",
+        "ui_stress_tui: acceptance check at original line 159",
+    )
+    report["checks"].append(
+        (
+            "byte-limit rejection consumes the entire paste, never execut"
+            "es pasted lines, and preserves the existing draft"
+        ),
+    )
+    chat.command("/clear", "IDLE")
+    chat.send("CHAR_DRAFT_")
+    count = len(requests(case))
+    paste(chat, "x" * (limit + 1), submit=False)
+    chat.wait(f"Input rejected: exceeds {limit} characters")
+    require(
+        len(requests(case)) == count,
+        "ui_stress_tui: acceptance check at original line 168",
+    )
+    chat.command("RECOVERED", expected("CHAR_DRAFT_RECOVERED"))
+    require(
+        requests(case)[-1][-1]["content"] == "CHAR_DRAFT_RECOVERED",
+        "ui_stress_tui: acceptance check at original line 170",
+    )
+    report["checks"].append(
+        (
+            "character-limit rejection is explicit and atomic, with recov"
+            "ery on the same draft"
+        ),
+    )
+    return config
+
+
+def _default_inputs(case: Case, report: Report) -> dict[str, object]:
     chat = case.chat("--context-chars", "100000")
     try:
         chat.wait("Main chat", 30)
@@ -119,16 +213,25 @@ def inputs(case: Case, report: Report) -> None:
         normalized = multiline.replace("\r\n", "\n").replace("\r", "\n")
         paste(chat, multiline)
         chat.wait(expected(normalized))
-        assert requests(case)[-1][-1]["content"] == normalized
+        require(
+            requests(case)[-1][-1]["content"] == normalized,
+            "ui_stress_tui: acceptance check at original line 122",
+        )
         report["checks"].append(
             "multiline Unicode paste survives split UTF-8 and normalizes CRLF/CR",
         )
         paste(chat, "CURSOR_é漢🙂", submit=False)
         chat.send(b"\x1b[D\x1b[D\x1b[D")
         chat.command("X", expected("CURSOR_eX́漢🙂"))
-        assert requests(case)[-1][-1]["content"] == "CURSOR_eX́漢🙂"
+        require(
+            requests(case)[-1][-1]["content"] == "CURSOR_eX́漢🙂",
+            "ui_stress_tui: acceptance check at original line 129",
+        )
         report["checks"].append(
-            "cursor movement inside a combining cluster preserves exact code-point editing",
+            (
+                "cursor movement inside a combining cluster preserves exact c"
+                "ode-point editing"
+            ),
         )
         chat.command("/unknown-idle", "Unknown command: /unknown-idle")
         chat.command("AFTER_IDLE_ERROR", expected("AFTER_IDLE_ERROR"))
@@ -139,44 +242,28 @@ def inputs(case: Case, report: Report) -> None:
         large = "QA_LARGE_" + "漢🙂éΩ" * 2600 + "_END"
         paste(chat, large)
         chat.wait(expected(large), 30)
-        assert requests(case)[-1][-1]["content"] == large
+        require(
+            requests(case)[-1][-1]["content"] == large,
+            "ui_stress_tui: acceptance check at original line 142",
+        )
         report["checks"].append(
             "13,013-character Unicode paste reaches provider intact",
         )
         chat.command("/clear", "IDLE")
-        config = json.loads(case.config.read_text())
-        limit = config["tui"]["input_max_chars"]
-        oversize = "QA_OVERSIZE_" + "漢🙂" * limit + "_TAIL_MUST_SURVIVE"
-        oversize += "\nMUST_NOT_SUBMIT\n/quit\n"
-        chat.send("DRAFT_KEEP_")
-        count = len(requests(case))
-        paste(chat, oversize, submit=False)
-        chat.wait(f"Paste rejected: exceeds {config['tui']['paste_max_bytes']} bytes")
-        settle(chat)
-        assert len(requests(case)) == count
-        assert chat.process.poll() is None
-        chat.command("RECOVERED", expected("DRAFT_KEEP_RECOVERED"))
-        assert requests(case)[-1][-1]["content"] == "DRAFT_KEEP_RECOVERED"
-        report["checks"].append(
-            "byte-limit rejection consumes the entire paste, never executes pasted lines, and preserves the existing draft",
-        )
-        chat.command("/clear", "IDLE")
-        chat.send("CHAR_DRAFT_")
-        count = len(requests(case))
-        paste(chat, "x" * (limit + 1), submit=False)
-        chat.wait(f"Input rejected: exceeds {limit} characters")
-        assert len(requests(case)) == count
-        chat.command("RECOVERED", expected("CHAR_DRAFT_RECOVERED"))
-        assert requests(case)[-1][-1]["content"] == "CHAR_DRAFT_RECOVERED"
-        report["checks"].append(
-            "character-limit rejection is explicit and atomic, with recovery on the same draft",
-        )
+        config = _oversize_inputs(case, chat, report)
     finally:
         chat.close(case.output / "input.ansi")
 
-    config["tui"]["input_max_chars"] = 48
-    config["tui"]["paste_max_bytes"] = 1024
-    case.config.write_text(json.dumps(config))
+    return config
+
+
+def inputs(case: Case, report: Report) -> None:
+    """Verify exact input preservation, atomic limit rejection and draft recovery."""
+    config = _default_inputs(case, report)
+    tui = object_field(config["tui"], "tui")
+    tui["input_max_chars"] = 48
+    tui["paste_max_bytes"] = 1024
+    case.config.write_text(json_text(config))
     chat = case.chat()
     try:
         chat.wait("Main chat")
@@ -189,15 +276,27 @@ def inputs(case: Case, report: Report) -> None:
         paste(chat, "漢" * 500 + "\n/quit\n", submit=False)
         chat.wait("Paste rejected: exceeds 1024 bytes")
         settle(chat)
-        assert len(requests(case)) == count
+        require(
+            len(requests(case)) == count,
+            "ui_stress_tui: acceptance check at original line 192",
+        )
         chat.command("OK", expected("BYTES_OK"))
         exact = "é漢🙂" * 12
-        assert len(exact) == 48
+        require(
+            len(exact) == _SMALL_INPUT_LIMIT,
+            "ui_stress_tui: acceptance check at original line 195",
+        )
         paste(chat, exact)
         chat.wait(expected(exact))
-        assert requests(case)[-1][-1]["content"] == exact
+        require(
+            requests(case)[-1][-1]["content"] == exact,
+            "ui_stress_tui: acceptance check at original line 198",
+        )
         report["checks"].append(
-            "configured 48-character and 1024-byte limits are honored, including exact-limit Unicode acceptance",
+            (
+                "configured 48-character and 1024-byte limits are honored, in"
+                "cluding exact-limit Unicode acceptance"
+            ),
         )
     finally:
         chat.close(case.output / "configured-input.ansi")
@@ -207,18 +306,28 @@ def inputs(case: Case, report: Report) -> None:
         original = "ASCII_é漢🙂"
         paste(chat, original, submit=False)
         settle(chat)
-        assert chat.screen().isascii()
+        require(
+            chat.screen().isascii(),
+            "ui_stress_tui: acceptance check at original line 210",
+        )
         chat.send(b"\r")
         chat.wait(expected(original))
-        assert requests(case)[-1][-1]["content"] == original
+        require(
+            requests(case)[-1][-1]["content"] == original,
+            "ui_stress_tui: acceptance check at original line 213",
+        )
         report["checks"].append(
-            "ASCII rendering accepts combining and wide Unicode without altering message data",
+            (
+                "ASCII rendering accepts combining and wide Unicode without a"
+                "ltering message data"
+            ),
         )
     finally:
         chat.close(case.output / "ascii-input.ansi")
 
 
 def busy(case: Case, report: Report) -> None:
+    """Check queued prompts, preserved drafts and empty menus during active work."""
     chat = case.chat(persist=True)
     try:
         chat.wait("Main chat", 30)
@@ -229,17 +338,29 @@ def busy(case: Case, report: Report) -> None:
         chat.command("/unknown-busy", "Unknown command: /unknown-busy")
         chat.command("/tree", "This command requires an idle session")
         chat.send(b"\x01\x0b")
-        assert len(requests(case)) == 1
-        assert "[RUNNING" in chat.screen()
+        require(
+            len(requests(case)) == 1,
+            "ui_stress_tui: acceptance check at original line 230",
+        )
+        require(
+            "[RUNNING" in chat.screen(),
+            "ui_stress_tui: acceptance check at original line 231",
+        )
         report["checks"].append(
-            "busy /clear and other invalid/idle-only commands explain rejection without replacing the running request",
+            (
+                "busy /clear and other invalid/idle-only commands explain rej"
+                "ection without replacing the running request"
+            ),
         )
         chat.send("QUEUED_FOLLOWUP\r")
         chat.wait("QUEUED")
         chat.send("DRAFT_STAYS")
         (case.work / "hold.release").touch()
         chat.wait(expected("QUEUED_FOLLOWUP"))
-        assert "DRAFT_STAYS" in chat.screen()
+        require(
+            "DRAFT_STAYS" in chat.screen(),
+            "ui_stress_tui: acceptance check at original line 240",
+        )
         report["checks"].append(
             "queued follow-up runs after completion while a separate draft survives",
         )
@@ -248,10 +369,16 @@ def busy(case: Case, report: Report) -> None:
         chat.wait("No sessions yet.")
         chat.send(b"\x1b[B\x1b[F\x1b[6~\r")
         settle(chat)
-        assert "QA empty picker" in chat.screen()
+        require(
+            "QA empty picker" in chat.screen(),
+            "ui_stress_tui: acceptance check at original line 249",
+        )
         chat.send(b"\x1b")
         settle(chat)
-        assert "QA empty picker" not in chat.screen()
+        require(
+            "QA empty picker" not in chat.screen(),
+            "ui_stress_tui: acceptance check at original line 252",
+        )
         chat.command("AFTER_EMPTY_PICKER", expected("AFTER_EMPTY_PICKER"))
         report["checks"].append(
             "empty menu tolerates navigation/Enter and Escape returns to usable chat",
@@ -261,6 +388,14 @@ def busy(case: Case, report: Report) -> None:
 
 
 def cell_width(text: str) -> int:
+    """Measure selected text independently using Unicode terminal cell widths.
+
+    Returns
+    -------
+    int
+        The number of terminal cells occupied by the text.
+
+    """
     return sum(
         0
         if unicodedata.combining(c)
@@ -272,6 +407,14 @@ def cell_width(text: str) -> int:
 
 
 def clipboard(case: Case, report: Report) -> None:
+    """Verify Unicode copying after scrolling and invalidation after resize.
+
+    Raises
+    ------
+    AssertionError
+        The transcript has no complete selectable Unicode row.
+
+    """
     chat = case.chat()
     try:
         chat.wait("Main chat", 30)
@@ -282,25 +425,36 @@ def clipboard(case: Case, report: Report) -> None:
         rows = chat.screen().splitlines()
         y = next(i for i, line in enumerate(rows) if "QA_ROW_" in line)
         match = re.search(r"QA_ROW_\d{3} 漢🙂é selectable text", rows[y])
-        assert match is not None, rows[y]
+        if match is None:
+            message = "No complete selectable Unicode row was rendered: " + rows[y]
+            raise AssertionError(message)
         selected = match.group()
         x = cell_width(rows[y][: match.start()])
         width = cell_width(selected)
         chat.drag(x + 1, y + 1, x + width, y + 1)
         chat.wait("Sent to terminal clipboard")
-        encoded = re.findall(rb"\x1b\]52;c;([^\x07]+)\x07", chat.output)[-1]
-        assert base64.b64decode(encoded).decode() == selected
+        encoded = matches(
+            re.compile(rb"\x1b\]52;c;([^\x07]+)\x07"),
+            bytes(chat.output),
+        )[-1]
+        require(
+            base64.b64decode(encoded).decode() == selected,
+            "ui_stress_tui: acceptance check at original line 300",
+        )
         report["checks"].append(
             "Unicode glyph/combining selection copies exactly after scrolling",
         )
-        before = len(re.findall(rb"\x1b\]52;", chat.output))
+        before = len(matches(re.compile(rb"\x1b\]52;"), bytes(chat.output)))
         chat.send(f"\x1b[<0;{x + 1};{y + 1}M")
         settle(chat)
         chat.resize(76, 20)
         settle(chat)
         chat.send(f"\x1b[<0;{x + width};{y + 1}m")
         settle(chat)
-        assert len(re.findall(rb"\x1b\]52;", chat.output)) == before
+        require(
+            len(matches(re.compile(rb"\x1b\]52;"), bytes(chat.output))) == before,
+            "ui_stress_tui: acceptance check at original line 309",
+        )
         report["checks"].append(
             "resize invalidates selection instead of copying replacement cells",
         )
@@ -308,7 +462,10 @@ def clipboard(case: Case, report: Report) -> None:
         settle(chat)
         chat.command("/clear", "IDLE")
         chat.command("POST_CLEAR", expected("POST_CLEAR"))
-        assert all("LONG_OUTPUT" not in m["content"] for m in requests(case)[-1])
+        require(
+            all("LONG_OUTPUT" not in m["content"] for m in requests(case)[-1]),
+            "ui_stress_tui: acceptance check at original line 317",
+        )
         report["checks"].append(
             "clear discards prior model context and accepts a new prompt",
         )
@@ -317,6 +474,7 @@ def clipboard(case: Case, report: Report) -> None:
 
 
 def saved(case: Case, report: Report) -> None:
+    """Check completed-turn forks and both in-chat and startup session selection."""
     chat = case.chat(persist=True)
     first_id = ""
     try:
@@ -330,37 +488,56 @@ def saved(case: Case, report: Report) -> None:
         ):
             chat.poll()
         settle(chat)
-        commits = re.findall(r"[0-9a-f]{32}", chat.screen())
-        assert commits, chat.screen()
+        commits = matches(re.compile(r"[0-9a-f]{32}"), chat.screen())
+        require(commits, chat.screen())
         first_commit = commits[-1]
         chat.command("BRANCH_BETA", expected("BRANCH_BETA"))
         chat.command("/fork nope", "Fork requires a completed-turn entry ID.")
         chat.command("/fork " + first_commit, "Forked at")
         chat.command("BRANCH_GAMMA", expected("BRANCH_GAMMA"))
         context = requests(case)[-1]
-        assert any(m["content"] == "BRANCH_ALPHA" for m in context)
-        assert all(m["content"] != "BRANCH_BETA" for m in context)
+        require(
+            any(m["content"] == "BRANCH_ALPHA" for m in context),
+            "ui_stress_tui: acceptance check at original line 347",
+        )
+        require(
+            all(m["content"] != "BRANCH_BETA" for m in context),
+            "ui_stress_tui: acceptance check at original line 348",
+        )
         report["checks"].append(
-            "invalid fork is recoverable; valid fork restores exactly the selected turn",
+            (
+                "invalid fork is recoverable; valid fork restores exactly the"
+                " selected turn"
+            ),
         )
         chat.command("/sessions", "[DONE")
         settle(chat)
-        ids = re.findall(r"[0-9a-f]{32}", chat.screen())
-        assert ids
+        ids = matches(re.compile(r"[0-9a-f]{32}"), chat.screen())
+        require(ids, "ui_stress_tui: acceptance check at original line 355")
         first_id = ids[-1]
         chat.command("/resume bad-id", "Invalid session ID")
         chat.command("AFTER_BAD_RESUME", expected("AFTER_BAD_RESUME"))
         report["checks"].append("invalid resume keeps the current conversation usable")
     finally:
         chat.close(case.output / "fork.ansi")
+    _resume_saved(case, report, first_id)
+
+
+def _resume_saved(case: Case, report: Report, first_id: str) -> None:
     chat = case.chat(persist=True)
     try:
         chat.wait("Main chat")
         chat.command("SECOND_SESSION", expected("SECOND_SESSION"))
         chat.command("/resume " + first_id, "Resumed")
         chat.command("CONTINUED_FIRST", expected("CONTINUED_FIRST"))
-        assert any(m["content"] == "BRANCH_GAMMA" for m in requests(case)[-1])
-        assert all(m["content"] != "SECOND_SESSION" for m in requests(case)[-1])
+        require(
+            any(m["content"] == "BRANCH_GAMMA" for m in requests(case)[-1]),
+            "ui_stress_tui: acceptance check at original line 368",
+        )
+        require(
+            all(m["content"] != "SECOND_SESSION" for m in requests(case)[-1]),
+            "ui_stress_tui: acceptance check at original line 369",
+        )
         report["checks"].append(
             "in-chat resume switches model context to the selected saved session",
         )
@@ -375,7 +552,10 @@ def saved(case: Case, report: Report) -> None:
         deadline = time.monotonic() + 5
         while chat.process.poll() is None and time.monotonic() < deadline:
             chat.poll()
-        assert chat.process.poll() == 0
+        require(
+            chat.process.poll() == 0,
+            "ui_stress_tui: acceptance check at original line 384",
+        )
         report["checks"].append(
             "startup resume picker navigation/Escape cancels cleanly",
         )
@@ -392,25 +572,33 @@ SCENARIOS: dict[str, Callable[[Case, Report], None]] = {
 
 
 def main() -> None:
+    """Run selected UI stress scenarios and retain every result and traceback.
+
+    Raises
+    ------
+    SystemExit
+        At least one scenario failed.
+
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
-    args = parser.parse_args()
-    output = args.output.resolve()
+    args = verification_paths(parser.parse_args())
+    output = args.output
     output.mkdir(parents=True, exist_ok=False)
     reports: dict[str, Report] = {}
-    for name in args.scenario or SCENARIOS:
-        case = fixture(args.root.resolve(), output / name)
+    for name in args.scenarios or SCENARIOS:
+        case = fixture(args.root, output / name)
         report: Report = {"checks": [], "failure": None}
         try:
             SCENARIOS[name](case, report)
         except (AssertionError, OSError, ValueError, RuntimeError):
             report["failure"] = traceback.format_exc()
         reports[name] = report
-        (case.output / "result.json").write_text(json.dumps(report, indent=2))
-        print(json.dumps({name: report}), flush=True)
-    (output / "result.json").write_text(json.dumps(reports, indent=2))
+        (case.output / "result.json").write_text(json_text(report, indent=2))
+        write_report({name: report})
+    (output / "result.json").write_text(json_text(reports, indent=2))
     if any(report["failure"] for report in reports.values()):
         raise SystemExit(1)
 

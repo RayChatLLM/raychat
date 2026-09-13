@@ -1,4 +1,3 @@
-# Copyright 2026
 """Compile-time examples: service lookups must preserve their exact type."""
 
 from typing import TYPE_CHECKING
@@ -10,12 +9,13 @@ if TYPE_CHECKING:
     from plugins.chat_completions.configuration import ChatCompletionsSettings
     from plugins.memory.configuration import MemorySettings
     from plugins.optimization.gepa import serialization
-    from plugins.optimization.gepa.core.result import GEPAResult
+    from plugins.optimization.gepa.result import GEPAResult
     from plugins.process.configuration import ProcessSettings
     from plugins.subagents.configuration import ProfileSettings
     from raychat.event_types import CONTEXT, Context, Message
     from raychat.host_settings import HostSettings
     from raychat.plugin_sources import PluginSources, SourceSnapshot, SourceTree
+    from raychat.plugins import Runtime
     from raychat.sdk import (
         HTTP_PROVIDER,
         SUBAGENT_FACTORY,
@@ -25,10 +25,15 @@ if TYPE_CHECKING:
         ProviderClient,
         ProviderService,
         SessionHost,
+        StatusItem,
         SubagentFactoryService,
         SubagentSetup,
         WorkerPayload,
     )
+    from raychat.status import StatusRecord
+    from raychat.ui.commands import CommandChoice, CommandCompletion, command_catalog
+    from raychat.ui.message_queue import MessageQueue, QueuedMessage
+    from raychat.ui.terminal import LineEditor
     from raychat.validation import (
         boolean_field,
         integer_field,
@@ -148,3 +153,30 @@ if TYPE_CHECKING:
         assert_type(ctx.plugin_sources(), PluginSources)
         assert_type(tree.snapshot(), SourceSnapshot)
         assert_type(tree.snapshot()["settings"]["custom"], object)
+
+    def unknown_sdk_fields(ctx: PluginContext) -> None:
+        """Require validation before consuming dynamic data or named services."""
+        assert_type(ctx.state["count"], object)
+        assert_type(ctx.service("chat"), object)
+        assert_type(ctx.options["custom"], object)
+        assert_type(ctx.read_state("another_plugin")["custom"], object)
+
+    def pushed_status_contract(ctx: PluginContext, runtime: Runtime) -> None:
+        """Retain concrete pushed status records and typed removal/expiry controls."""
+        item = StatusItem("working", level="info", priority=50)
+        ctx.set_status("activity", item, scope="session", ttl_seconds=2.0)
+        ctx.set_status("activity", None)
+        assert_type(item.text, str)
+        assert_type(runtime.status_items(), tuple[StatusRecord, ...])
+
+    def composer_contract(runtime: Runtime, editor: LineEditor) -> None:
+        """Preserve queued text, completion choices and optional FIFO reads."""
+        queue = MessageQueue()
+        queue.append("pending")
+        assert_type(queue.items, list[QueuedMessage])
+        assert_type(queue.take(), str | None)
+        completion = CommandCompletion()
+        choices = command_catalog(runtime, None, busy=False, application_busy=False)
+        assert_type(choices, tuple[CommandChoice, ...])
+        completion.update("/", choices)
+        assert_type(completion.accept(editor), bool)

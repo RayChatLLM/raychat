@@ -1,4 +1,3 @@
-# Copyright 2026
 """Exercise the registered provider with concrete requests and response streams."""
 
 from __future__ import annotations

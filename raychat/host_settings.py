@@ -1,4 +1,3 @@
-# Copyright 2026
 """Immutable host configuration with checked, concrete field types."""
 
 from __future__ import annotations

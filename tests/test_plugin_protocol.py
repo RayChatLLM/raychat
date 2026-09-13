@@ -4,17 +4,31 @@ from __future__ import annotations
 
 import json
 import unittest
-from typing import cast
+from typing import TYPE_CHECKING
 
-import raychat._common as _rc__common
+from raychat.configuration import SETTINGS
 from tests.plugin_support import plugin_module, registered_parse
 
-_rc_filesystem = plugin_module("filesystem")
+if TYPE_CHECKING:
+    from plugins.filesystem import operations as _rc_filesystem
+else:
+    _rc_filesystem = plugin_module("filesystem.operations")
 
 
 class ParseActionTests(unittest.TestCase):
+    """Exercise model reply parsing through the actual captured plugin validators."""
+
+    def reject(self, document: str) -> None:
+        """Require invalid model text to fail through the public parsing boundary."""
+        try:
+            registered_parse(document)
+        except ValueError:
+            return
+        self.fail(f"Invalid action document was accepted: {document!r}")
+
     def test_accepts_all_actions_and_run_cwd(self) -> None:
-        actions = (
+        """Accept each declared action and preserve its exact field values."""
+        actions: tuple[dict[str, object], ...] = (
             {"action": "list", "path": "."},
             {"action": "list", "path": ".", "cursor": "a", "limit": 25},
             {"action": "read", "path": "a.txt"},
@@ -39,9 +53,11 @@ class ParseActionTests(unittest.TestCase):
         )
         for action in actions:
             with self.subTest(action=action):
-                self.assertEqual(registered_parse(json.dumps(action)), action)
+                if registered_parse(json.dumps(action)) != action:
+                    self.fail("Parsing changed the supplied action fields.")
 
     def test_accepts_provider_neutral_json_fences(self) -> None:
+        """Accept matching backtick or tilde fences with optional JSON labels."""
         document = '{"action":"done","message":"ok"}'
         fenced_documents = (
             document,
@@ -54,9 +70,11 @@ class ParseActionTests(unittest.TestCase):
         )
         for fenced in fenced_documents:
             with self.subTest(fenced=fenced):
-                self.assertEqual(registered_parse(fenced)["message"], "ok")
+                if registered_parse(fenced)["message"] != "ok":
+                    self.fail("A valid fence changed the completion message.")
 
     def test_rejects_ambiguous_or_mismatched_fences(self) -> None:
+        """Reject prose, mismatched delimiters and unsupported fence labels."""
         document = '{"action":"done","message":"ok"}'
         cases = (
             f"```python\n{document}\n```",
@@ -67,10 +85,11 @@ class ParseActionTests(unittest.TestCase):
             f"````json\n{document}\n````",
         )
         for fenced in cases:
-            with self.subTest(fenced=fenced), self.assertRaises(ValueError):
-                registered_parse(fenced)
+            with self.subTest(fenced=fenced):
+                self.reject(fenced)
 
     def test_rejects_duplicate_keys_trailing_text_and_nonobjects(self) -> None:
+        """Require a single unambiguous JSON object containing an action name."""
         cases = (
             '{"action":"done","action":"done","message":"x"}',
             '{"action":"done","message":"x"} trailing',
@@ -80,11 +99,11 @@ class ParseActionTests(unittest.TestCase):
         )
         for document in cases:
             with self.subTest(document=document):
-                with self.assertRaises(ValueError):
-                    registered_parse(document)
+                self.reject(document)
 
     def test_rejects_unknown_missing_extra_and_wrong_typed_fields(self) -> None:
-        actions = (
+        """Validate registered names, field sets, scalar types and cursor forms."""
+        actions: tuple[dict[str, object], ...] = (
             {"action": "unknown"},
             {"action": "read"},
             {"action": "read", "path": "x", "extra": "x"},
@@ -101,16 +120,17 @@ class ParseActionTests(unittest.TestCase):
             {"action": "memories", "cursor": "1:4001"},
             {"action": "memories", "cursor": "1" * 20},
             {"action": "run", "argv": ["python"], "cwd": 1},
-            {"action": "forget", "id": "١"},
-            {"action": "forget", "id": "１"},
+            {"action": "forget", "id": "\u0661"},
+            {"action": "forget", "id": "\uff11"},
             {"action": "forget", "id": "1" * 20},
             {"action": "done", "message": "   \n"},
         )
         for action in actions:
-            with self.subTest(action=action), self.assertRaises(ValueError):
-                registered_parse(json.dumps(action))
+            with self.subTest(action=action):
+                self.reject(json.dumps(action))
 
     def test_rejects_invalid_argv(self) -> None:
+        """Reject malformed argument arrays and invalid individual process arguments."""
         values: tuple[object, ...] = (
             None,
             [],
@@ -120,11 +140,13 @@ class ParseActionTests(unittest.TestCase):
             ["python", "bad\x00arg"],
         )
         for argv in values:
-            with self.subTest(argv=argv), self.assertRaises(ValueError):
-                registered_parse(json.dumps({"action": "run", "argv": argv}))
+            with self.subTest(argv=argv):
+                action: dict[str, object] = {"action": "run", "argv": argv}
+                self.reject(json.dumps(action))
 
     def test_rejects_invalid_file_pagination_and_edit_fields(self) -> None:
-        valid_edit = {
+        """Reject invalid file bounds, digests, Unicode and path values."""
+        valid_edit: dict[str, object] = {
             "action": "edit",
             "path": "a.txt",
             "start": 0,
@@ -132,7 +154,7 @@ class ParseActionTests(unittest.TestCase):
             "content": "x",
             "expected_sha256": "0" * 64,
         }
-        actions = (
+        actions: tuple[dict[str, object], ...] = (
             {"action": "list", "path": ".", "cursor": 1},
             {"action": "list", "path": ".", "cursor": "bad\x00cursor"},
             {"action": "list", "path": ".", "limit": 0},
@@ -154,12 +176,19 @@ class ParseActionTests(unittest.TestCase):
             {"action": "read", "path": "bad\x00path"},
         )
         for action in actions:
-            with self.subTest(action=action), self.assertRaises(ValueError):
-                registered_parse(json.dumps(action))
+            with self.subTest(action=action):
+                self.reject(json.dumps(action))
 
     def test_rejects_nontext_and_oversized_reply(self) -> None:
-        with self.assertRaises(ValueError):
-            # Deliberately violate the text contract to exercise runtime validation.
-            registered_parse(cast("str", None))
-        with self.assertRaises(ValueError):
-            registered_parse("x" * (_rc__common.MAX_REPLY_CHARS + 1))
+        """Keep runtime protection against untyped callers and oversized replies."""
+        # The matching negative fixture rejects the direct call with None.
+        operation: object = registered_parse
+        if not callable(operation):
+            self.fail("The action parser must be callable.")
+        try:
+            result: object = operation(None)
+        except ValueError:
+            pass
+        else:
+            self.fail(f"A nontext model reply was accepted: {result!r}")
+        self.reject("x" * (SETTINGS.limits.max_reply_chars + 1))

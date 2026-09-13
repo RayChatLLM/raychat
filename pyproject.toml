@@ -1,62 +1,22 @@
 [tool.ruff]
 target-version = "py310"
 required-version = "==0.16.7"
+preview = true
 
 [tool.ruff.format]
 preview = true
 
 [tool.ruff.lint]
 select = ["ALL"]
-allowed-confusables = ["–", "›"]  # Intentional range and composer UI glyphs.
-# Project conventions: stdlib unittest, existing public APIs, and the formatter.
-# Correctness, security, annotation, import, and modernization checks stay enabled.
-ignore = [
-  "COM812", "ISC001",  # Ruff formatter owns whitespace and wrapping.
-  "D", "CPY001",  # Documentation/copyright policy is reviewed separately.
-  "E501",  # Prompts, terminal fixtures, and URLs retain their exact text.
-  "EM", "TRY003",  # Exception messages are kept with their raise statements.
-  "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917",
-  "PLR2004",  # Existing state machines and protocol constants.
-  "FBT",  # Preserve the public positional boolean API.
-  "TID252",  # Relative imports keep independent plugin packages relocatable.
-  "PLC0415",  # Optional/platform imports and plugin isolation require local imports.
-  "TC001", "TC002", "TC003",  # Keep runtime type imports explicit for plugin introspection.
-  "TRY301", "TRY300",  # Keep exception recovery next to the guarded operation.
-  "PERF203",  # Per-item recovery is intentional in worker/cleanup loops.
-  "ARG001", "ARG002", "ARG005",  # Callback signatures are public contracts.
-  "S101",  # Internal invariants and test assertions; input validation uses exceptions.
-  "TRY004",  # Preserve documented exception types for invalid protocol/config data.
-  "N818",  # Existing public exception names are compatibility contracts.
-  "EXE001",  # Python entrypoints are invoked through the interpreter.
-  "PTH",  # File-descriptor and atomic-replacement code uses both os and pathlib.
-  "SLF001",  # Internal package collaborators deliberately share private helpers.
-  "BLE001",  # Plugin/worker boundaries recover from arbitrary plugin exceptions.
-  "PLC0414",  # Explicit re-exports are required by strict mypy.
-  "PLW0603",  # The provider source and test fixture runtime are process singletons.
-]
+# The user requested removal of per-file copyright comments.
+ignore = ["missing-copyright-notice"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = [
-  "PT", "SLF001", "S101", "PLR2004", "ARG002", "SIM117",
-  "N802", "N806",  # Native API test doubles and dynamically loaded class names.
-  "S105", "RUF001",  # Deliberately adversarial credentials and Unicode fixtures.
-]
-"tools/**" = ["T201", "PT"]  # CLI programs with stdlib behavioral fixtures.
-"plugins/optimization/**" = ["T201"]  # Offline CLI demos and optimization logs.
-"plugins/optimization/gepa/**" = ["S311", "PT018"]  # Seeded optimization, no secrets.
-"plugins/optimization/gepa/optimize_anything.py" = ["W291"]  # Pinned prompt bytes.
-"plugins/optimization/gepa/core/data_loader.py" = ["PYI019"]  # Stdlib Python 3.10 self types.
-"plugins/optimization/gepa/core/state.py" = ["TD002", "TD003", "FIX002"]  # Retained upstream design notes.
-"raychat.py" = ["T201"]
-"raychat/entrypoint.py" = ["T201"]
-"tools/release.py" = ["T201"]
-
-[tool.ruff.lint.pycodestyle]
-ignore-overlong-task-comments = true
-
-[tool.ruff.lint.flake8-builtins]
-# BaseHTTPRequestHandler.log_message uses this parameter name.
-ignorelist = ["format"]
+# Seeded optimization sampling must reproduce the existing search sequence.
+"plugins/optimization/gepa/batch_sampler.py" = ["suspicious-non-cryptographic-random-usage"]
+"plugins/optimization/gepa/candidate_selector.py" = ["suspicious-non-cryptographic-random-usage"]
+"plugins/optimization/gepa/merge.py" = ["suspicious-non-cryptographic-random-usage"]
+"plugins/optimization/gepa/optimize_anything.py" = ["suspicious-non-cryptographic-random-usage"]
 
 [tool.ruff.lint.flake8-annotations]
 allow-star-arg-any = false
@@ -64,33 +24,28 @@ ignore-fully-untyped = false
 mypy-init-return = false
 
 [tool.mypy]
-strict = true
 python_version = "3.10"
+strict = true
+disallow_any_expr = true
+disallow_any_explicit = true
 disallow_any_unimported = true
 disallow_any_decorated = true
 warn_unreachable = true
-enable_error_code = [
-  "ignore-without-code", "truthy-bool", "truthy-iterable",
-  "unused-awaitable", "possibly-undefined",
-]
+warn_incomplete_stub = true
+warn_unused_configs = true
+strict_equality_for_none = true
 explicit_package_bases = true
+follow_imports = "normal"
+incremental = false
+enable_error_code = [
+  "ignore-without-code", "truthy-bool", "truthy-iterable", "unused-awaitable",
+  "possibly-undefined", "redundant-expr", "explicit-override", "mutable-override",
+  "deprecated", "redundant-self", "unimported-reveal", "exhaustive-match",
+  "unused-ignore",
+]
 files = ["."]
 exclude_gitignore = true
 exclude = ['^(\./)?raychat\.py$']
-# tools/check_types.py also checks raychat.py in a separate invocation because
-# its module name collides with the raychat package in a single mypy invocation.
-
-# Expand this list as dynamic boundaries acquire validated, concrete contracts.
-[[tool.mypy.overrides]]
-module = [
-  "raychat.service_types", "raychat.event_bus", "raychat.event_types",
-  "raychat.validation", "raychat.configuration", "raychat.host_settings", "plugins.*.configuration",
-  "raychat.type_support", "plugins.chat_completions", "plugins.chat_completions.client",
-  "tools.fps_tui", "tools.verify_quality", "tests.test_app_config", "tests.test_validation",
-  "tests.test_plugin_settings", "tests.provider_support", "tests.test_plugin_chat_completions",
-  "tests.test_workflow_stress", "tests.plugin_support",
-  "raychat.plugin_sources", "tests.test_plugin_sources", "tools.build_plugin_catalog",
-  "raychat.file_lock",
-]
-disallow_any_expr = true
-disallow_any_explicit = true
+# tools/check_types.py separately checks identical launcher bytes because its
+# module name collides with the raychat package in a single mypy invocation.
+# tools/verify_quality.py independently inventories every non-generated source.

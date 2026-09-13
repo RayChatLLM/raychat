@@ -1,4 +1,3 @@
-# Copyright 2026
 """Fresh, immutable Python source trees for live plugin generations."""
 
 from __future__ import annotations

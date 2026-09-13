@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shlex
+import sys
 from pathlib import Path
-from typing import Any
+
+from raychat.validation import boolean_field, object_field
 
 from .accept_tui import SOURCE, Case
+from .acceptance_support import json_text, read_object, require, verification_paths
 from .collective_tui import wait_done
 
 
-def run(case: Case) -> dict[str, Any]:
+def run(case: Case) -> dict[str, object]:
+    """Verify installed optimization commands and deterministic evidence.
+
+    Returns
+    -------
+    dict[str, object]
+        The recorded outcome of every retained acceptance gate.
+
+    """
     commands = {
         "verify": "/optimize verify",
         "demo": "/optimize demo",
@@ -20,7 +30,7 @@ def run(case: Case) -> dict[str, Any]:
         "parallel": "/optimize benchmark --workers 4 --cases 12 --delay-ms 25",
         "incident": "/incident demo --workers 4 --max-proposals 6 --target 1",
     }
-    results: dict[str, Any] = {}
+    results: dict[str, dict[str, object]] = {}
     chat = case.chat("--yes")
     try:
         chat.wait("Main chat", 30)
@@ -35,19 +45,71 @@ def run(case: Case) -> dict[str, Any]:
             chat.send(f"{command} --report {shlex.quote(str(report))}{output_flag}\r")
             chat.wait(command, 20)
             wait_done(chat, report.exists, 180)
-            results[name] = json.loads(report.read_text())
+            results[name] = read_object(report)
             if output_flag:
                 data = output.read_bytes()
-                assert data.endswith(b"\n") and b"\r" not in data, name
+                require(data.endswith(b"\n") and b"\r" not in data, name)
         verify = results["verify"]
-        assert verify["source"]["stdlib_only"]
-        assert verify["oracle"]["identical"]
-        assert all(item["identical"] for item in verify["prompts"].values())
-        assert results["demo"]["improved"]
-        assert results["useful"]["held_out_test"]["improved"]
-        assert results["parallel"]["equivalent_scores_and_selection"]
-        assert results["parallel"]["bounded_parallelism_observed"]
-        assert results["incident"]["held_out_test"]["improved"]
+        require(
+            boolean_field(
+                object_field(verify["source"], "source")["stdlib_only"],
+                "improvement claim",
+            ),
+            "Installed engine imported a non-stdlib dependency.",
+        )
+        require(
+            boolean_field(
+                object_field(verify["oracle"], "oracle")["identical"],
+                "improvement claim",
+            ),
+            "The deterministic oracle changed.",
+        )
+        require(
+            all(
+                boolean_field(
+                    object_field(item, "prompt")["identical"],
+                    "prompt parity",
+                )
+                for item in object_field(verify["prompts"], "prompts").values()
+            ),
+            "An upstream prompt template changed.",
+        )
+        require(
+            boolean_field(results["demo"]["improved"], "improvement claim"),
+            "The offline demo did not improve.",
+        )
+        require(
+            boolean_field(
+                object_field(results["useful"]["held_out_test"], "held out test")[
+                    "improved"
+                ],
+                "improvement claim",
+            ),
+            "The held-out file-task result did not improve.",
+        )
+        require(
+            boolean_field(
+                results["parallel"]["equivalent_scores_and_selection"],
+                "improvement claim",
+            ),
+            "Parallel evaluation changed scores or selection.",
+        )
+        require(
+            boolean_field(
+                results["parallel"]["bounded_parallelism_observed"],
+                "improvement claim",
+            ),
+            "The benchmark did not observe bounded parallelism.",
+        )
+        require(
+            boolean_field(
+                object_field(results["incident"]["held_out_test"], "held out test")[
+                    "improved"
+                ],
+                "improvement claim",
+            ),
+            "The held-out incident result did not improve.",
+        )
         case.checks += [
             "installed engine has only stdlib imports",
             "upstream prompt templates and deterministic oracle unchanged",
@@ -61,11 +123,13 @@ def run(case: Case) -> dict[str, Any]:
 
 
 def main() -> None:
+    """Run the terminal acceptance command and emit its observed report."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    print(json.dumps(run(Case(args.root.resolve(), args.output.resolve())), indent=2))
+    paths = verification_paths(args)
+    sys.stdout.write(json_text(run(Case(paths.root, paths.output)), indent=2) + "\n")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-# Copyright 2026
 """Test fixtures that instantiate features through registered plugins."""
 
 from __future__ import annotations
@@ -9,14 +8,15 @@ import json
 import tempfile
 import uuid
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Generic, Literal, TypedDict, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
+    from types import ModuleType
 
     from typing_extensions import Unpack
 
+    from plugins.subagents.sessions import AgentSessions
     from raychat.plugins import Runtime
     from raychat.sdk import (
         CancelCheck,
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         SendSession,
         ServiceKey,
     )
+    from raychat.service_contracts import GoalControllerProtocol
     from raychat.session import AgentSession
 
 import raychat.composition as _rc_composition
@@ -36,6 +37,7 @@ from raychat.distribution import read_distribution
 from raychat.plugin_manager import PackageManager
 from raychat.plugin_sources import SourceTree
 from raychat.plugins import import_plugin
+from raychat.service_contracts import GOAL_CONTROLLER, OPTIMIZATION
 from raychat.validation import object_field, text_field
 
 _TEST_HOME = tempfile.TemporaryDirectory(prefix="raychat-spec-plugins-")
@@ -54,6 +56,54 @@ def _close_registration_fixtures() -> None:
 
 
 atexit.register(_close_registration_fixtures)
+
+
+def require_agent_sessions(runtime: Runtime) -> AgentSessions:
+    """Validate the concrete catalog against its own captured plugin generation.
+
+    Returns
+    -------
+    AgentSessions
+        The active session implementation used for lifecycle fixture assertions.
+
+    Raises
+    ------
+    AssertionError
+        The runtime does not contain its expected concrete session catalog.
+
+    """
+    if TYPE_CHECKING:
+        expected = AgentSessions
+    else:
+        expected = plugin_module("subagents.sessions", runtime=runtime).AgentSessions
+    value = runtime.services["chat_sessions"]
+    if isinstance(value, expected):
+        return value
+    message = "The runtime must contain its captured session catalog."
+    raise AssertionError(message)
+
+
+def require_goal_controller(runtime: Runtime) -> GoalControllerProtocol:
+    """Resolve the configured controller through its shared goal adapter.
+
+    Returns
+    -------
+    GoalControllerProtocol
+        The active controller expected by this fixture.
+
+    Raises
+    ------
+    AssertionError
+        If the test did not configure goal coordination.
+
+    """
+    controller = GOAL_CONTROLLER.validate(
+        runtime.services[GOAL_CONTROLLER.name],
+    ).controller
+    if controller is None:
+        message = "This fixture requires a configured goal controller."
+        raise AssertionError(message)
+    return controller
 
 
 def callback_plugin(
@@ -129,8 +179,7 @@ def create_runtime(
         manager=manager,
         plugins=plugins,
         source=source,
-        disabled=disabled,
-        enabled=enabled,
+        selection=_rc_composition.PluginSelection(disabled=disabled, enabled=enabled),
         **options,
     )
 
@@ -339,32 +388,23 @@ def registered_service(owner: str, key: ServiceKey[_Service]) -> _Service:
     return _CAPTURED.get().context(owner).require_service(key)
 
 
-def plugin_module(name: str) -> ModuleType:
+def plugin_module(name: str, *, runtime: Runtime | None = None) -> ModuleType:
     """Inspect the same captured modules that registered a feature.
 
     Returns
     -------
     ModuleType
-        The implementation loaded for the shared test runtime.
-
-    Raises
-    ------
-    TypeError
-        If the optimization resolver does not return a Python module.
+        The implementation loaded for the supplied or shared test runtime.
 
     """
-    runtime = _CAPTURED.get()
+    if runtime is None:
+        runtime = _CAPTURED.get()
     owner, _, suffix = name.partition(".")
     if owner == "optimization" and suffix:
-        resolve: object = runtime.service("optimization", "optimization")
-        if not callable(resolve):
-            message = "The optimization module resolver is not callable."
-            raise TypeError(message)
-        module: object = resolve(suffix)
-        if not isinstance(module, ModuleType):
-            message = "The optimization resolver did not return a Python module."
-            raise TypeError(message)
-        return module
+        service = OPTIMIZATION.validate(
+            runtime.service("optimization", OPTIMIZATION.name),
+        )
+        return service.load(suffix)
     return _captured_tree(runtime.modules[owner]).load(suffix)
 
 

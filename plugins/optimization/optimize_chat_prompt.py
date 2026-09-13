@@ -1,4 +1,3 @@
-# Copyright 2026
 """Optimize ``RayChat base protocol`` with the GEPA v0.1.0 launch engine.
 
 The plugin owns a typed standard-library port of the launch engine. Unused
@@ -46,6 +45,7 @@ from raychat.sdk import (
     ProviderService,
     ServiceSlot,
 )
+from raychat.service_contracts import OptimizationComponent
 from raychat.type_support import override
 from raychat.validation import (
     array_field,
@@ -61,9 +61,13 @@ from .configuration import load as load_settings
 if TYPE_CHECKING:
     from typing_extensions import Unpack
 
-    from .gepa.core.result import GEPAResult
+    from raychat.plugin_sources import PluginSources
+    from raychat.service_contracts import OptimizationBindings
+
     from .gepa.optimize_anything import OptimizationState
-    from .gepa.utils.stop_condition import StopperProtocol
+    from .gepa.result import GEPAResult
+    from .gepa.stop_condition import StopperProtocol
+from .gepa.instruction_proposal import InstructionProposalSignature
 from .gepa.optimize_anything import (
     EngineConfig,
     GEPAConfig,
@@ -74,20 +78,26 @@ from .gepa.optimize_anything import (
     optimize_anything,
     optimize_anything_reflection_prompt_template,
 )
-from .gepa.strategies.instruction_proposal import InstructionProposalSignature
-from .gepa.utils import ScoreThresholdStopper
+from .gepa.stop_condition import ScoreThresholdStopper
 
 _provider = ServiceSlot[ProviderService]("http_provider")
-_base_protocol: str | None = None
-_sources = ServiceSlot[Callable[[], dict[str, object]]]("plugin_sources")
 
 
-def plugin_sources() -> dict[str, object]:
+@dataclass
+class _ProtocolBinding:
+    value: str | None = None
+
+
+_base_protocol = _ProtocolBinding()
+_sources: ServiceSlot[Callable[[], PluginSources]] = ServiceSlot("plugin_sources")
+
+
+def plugin_sources() -> PluginSources:
     """Capture the registered sources used by evaluation sessions.
 
     Returns
     -------
-    dict[str, object]
+    PluginSources
         A detached source snapshot from the optimization plugin context.
 
     """
@@ -108,12 +118,12 @@ def base_protocol() -> str:
         If the operation cannot satisfy its validated input or runtime contract.
 
     """
-    if _base_protocol is None:
+    if _base_protocol.value is None:
         error_message = "Load optimization through its registered component service."
         raise RuntimeError(
             error_message,
         )
-    return _base_protocol
+    return _base_protocol.value
 
 
 _namespace: object = globals()
@@ -1868,6 +1878,8 @@ def optimize_protocol(
     if target is not None:
         stoppers.append(ScoreThresholdStopper(target))
     config = GEPAConfig(
+        objective=parameters.objective,
+        background=parameters.background,
         engine=EngineConfig(
             seed=parameters.seed,
             max_candidate_proposals=parameters.max_candidate_proposals,
@@ -1891,8 +1903,6 @@ def optimize_protocol(
         evaluator=_FixtureEvaluator(parameters.evaluator),
         dataset=NamespacedSequenceLoader("train", parameters.dataset),
         valset=NamespacedSequenceLoader("validation", parameters.valset),
-        objective=parameters.objective,
-        background=parameters.background,
         config=config,
     )
 
@@ -2687,6 +2697,7 @@ def _launch_oracle() -> LaunchOracle:
         return "```\nexcellent\n```"
 
     config = GEPAConfig(
+        objective="Produce the exact word excellent.",
         engine=EngineConfig(
             max_metric_calls=4,
             seed=7,
@@ -2702,7 +2713,6 @@ def _launch_oracle() -> LaunchOracle:
     result = optimize_anything(
         "bad",
         evaluator=evaluator,
-        objective="Produce the exact word excellent.",
         config=config,
     )
     payload = {"evals": evals, "prompts": prompts, "result": result.to_dict()}
@@ -3589,3 +3599,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
     return 0 if ok else 1
+
+
+def _bind_component(bindings: OptimizationBindings) -> None:
+    _provider.bind(bindings.provider)
+    _sources.bind(bindings.sources)
+    _base_protocol.value = bindings.protocol
+
+
+COMPONENT = OptimizationComponent(main, _bind_component)

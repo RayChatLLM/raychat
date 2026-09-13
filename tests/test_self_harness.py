@@ -1,4 +1,3 @@
-# Copyright 2026
 """Real stdlib evaluators, isolated candidates and live transactional promotion."""
 
 from __future__ import annotations
@@ -18,6 +17,12 @@ from unittest.mock import patch
 from raychat.composition import create_session
 from raychat.event_types import AFTER_TOOL, AfterTool
 from raychat.sdk import HTTP_PROVIDER, CancelCheck
+from raychat.service_contracts import (
+    CHAT,
+    PROCESS_RUNNER,
+    ChatService,
+    ProcessRunnerService,
+)
 from raychat.type_support import override
 from raychat.validation import (
     ConfigurationError,
@@ -40,10 +45,14 @@ if TYPE_CHECKING:
 
     from plugins.optimization import optimize_chat_prompt as benchmark
     from plugins.optimization import self_harness_benchmark as experiment
-    from plugins.self_harness import evaluation
+    from plugins.process import runner as process_module
+    from plugins.self_harness import evaluation, records
     from raychat.plugins import Runtime
+    from raychat.service_contracts import CommandResult
 else:
     evaluation = plugin_module("self_harness.evaluation")
+    records = plugin_module("self_harness.records")
+    process_module = plugin_module("process.runner")
     experiment = plugin_module("optimization.self_harness_benchmark")
     benchmark = plugin_module("optimization.optimize_chat_prompt")
 
@@ -188,7 +197,7 @@ class _HarnessFixture(_HarnessAssertions):
         runtime.watch([self.root / ".raychat/plugins"], enabled=False)
         chat = ScriptedChat(proposals)
         services: object = runtime.services
-        object_field(services, "services")["chat"] = chat
+        object_field(services, "services")[CHAT.name] = ChatService(chat, lambda: chat)
         self.chats[id(runtime)] = chat
         self.addCleanup(runtime.close)
         return runtime
@@ -441,20 +450,18 @@ class SelfHarnessIsolationTests(_HarnessFixture):
 
     def test_split_sizes_and_noninteger_counts_are_rejected(self) -> None:
         """Split sizes and noninteger counts are rejected."""
-        baseline = [
-            {
-                "held_in": {"passed": 0, "total": 2},
-                "held_out": {"passed": 2, "total": 2},
-            },
-        ]
-        candidate = [
-            {
-                "held_in": {"passed": 3, "total": 3},
-                "held_out": {"passed": 2, "total": 2},
-            },
-        ]
+        baseline = records.EvaluationBatch(
+            [],
+            (records.ScorePair(records.ScoreSplit(0, 2), records.ScoreSplit(2, 2)),),
+            successful=True,
+        )
+        candidate = records.EvaluationBatch(
+            [],
+            (records.ScorePair(records.ScoreSplit(3, 3), records.ScoreSplit(2, 2)),),
+            successful=True,
+        )
         with self.rejecting(ValueError, "split sizes"):
-            evaluation.improvement(baseline, candidate, "scores")
+            evaluation.improvement(baseline, candidate)
         (self.root / "evaluator.py").write_text(
             (
                 'print(\'{"held_in":{"passed":true,"total":2},"held_out":{"pas'
@@ -483,29 +490,26 @@ class SelfHarnessIsolationTests(_HarnessFixture):
         started = threading.Event()
         services: object = runtime.services
         registry = object_field(services, "services")
-        original = registry["process_runner"]
-        if not callable(original):
-            self.fail("The registered process runner must be callable.")
+        original = PROCESS_RUNNER.validate(registry[PROCESS_RUNNER.name]).run
 
         def runner(
             argv: list[str],
             cwd: Path,
             timeout: float,
-            cancel_check: CancelCheck,
+            cancel_check: CancelCheck | None = None,
             *,
-            output_limit: int,
-        ) -> dict[str, object]:
+            output_limit: int = process_module.COMMAND_OUTPUT_BYTES,
+        ) -> CommandResult:
             started.set()
-            result: object = original(
+            return original(
                 argv,
                 cwd,
                 timeout,
                 cancel_check,
                 output_limit=output_limit,
             )
-            return object_field(result, "process result")
 
-        registry["process_runner"] = runner
+        registry[PROCESS_RUNNER.name] = ProcessRunnerService(runner)
         cancelled = threading.Event()
 
         def check() -> None:

@@ -1,4 +1,3 @@
-# Copyright 2026
 """Concrete payload and result contracts for every plugin lifecycle hook."""
 
 from __future__ import annotations

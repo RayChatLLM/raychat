@@ -18,7 +18,19 @@ class ServiceKey(Generic[_ServiceT]):
     interface: type[_ServiceT]
 
     def validate(self, value: object) -> _ServiceT:
-        """Check an untyped plugin's value before exposing the typed interface."""
+        """Check an untyped plugin's value before exposing the typed interface.
+
+        Returns
+        -------
+        _ServiceT
+            The service after validating its declared interface.
+
+        Raises
+        ------
+        TypeError
+            The supplied service does not implement the declared interface.
+
+        """
         if not isinstance(value, self.interface):
             error_message = (
                 f"Service {self.name!r} must implement {self.interface.__name__}."

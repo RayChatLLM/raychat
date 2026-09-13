@@ -6,11 +6,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_package_system import PackageTestCase
+from tests.transport_support import require
 from tools import release
 
 
-class ReleaseCleanupTests(unittest.TestCase):
+class ReleaseCleanupTests(PackageTestCase):
+    """Verify cache cleanup boundaries and rejection of symlinked cache trees."""
+
     def test_cleanup_removes_only_known_caches_outside_user_data(self) -> None:
+        """Verify cleanup removes only known caches outside user data."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             cache = root / "src" / "__pycache__"
@@ -28,16 +33,17 @@ class ReleaseCleanupTests(unittest.TestCase):
 
             report = release.clean_caches(root)
 
-            self.assertEqual(report["removed_count"], 4)
-            self.assertGreater(report["removed_bytes"], 0)
-            self.assertFalse(cache.exists())
-            self.assertFalse((root / "src" / "orphan.pyo").exists())
-            self.assertFalse((root / ".pytest_cache").exists())
-            self.assertFalse((root / ".DS_Store").exists())
-            self.assertEqual(ordinary.read_text(encoding="utf-8"), "keep")
-            self.assertEqual((user_cache / "keep.pyc").read_bytes(), b"user data")
+            self.equal(report["removed_count"], 4)
+            require((report["removed_bytes"]) > (0))
+            require(not (cache.exists()))
+            require(not ((root / "src" / "orphan.pyo").exists()))
+            require(not ((root / ".pytest_cache").exists()))
+            require(not ((root / ".DS_Store").exists()))
+            self.equal(ordinary.read_text(encoding="utf-8"), "keep")
+            self.equal((user_cache / "keep.pyc").read_bytes(), b"user data")
 
     def test_cleanup_refuses_a_symlinked_cache(self) -> None:
+        """Verify cleanup refuses a symlinked cache."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             external = root / "external"
@@ -51,9 +57,9 @@ class ReleaseCleanupTests(unittest.TestCase):
             except (OSError, NotImplementedError):
                 self.skipTest("directory symlinks are unavailable")
 
-            with self.assertRaisesRegex(RuntimeError, "symlinked cache"):
+            with self.rejected(RuntimeError, "symlinked cache"):
                 release.clean_caches(root)
-            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+            self.equal(sentinel.read_text(encoding="utf-8"), "keep")
 
 
 if __name__ == "__main__":

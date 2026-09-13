@@ -1,4 +1,3 @@
-# Copyright 2026
 """Reconcile real workflow children and diagnose every failed stress condition.
 
 The local model fixture stresses transport and context deterministically.
@@ -31,6 +30,7 @@ from raychat.sdk import (
     ServiceSlot,
     SubagentSetup,
 )
+from raychat.service_contracts import OptimizationComponent
 from raychat.type_support import override
 from raychat.validation import (
     array_field,
@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
     from raychat.plugins import Runtime
     from raychat.sdk import ChildSessionInfo, Messages, SubagentFactoryService
+    from raychat.service_contracts import OptimizationBindings
 
 _provider = ServiceSlot[ProviderService]("http_provider")
 _LOGGER = logging.getLogger(__name__)
@@ -727,3 +728,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     sys.stdout.write(json.dumps(summary, indent=2) + "\n")
     return 0 if report["passed"] and report["workers_stopped"] else 1
+
+
+def _bind_component(bindings: OptimizationBindings) -> None:
+    _provider.bind(bindings.provider)
+
+
+COMPONENT = OptimizationComponent(main, _bind_component)

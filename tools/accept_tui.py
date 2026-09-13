@@ -11,7 +11,6 @@ import argparse
 import base64
 import contextlib
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -19,49 +18,84 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 from raychat.type_support import override
+from raychat.validation import (
+    array_field,
+    integer_field,
+    json_object,
+    object_field,
+    text_field,
+)
 
+from .acceptance_support import (
+    ignore_bytecode,
+    json_text,
+    matches,
+    read_messages,
+    read_object,
+    require,
+    verification_paths,
+    write_report,
+)
 from .drive_tui import TerminalChat
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 SOURCE = Path(__file__).resolve().parents[1]
+_EXPECTED_CLEANUPS = 2
 
 
 @dataclass
 class Case:
+    """Keep an isolated workspace, operator home and evidence for one scenario."""
+
     root: Path
     output: Path
     checks: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        """Create isolated configuration and copy the external probe package."""
         self.output.mkdir(parents=True, exist_ok=False)
         self.work = self.output / "workspace"
         self.work.mkdir()
         self.home = self.output / "home"
-        config = json.loads((self.root / "raychat.json").read_text())
-        config["storage"]["home_directory"] = str(self.home)
-        config["plugins"]["profile"] = str(self.root / "plugin_catalog/profile.json")
-        config["tui"]["clipboard"] = "terminal"
+        config = read_object(self.root / "raychat.json")
+        object_field(config["storage"], "storage")["home_directory"] = str(self.home)
+        object_field(config["plugins"], "plugins")["profile"] = str(
+            self.root / "plugin_catalog/profile.json",
+        )
+        object_field(config["tui"], "tui")["clipboard"] = "terminal"
         self.config = self.output / "config.json"
-        self.config.write_text(json.dumps(config))
+        self.config.write_text(json_text(config))
         self.probe = self.output / "probe"
         shutil.copytree(
             SOURCE / "tests/fixtures/probe",
             self.probe,
             copy_function=shutil.copyfile,
-            ignore=shutil.ignore_patterns("__pycache__"),
+            ignore=ignore_bytecode,
         )
         manifest_path = self.probe / "plugin.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest.setdefault("defaults", {})["cleanup_destination"] = str(self.work)
-        manifest_path.write_text(json.dumps(manifest))
+        manifest = read_object(manifest_path)
+        object_field(manifest.setdefault("defaults", {}), "defaults")[
+            "cleanup_destination"
+        ] = str(self.work)
+        manifest_path.write_text(json_text(manifest))
 
     def chat(self, *extra: str, persist: bool = False) -> TerminalChat:
+        """Launch a real terminal with this scenario's provider and storage flags.
+
+        Returns
+        -------
+        TerminalChat
+            The running terminal driver, owned by the caller until closed.
+
+        """
         flags = [
             "--config",
             str(self.config),
@@ -82,27 +116,40 @@ class Case:
         )
         return TerminalChat(self.root, flags + list(extra))
 
-    def result(self) -> dict[str, Any]:
+    def result(self) -> dict[str, object]:
+        """Persist the completed scenario's checks and terminal restoration result.
+
+        Returns
+        -------
+        dict[str, object]
+            The written report, available for scenario-specific additional evidence.
+
+        """
         report = {"passed": True, "checks": self.checks, "terminal_restored": True}
-        (self.output / "result.json").write_text(json.dumps(report, indent=2))
+        (self.output / "result.json").write_text(json_text(report, indent=2))
         return report
 
 
 def wait_file(chat: TerminalChat, path: Path, seconds: float = 10) -> None:
+    """Poll the terminal until an independently written artifact appears."""
     deadline = time.monotonic() + seconds
     while not path.exists() and time.monotonic() < deadline:
         chat.poll()
-    assert path.exists(), str(path)
+    require(path.exists(), str(path))
 
 
 def copy_message(chat: TerminalChat, text: str) -> None:
+    """Select visible text and verify the exact terminal clipboard payload."""
     rows = chat.screen().splitlines()
     y = next(i for i, line in enumerate(rows) if text in line)
     x = rows[y].index(text)
     chat.drag(x + 1, y + 1, x + len(text), y + 1)
     chat.wait("Sent to terminal clipboard")
-    clips = re.findall(rb"\x1b\]52;c;([^\x07]+)\x07", chat.output)
-    assert clips and base64.b64decode(clips[-1]) == text.encode()
+    clips = matches(re.compile(rb"\x1b\]52;c;([^\x07]+)\x07"), bytes(chat.output))
+    require(
+        clips and base64.b64decode(clips[-1]) == text.encode(),
+        "accept_tui: acceptance check at original line 107",
+    )
     chat.send(b"\x1b")
     for _ in range(4):
         chat.poll()
@@ -125,6 +172,7 @@ def select_child(chat: TerminalChat, name: str) -> None:
 
 
 def navigation(case: Case) -> None:
+    """Check focused cancellation, sibling progress, copying and saved-session menus."""
     chat = case.chat(persist=True)
     try:
         chat.wait("Main chat", 30)
@@ -136,7 +184,10 @@ def navigation(case: Case) -> None:
         select_child(chat, "left")
         chat.send(b"\x1b\x1b")
         chat.wait("Task stopped")
-        assert not (case.work / "BLOCK_RIGHT.release").exists()
+        require(
+            not (case.work / "BLOCK_RIGHT.release").exists(),
+            "accept_tui: acceptance check at original line 126",
+        )
         chat.command("REPLACEMENT", "ANSWER_REPLACEMENT")
         copy_message(chat, "ANSWER_REPLACEMENT")
         case.checks += [
@@ -144,14 +195,20 @@ def navigation(case: Case) -> None:
             "exact text copied from child chat",
         ]
         chat.command("/parent", "Main chat")
-        assert "WORKFLOW_FINISHED" not in chat.screen()
+        require(
+            "WORKFLOW_FINISHED" not in chat.screen(),
+            "accept_tui: acceptance check at original line 134",
+        )
         chat.command("/agents", "Agent sessions")
         rows = chat.screen().splitlines()
         y = next(i for i, line in enumerate(rows) if "right  [" in line)
         x = rows[y].index("right")
         chat.send(f"\x1b[<0;{x + 1};{y + 1}M")
         chat.wait("right")
-        assert "[RUNNING" in chat.screen()
+        require(
+            "[RUNNING" in chat.screen(),
+            "accept_tui: acceptance check at original line 141",
+        )
         chat.command("/parent", "Main chat")
         (case.work / "BLOCK_RIGHT.release").touch()
         chat.wait("WORKFLOW_FINISHED")
@@ -168,10 +225,17 @@ def navigation(case: Case) -> None:
         case.checks.append("parent processing stops and accepts a new prompt")
     finally:
         chat.close(case.output / "navigation.ansi")
+    _resume_navigation(case)
+
+
+def _resume_navigation(case: Case) -> None:
     chat = case.chat("--resume", persist=True)
     try:
         chat.wait("ANSWER_AFTER_STOP")
-        assert "Resume a session" not in chat.screen()
+        require(
+            "Resume a session" not in chat.screen(),
+            "accept_tui: acceptance check at original line 161",
+        )
         case.checks.append("one saved session resumes directly")
     finally:
         chat.close(case.output / "resume-one.ansi")
@@ -194,29 +258,45 @@ def navigation(case: Case) -> None:
         chat.close(case.output / "resume-menu.ansi")
 
 
-def process(case: Case) -> None:
-    def alive(pid: int) -> bool:
+def _process_ids(path: Path) -> list[int]:
+    return [
+        integer_field(item, "process ID")
+        for item in array_field(
+            json_object(path.read_text(encoding="utf-8")),
+            "process IDs",
+        )
+    ]
+
+
+def _alive_process(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    if sys.platform.startswith("linux"):
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+            state = (
+                Path(f"/proc/{pid}/stat")
+                .read_text(encoding="utf-8")
+                .rsplit(")", 1)[1]
+                .split()[0]
+            )
+        except FileNotFoundError:
             return False
-        if sys.platform.startswith("linux"):
-            try:
-                state = (
-                    Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-                )
-            except FileNotFoundError:
-                return False
-            if state == "Z":
-                return False  # Killed; awaiting the operating system's reaper.
-        return True
+        if state == "Z":
+            return False  # Killed; awaiting the operating system's reaper.
+    return True
 
-    def stopped(pids: list[int]) -> None:
-        deadline = time.monotonic() + 10
-        while any(alive(pid) for pid in pids) and time.monotonic() < deadline:
-            chat.poll()
-        assert not [pid for pid in pids if alive(pid)], pids
 
+def _await_stopped(chat: TerminalChat, pids: list[int]) -> None:
+    deadline = time.monotonic() + 10
+    while any(_alive_process(pid) for pid in pids) and time.monotonic() < deadline:
+        chat.poll()
+    require(not [pid for pid in pids if _alive_process(pid)], pids)
+
+
+def process(case: Case) -> None:
+    """Verify descendant termination and recovery in normal and isolated commands."""
     chat = case.chat("--yes")
     tracked: list[int] = []
     try:
@@ -224,13 +304,13 @@ def process(case: Case) -> None:
         chat.send("RUN_LONG\r")
         path = case.work / "process-pids.json"
         wait_file(chat, path)
-        pids = json.loads(path.read_text())
+        pids = _process_ids(path)
         tracked.extend(pids)
         started = time.monotonic()
         chat.send(b"\x1b\x1b")
         chat.wait("Task stopped", 10)
         elapsed = time.monotonic() - started
-        stopped(pids)
+        _await_stopped(chat, pids)
         chat.command("RUN_FAST", "PROCESS_RECOVERED", 15)
         case.checks += [
             f"command and descendant stopped in {elapsed:.3f}s",
@@ -240,25 +320,40 @@ def process(case: Case) -> None:
             chat.send("/probe-isolated" + arguments + ("\r" if arguments else "\t\r"))
             path = case.work / f"isolated-pids-{label}.json"
             wait_file(chat, path)
-            pids = json.loads(path.read_text())
-            worker = json.loads(
-                (case.work / f"isolated-worker-{label}.json").read_text(),
+            pids = _process_ids(path)
+            worker = integer_field(
+                json_object(
+                    (case.work / f"isolated-worker-{label}.json").read_text(
+                        encoding="utf-8",
+                    ),
+                ),
+                "isolated worker process ID",
             )
             tracked.extend([worker, *pids])
-            assert worker not in pids and worker != chat.process.pid
+            require(
+                worker not in pids and worker != chat.process.pid,
+                "accept_tui: acceptance check at original line 235",
+            )
             started = time.monotonic()
             chat.send(b"\x1b\x1b")
             chat.wait("Task stopped", 10)
-            stopped([worker, *pids])
+            _await_stopped(chat, [worker, *pids])
             elapsed = time.monotonic() - started
             if os.name == "posix":
                 # POSIX signals must unwind the plugin, including its executor,
                 # rather than simply terminating the isolated Python process.
                 cleanup = case.work / f"isolated-cleanup-{label}.json"
-                assert cleanup.exists() and json.loads(cleanup.read_text()) == worker
+                require(
+                    cleanup.exists()
+                    and json_object(cleanup.read_text(encoding="utf-8")) == worker,
+                    "accept_tui: acceptance check at original line 245",
+                )
             chat.command("RUN_FAST_" + label, "PROCESS_RECOVERED_" + label, 15)
             case.checks += [
-                f"isolated {label} command and SIGTERM-resistant descendant stopped in {elapsed:.3f}s",
+                (
+                    f"isolated {label} command and SIGTERM-resistant descendant "
+                    f"stopped in {elapsed:.3f}s"
+                ),
                 f"replacement after isolated {label} cancellation completed",
             ]
     finally:
@@ -266,12 +361,236 @@ def process(case: Case) -> None:
             chat.close(case.output / "process.ansi")
         finally:
             for pid in tracked:
-                if alive(pid):
+                if _alive_process(pid):
                     with contextlib.suppress(ProcessLookupError):
                         os.kill(pid, signal.SIGKILL)
 
 
-def external(case: Case) -> None:
+def _rollback_checks(case: Case, chat: TerminalChat) -> None:
+    chat.command("/probe-rollback error", "ROLLBACK_FAILURE")
+    require(
+        "ORIGINAL_FAILURE" in chat.screen(),
+        "accept_tui: acceptance check at original line 345",
+    )
+    require(
+        [
+            json_object(line)
+            for line in (case.work / "rollback-error.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        == ["failure", "success"],
+        "accept_tui: acceptance check at original line 346",
+    )
+    chat.command("AFTER_ROLLBACK_ERROR", "ANSWER_AFTER_ROLLBACK_ERROR")
+    chat.send("/probe-rollback cancel\r")
+    wait_file(chat, case.work / "rollback-cancel.started")
+    chat.send(b"\x1b\x1b")
+    chat.wait("Task stopped")
+    require(
+        [
+            json_object(line)
+            for line in (case.work / "rollback-cancel.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        == ["failure", "success"],
+        "accept_tui: acceptance check at original line 355",
+    )
+    chat.command("AFTER_ROLLBACK_CANCEL", "ANSWER_AFTER_ROLLBACK_CANCEL")
+    chat.command("/probe-rollback prepare", "PREPARE_QUEUED")
+    wait_file(chat, case.work / "rollback-prepare.jsonl")
+    records: list[object] = []
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        records = [
+            json_object(line)
+            for line in (case.work / "rollback-prepare.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        if records == ["failure", "later prepare"]:
+            break
+        chat.poll()
+    require(
+        records == ["failure", "later prepare"],
+        "accept_tui: acceptance check at original line 374",
+    )
+    chat.command("AFTER_PREPARE_ERROR", "ANSWER_AFTER_PREPARE_ERROR")
+    case.checks.append(
+        (
+            "failed rollback hooks cannot strand a generation, skip anoth"
+            "er rollback, or suppress later updates"
+        ),
+    )
+
+
+def _construction_checks(case: Case, chat: TerminalChat) -> None:
+    (case.work / "record-worker-cleanup").touch()
+    for phase, error in (
+        ("restore", "Invalid session snapshot"),
+        ("construct", "Unknown allowed actions"),
+    ):
+        before = set(case.work.glob("worker-cleanup-*.json"))
+        chat.command("/probe-conversation-failure " + phase, error)
+        after = set(case.work.glob("worker-cleanup-*.json"))
+        closed = [read_object(path) for path in after - before]
+        require(len(closed) == _EXPECTED_CLEANUPS, closed)
+        require(len({record["pid"] for record in closed}) == 1, closed)
+        require(closed[0]["pid"] != chat.process.pid, closed)
+        require(
+            len({record["registration"] for record in closed}) == _EXPECTED_CLEANUPS,
+            closed,
+        )
+        require(
+            str(case.work) in {record["workspace"] for record in closed},
+            closed,
+        )
+        chat.command("AFTER_" + phase.upper(), "ANSWER_AFTER_" + phase.upper())
+    (case.work / "record-worker-cleanup").unlink()
+    case.checks.append(
+        (
+            "isolated conversation constructors and snapshot failures clo"
+            "se their plugin runtime"
+        ),
+    )
+
+
+def _install_external(
+    case: Case,
+    chat: TerminalChat,
+    server_port: int,
+    catalog: Callable[[str], None],
+) -> str:
+    chat.command_complete("/plugins new dev/greeting", "created")
+    require(
+        not (case.work / "dev/greeting/test_plugin.py").exists(),
+        "accept_tui: acceptance check at original line 399",
+    )
+    package = case.work / "dev/greeting"
+    (package / "helpers").mkdir()
+    (package / "helpers/labels.py").write_text("PREFIX = ''\n")
+    entrypoint = package / "__init__.py"
+    entrypoint.write_text(
+        "from .helpers.labels import PREFIX\n"
+        + entrypoint.read_text(encoding="utf-8").replace(
+            "return text_field(execute(",
+            "return PREFIX + text_field(execute(",
+        ),
+    )
+    chat.command_complete("/plugins check dev/greeting", "commands")
+    chat.command_complete("/plugins pack dev/greeting greeting.zip", "sha256")
+    catalog("greeting.zip")
+    chat.command_complete(
+        f"/plugins catalog add local http://127.0.0.1:{server_port}/catalog.json",
+        "local",
+    )
+    chat.command_complete("/plugins search greeting", "shareable RayChat plugin")
+    chat.command_complete("/plugins install local/greeting", "packages")
+    chat.command_complete("/greet", "Hello")
+    instructions = text_field(
+        read_object(case.work / "dev/greeting/plugin.json")["instructions"],
+        "plugin instructions",
+    )
+    _awareness(case, chat, instructions, included=True)
+    case.checks += [
+        "create, check, share, discover and install a plugin through TUI",
+        "installed manifest instructions appear in model requests",
+    ]
+    return instructions
+
+
+def _update_external(
+    case: Case,
+    chat: TerminalChat,
+    instructions: str,
+    catalog: Callable[[str], None],
+) -> Path:
+    installed = case.work / ".raychat/plugins/greeting/__init__.py"
+    installed.write_text(
+        installed.read_text(encoding="utf-8").replace(
+            "ctx.settings['greeting']",
+            "'Edited live'",
+        ),
+    )
+    chat.command_complete("/greet", "Edited live")
+    (installed.parent / "helpers/labels.py").write_text("PREFIX = 'Nested '\n")
+    chat.command_complete("/greet", "Nested Edited live")
+    case.checks.append(
+        "namespace helper imports and live helper edits use captured source",
+    )
+    chat.command_complete("/plugins disable greeting", "applied")
+    _awareness(case, chat, instructions, included=False)
+    chat.command_complete("/plugins enable greeting", "applied")
+    chat.command_complete("/greet", "Edited live")
+    _awareness(case, chat, instructions, included=True)
+    case.checks.append(
+        "live code and activation changes update the same TUI process",
+    )
+    mpath = case.work / "dev/greeting/plugin.json"
+    newer = read_object(mpath)
+    newer["version"] = "1.1.0"
+    object_field(newer["defaults"], "defaults")["greeting"] = "Updated release"
+    mpath.write_text(json_text(newer))
+    chat.command_complete("/plugins pack dev/greeting greeting-v2.zip", "sha256")
+    catalog("greeting-v2.zip")
+    chat.command_complete("/plugins update greeting", "local edits")
+    chat.command_complete("/plugins update greeting --force", "packages")
+    chat.command_complete("/greet", "Updated release")
+    case.checks.append(
+        "updates protect local edits; explicit replacement activates the release",
+    )
+    catalog_path = case.work / "catalog.json"
+    tampered = read_object(catalog_path)
+    object_field(array_field(tampered["plugins"], "plugins")[0], "plugin")[
+        "instructions"
+    ] = "Tampered catalog metadata"
+    catalog_path.write_text(json_text(tampered))
+    chat.command_complete("/plugins update greeting", "does not match the catalog")
+    chat.command_complete("/greet", "Updated release")
+    case.checks.append("catalog and archive metadata mismatch is rejected")
+    return installed
+
+
+def _uninstall_external(
+    case: Case,
+    chat: TerminalChat,
+    installed: Path,
+    marker: Path,
+) -> None:
+    chat.command_complete("/plugins uninstall greeting", "removed")
+    deadline = time.monotonic() + 10
+    while installed.exists() and time.monotonic() < deadline:
+        chat.poll()
+    require(
+        not installed.exists() and not marker.exists(),
+        "accept_tui: acceptance check at original line 471",
+    )
+    lock_paths = list((case.home / "workspaces").glob("*/plugins.lock.json"))
+    require(
+        len(lock_paths) == 1,
+        "accept_tui: acceptance check at original line 473",
+    )
+    state = read_object(lock_paths[0])
+    require(
+        "greeting" in array_field(state["disabled"], "disabled")
+        and "greeting" not in object_field(state["packages"], "packages"),
+        "Uninstalled greeting must be disabled and absent from package state.",
+    )
+    case.checks.append("uninstall persists under operator-owned state")
+
+
+def _awareness(case: Case, chat: TerminalChat, text: str, *, included: bool) -> None:
+    prompt = "CHECK_USAGE_" + str(time.monotonic_ns())
+    chat.command_complete(prompt, "ANSWER_" + prompt)
+    messages = read_messages(case.work / "requests.jsonl")[-1]
+    require(
+        (text in messages[0]["content"]) == included,
+        "accept_tui: acceptance check at original line 337",
+    )
+
+
+def _forge_workspace_lock(case: Case) -> Path:
     malicious = case.work / ".raychat/plugins/forged"
     malicious.mkdir(parents=True)
     manifest = {
@@ -283,13 +602,15 @@ def external(case: Case) -> None:
         "requires": {},
         "instructions": "No trusted installation exists.",
     }
-    (malicious / "plugin.json").write_text(json.dumps(manifest))
+    (malicious / "plugin.json").write_text(json_text(manifest))
     marker = case.work / "forged-executed"
     (malicious / "__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(marker)!r}).touch()\ndef register(api): pass\n",
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).touch()\n"
+        "def register(api): pass\n",
     )
     (case.work / ".raychat/plugins.lock.json").write_text(
-        json.dumps(
+        json_text(
             {
                 "schema": 1,
                 "packages": {
@@ -306,10 +627,16 @@ def external(case: Case) -> None:
             },
         ),
     )
+    return marker
+
+
+def external(case: Case) -> None:
+    """Exercise package trust, rollback, installation, live updates and removal."""
+    marker = _forge_workspace_lock(case)
 
     class Server(BaseHTTPRequestHandler):
         @override
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, _format: str, *args: object) -> None:
             pass
 
         def do_GET(self) -> None:
@@ -324,10 +651,10 @@ def external(case: Case) -> None:
     thread.start()
 
     def catalog(archive: str) -> None:
-        manifest = json.loads((case.work / "dev/greeting/plugin.json").read_text())
+        manifest = read_object(case.work / "dev/greeting/plugin.json")
         data = (case.work / archive).read_bytes()
         (case.work / "catalog.json").write_text(
-            json.dumps(
+            json_text(
                 {
                     "schema": 1,
                     "plugins": [
@@ -341,152 +668,19 @@ def external(case: Case) -> None:
             ),
         )
 
-    def awareness(chat: TerminalChat, included: bool, text: str) -> None:
-        prompt = "CHECK_USAGE_" + str(time.monotonic_ns())
-        chat.command(prompt, "ANSWER_" + prompt)
-        messages = json.loads(
-            (case.work / "requests.jsonl").read_text().splitlines()[-1],
-        )
-        assert (text in messages[0]["content"]) == included
-
     chat = case.chat()
     try:
         chat.wait("Main chat", 30)
-        assert not marker.exists()
+        require(
+            not marker.exists(),
+            "accept_tui: acceptance check at original line 342",
+        )
         case.checks.append("repository lock cannot authorize plugin execution")
-        chat.command("/probe-rollback error", "ROLLBACK_FAILURE")
-        assert "ORIGINAL_FAILURE" in chat.screen()
-        assert [
-            json.loads(line)
-            for line in (case.work / "rollback-error.jsonl").read_text().splitlines()
-        ] == ["failure", "success"]
-        chat.command("AFTER_ROLLBACK_ERROR", "ANSWER_AFTER_ROLLBACK_ERROR")
-        chat.send("/probe-rollback cancel\r")
-        wait_file(chat, case.work / "rollback-cancel.started")
-        chat.send(b"\x1b\x1b")
-        chat.wait("Task stopped")
-        assert [
-            json.loads(line)
-            for line in (case.work / "rollback-cancel.jsonl").read_text().splitlines()
-        ] == ["failure", "success"]
-        chat.command("AFTER_ROLLBACK_CANCEL", "ANSWER_AFTER_ROLLBACK_CANCEL")
-        chat.command("/probe-rollback prepare", "PREPARE_QUEUED")
-        wait_file(chat, case.work / "rollback-prepare.jsonl")
-        records: list[object] = []
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            records = [
-                json.loads(line)
-                for line in (case.work / "rollback-prepare.jsonl")
-                .read_text()
-                .splitlines()
-            ]
-            if records == ["failure", "later prepare"]:
-                break
-            chat.poll()
-        assert records == ["failure", "later prepare"]
-        chat.command("AFTER_PREPARE_ERROR", "ANSWER_AFTER_PREPARE_ERROR")
-        case.checks.append(
-            "failed rollback hooks cannot strand a generation, skip another rollback, or suppress later updates",
-        )
-        (case.work / "record-worker-cleanup").touch()
-        for phase, error in (
-            ("restore", "Invalid session snapshot"),
-            ("construct", "Unknown allowed actions"),
-        ):
-            before = set(case.work.glob("worker-cleanup-*.json"))
-            chat.command("/probe-conversation-failure " + phase, error)
-            after = set(case.work.glob("worker-cleanup-*.json"))
-            closed = [json.loads(path.read_text()) for path in after - before]
-            assert len(closed) == 2, closed
-            assert len({record["pid"] for record in closed}) == 1, closed
-            assert closed[0]["pid"] != chat.process.pid, closed
-            assert len({record["registration"] for record in closed}) == 2, closed
-            assert str(case.work) in {record["workspace"] for record in closed}, closed
-            chat.command("AFTER_" + phase.upper(), "ANSWER_AFTER_" + phase.upper())
-        (case.work / "record-worker-cleanup").unlink()
-        case.checks.append(
-            "isolated conversation constructors and snapshot failures close their plugin runtime",
-        )
-        chat.command("/plugins new dev/greeting", "created")
-        assert not (case.work / "dev/greeting/test_plugin.py").exists()
-        package = case.work / "dev/greeting"
-        (package / "helpers").mkdir()
-        (package / "helpers/labels.py").write_text("PREFIX = ''\n")
-        entrypoint = package / "__init__.py"
-        entrypoint.write_text(
-            "from .helpers.labels import PREFIX\n"
-            + entrypoint.read_text().replace(
-                "return str(execute(",
-                "return PREFIX + str(execute(",
-            ),
-        )
-        chat.command("/plugins check dev/greeting", "commands")
-        chat.command("/plugins pack dev/greeting greeting.zip", "sha256")
-        catalog("greeting.zip")
-        chat.command_complete(
-            f"/plugins catalog add local http://127.0.0.1:{server.server_port}/catalog.json",
-            "local",
-        )
-        chat.command("/plugins search greeting", "shareable RayChat plugin")
-        chat.command("/plugins install local/greeting", "packages")
-        chat.command("/greet", "Hello")
-        instructions = json.loads((case.work / "dev/greeting/plugin.json").read_text())[
-            "instructions"
-        ]
-        awareness(chat, True, instructions)
-        case.checks += [
-            "create, check, share, discover and install a plugin through TUI",
-            "installed manifest instructions appear in model requests",
-        ]
-        installed = case.work / ".raychat/plugins/greeting/__init__.py"
-        installed.write_text(
-            installed.read_text().replace("ctx.settings['greeting']", "'Edited live'"),
-        )
-        chat.command("/greet", "Edited live")
-        (installed.parent / "helpers/labels.py").write_text("PREFIX = 'Nested '\n")
-        chat.command("/greet", "Nested Edited live")
-        case.checks.append(
-            "namespace helper imports and live helper edits use captured source",
-        )
-        chat.command("/plugins disable greeting", "applied")
-        awareness(chat, False, instructions)
-        chat.command("/plugins enable greeting", "applied")
-        chat.command("/greet", "Edited live")
-        awareness(chat, True, instructions)
-        case.checks.append(
-            "live code and activation changes update the same TUI process",
-        )
-        mpath = case.work / "dev/greeting/plugin.json"
-        newer = json.loads(mpath.read_text())
-        newer["version"] = "1.1.0"
-        newer["defaults"]["greeting"] = "Updated release"
-        mpath.write_text(json.dumps(newer))
-        chat.command("/plugins pack dev/greeting greeting-v2.zip", "sha256")
-        catalog("greeting-v2.zip")
-        chat.command("/plugins update greeting", "local edits")
-        chat.command("/plugins update greeting --force", "packages")
-        chat.command("/greet", "Updated release")
-        case.checks.append(
-            "updates protect local edits; explicit replacement activates the release",
-        )
-        catalog_path = case.work / "catalog.json"
-        tampered = json.loads(catalog_path.read_text())
-        tampered["plugins"][0]["instructions"] = "Tampered catalog metadata"
-        catalog_path.write_text(json.dumps(tampered))
-        chat.command("/plugins update greeting", "does not match the catalog")
-        chat.command("/greet", "Updated release")
-        case.checks.append("catalog and archive metadata mismatch is rejected")
-        chat.command("/plugins uninstall greeting", "removed")
-        deadline = time.monotonic() + 10
-        while installed.exists() and time.monotonic() < deadline:
-            chat.poll()
-        assert not installed.exists() and not marker.exists()
-        lock_paths = list((case.home / "workspaces").glob("*/plugins.lock.json"))
-        assert len(lock_paths) == 1
-        state = json.loads(lock_paths[0].read_text())
-        assert "greeting" in state["disabled"] and "greeting" not in state["packages"]
-        case.checks.append("uninstall persists under operator-owned state")
+        _rollback_checks(case, chat)
+        _construction_checks(case, chat)
+        instructions = _install_external(case, chat, server.server_port, catalog)
+        installed = _update_external(case, chat, instructions, catalog)
+        _uninstall_external(case, chat, installed, marker)
     finally:
         chat.close(case.output / "lifecycle.ansi")
         server.shutdown()
@@ -495,17 +689,20 @@ def external(case: Case) -> None:
     chat = case.chat()
     try:
         chat.wait("Main chat")
-        chat.command("/greet", "Unknown command")
-        assert not marker.exists()
+        chat.command_complete("/greet", "Unknown command")
+        require(
+            not marker.exists(),
+            "accept_tui: acceptance check at original line 486",
+        )
         case.checks.append("restart preserves removal and workspace trust")
-        chat.command("/plugins disable plugin_manager", "applied")
+        chat.command_complete("/plugins disable plugin_manager", "applied")
     finally:
         chat.close(case.output / "restart.ansi")
     chat = case.chat("--plugin", str(case.home / "plugins/plugin_manager"))
     try:
         chat.wait("Main chat")
-        chat.command("/plugins enable plugin_manager", "applied")
-        chat.command("/plugins list", "plugin_manager")
+        chat.command_complete("/plugins enable plugin_manager", "applied")
+        chat.command_complete("/plugins list", "plugin_manager")
         case.checks.append(
             "explicit package launch recovers disabled plugin management",
         )
@@ -521,15 +718,16 @@ SCENARIOS: dict[str, Callable[[Case], None]] = {
 
 
 def main() -> None:
+    """Run selected terminal acceptance scenarios and write their reports."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
-    args = parser.parse_args()
-    for name in args.scenario or SCENARIOS:
-        case = Case(args.root.resolve(), args.output.resolve() / name)
+    args = verification_paths(parser.parse_args())
+    for name in args.scenarios or SCENARIOS:
+        case = Case(args.root, args.output / name)
         SCENARIOS[name](case)
-        print(json.dumps({"scenario": name, **case.result()}), flush=True)
+        write_report({"scenario": name, **case.result()})
 
 
 if __name__ == "__main__":

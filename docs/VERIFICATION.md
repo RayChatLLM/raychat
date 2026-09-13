@@ -62,7 +62,7 @@ application, plugin, test, example and tool source, including the launcher.
 
 Run the entire unittest discovery command, not just selected modules or static
 interface checks. Retain its test count, failures, errors and skips. Unit tests
-exercise APIs and regression invariants; the thirteen offline TUI drivers separately
+exercise APIs and regression invariants; the fourteen offline TUI drivers separately
 verify the application's user-facing behavior. Complete verification requires
 both, and final results must identify the tested source/ZIP hash.
 
@@ -88,6 +88,7 @@ python3 -B -S -m tools.self_harness_tui --output /tmp/raychat-live-self-harness 
 | `package_download_tui` | Cancellation while headers or response body stall; replacement before server release, no partial activation, successful retry, focused workflow-child cancellation with parent/sibling survival |
 | `adversarial_agents_tui` | Separate parent/child queues and histories, focused cancellation with sibling survival, repeated workflows, deferred provider reload, stable picker IDs, bounded Unicode previews, single/double Escape with the picker open, cancellable concurrent session commands and occupied command-lane admission |
 | `ui_stress_tui` | Atomic oversized-paste rejection, preserved drafts, discarded newline tails, configured input limits, combining Unicode and exact clipboard content after scrolling, busy commands, saved forks/resume and empty menus |
+| `composer_tui` | Editable FIFO queues, per-child draft restoration, command-name completion, automatic mouse-copy feedback, and pushed SDK 4 status expiry/order without transcript pollution |
 | `collective_tui` | At least 50 child conversations in bounded workflow batches, independent invoice reconciliation, verified aggregate, per-child context compaction, child follow-up, oversized-input rejection before provider invocation, malformed-response repair and recovery |
 | `optimization_tui` | Installed private GEPA engine, stdlib imports, unchanged upstream prompt templates and exact 2,029-byte behavior oracle, offline file-task/incident improvement, parallel score equivalence, canonical saved protocol bytes |
 | `plugin_guide_tui` | Complete documented hello/salute packages, session state, model hooks, direct services, live-edit rollback, ZIP/catalog installation and disable/enable/removal |
@@ -125,7 +126,7 @@ groups and never replace the active user prompt.
 
 The reports below predate the current file/folder reorganization. They document
 their own sources and experiments; they do not establish that the reorganized
-tree has passed the new full-unit and thirteen-driver acceptance requirement.
+tree has passed the new full-unit and fourteen-driver acceptance requirement.
 
 The retained deterministic collective run completed 50 correct children with eight
 active at once. All 50 compacted; 305 requests contained compaction, and the

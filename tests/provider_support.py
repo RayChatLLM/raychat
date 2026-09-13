@@ -1,4 +1,3 @@
-# Copyright 2026
 """Typed fixtures for the provider registered from its captured package."""
 
 from __future__ import annotations

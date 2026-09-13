@@ -1,4 +1,3 @@
-# Copyright 2026
 """Nonblocking process locks, automatically released by the operating system."""
 
 from __future__ import annotations

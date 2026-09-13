@@ -13,12 +13,16 @@ import pty
 import re
 import select
 import struct
-import subprocess
 import sys
 import termios
 import time
-from pathlib import Path
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+from .terminal_process import TerminalProcess
 from .terminal_screen import TerminalScreen
 
 
@@ -34,49 +38,79 @@ def _terminal_modes(fd: int) -> list[object]:
     return attributes
 
 
+@dataclass(frozen=True, kw_only=True)
+class TerminalOptions:
+    """Select the PTY viewport, animation cadence and simulated output bandwidth."""
+
+    columns: int = 110
+    rows: int = 30
+    animated: bool = False
+    fps: float | None = 12
+    read_bytes_per_second: int | None = None
+    launcher: Path | None = None
+
+
+_DEFAULT_OPTIONS = TerminalOptions()
+
+
+def _reply_contains(body: str, expected: str) -> bool:
+    _, marker, latest_input = body.rpartition("\n│ YOU")
+    if not marker:
+        # Long new replies may scroll their input and response labels offscreen.
+        return expected in body
+    reply = re.search(r"\n│ (?:AGENT|SYSTEM|ERROR)\b", latest_input)
+    return reply is not None and expected in latest_input[reply.start() :]
+
+
 class TerminalChat:
+    """Drive a real application through terminal bytes and reconstructed output."""
+
     def __init__(
         self,
         root: Path,
         arguments: list[str],
         *,
-        columns: int = 110,
-        rows: int = 30,
-        animated: bool = False,
-        fps: float | None = 12,
-        read_bytes_per_second: int | None = None,
-        launcher: Path | None = None,
+        options: TerminalOptions = _DEFAULT_OPTIONS,
     ) -> None:
+        """Open a PTY and launch the configured application through it."""
         self.master, self.slave = pty.openpty()
         os.set_blocking(self.master, False)
-        self.columns, self.rows = columns, rows
-        self.resize(columns, rows)
+        self.columns, self.rows = options.columns, options.rows
+        self.resize(options.columns, options.rows)
         self.original = _terminal_modes(self.slave)
         self.output = bytearray()
-        self._screen = TerminalScreen(columns, rows)
+        self._screen = TerminalScreen(options.columns, options.rows)
         self._screen_offset = 0
-        self._read_rate = read_bytes_per_second
+        self._read_rate = options.read_bytes_per_second
         self._next_read = 0.0
         env = dict(os.environ, TERM="xterm-256color")
         env.pop("RAYCHAT_CONFIG", None)
-        self.process = subprocess.Popen(  # noqa: S603 - argument arrays only; caller controls execution and checks the result
-            [
-                sys.executable,
-                "-B",
-                "-S",
-                str(root / "raychat.py" if launcher is None else launcher),
-                *([] if animated else ["--no-animation"]),
-                *([] if fps is None else ["--fps", str(fps)]),
-                *arguments,
-            ],
-            stdin=self.slave,
-            stdout=self.slave,
-            stderr=self.slave,
-            cwd=root,
-            env=env,
-        )
+        try:
+            self.process = TerminalProcess(
+                [
+                    sys.executable,
+                    "-B",
+                    "-S",
+                    str(
+                        root / "raychat.py"
+                        if options.launcher is None
+                        else options.launcher,
+                    ),
+                    *([] if options.animated else ["--no-animation"]),
+                    *([] if options.fps is None else ["--fps", str(options.fps)]),
+                    *arguments,
+                ],
+                directory=root,
+                environment=env,
+                terminal_fd=self.slave,
+            )
+        except BaseException:
+            os.close(self.master)
+            os.close(self.slave)
+            raise
 
     def resize(self, columns: int, rows: int) -> None:
+        """Resize the real PTY and update the driver's reconstructed viewport."""
         fcntl.ioctl(
             self.slave,
             termios.TIOCSWINSZ,
@@ -85,6 +119,7 @@ class TerminalChat:
         self.columns, self.rows = columns, rows
 
     def poll(self, seconds: float = 0.04) -> None:
+        """Read available terminal output within the timeout and simulated bandwidth."""
         limit = 1048576
         if self._read_rate is not None:
             delay = self._next_read - time.monotonic()
@@ -100,12 +135,28 @@ class TerminalChat:
                     self._next_read = time.monotonic() + len(data) / self._read_rate
 
     def screen(self) -> str:
+        """Decode new output and return the reconstructed terminal viewport.
+
+        Returns
+        -------
+        str
+            Visible rows after applying every newly received terminal update.
+
+        """
         self._screen.resize(self.columns, self.rows)
         self._screen.feed(bytes(self.output[self._screen_offset :]))
         self._screen_offset = len(self.output)
         return self._screen.text()
 
     def wait(self, text: str, seconds: float = 15) -> None:
+        """Wait for expected text to appear in reconstructed terminal output.
+
+        Raises
+        ------
+        AssertionError
+            The text did not appear before the deadline or the child exited.
+
+        """
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             self.poll()
@@ -118,6 +169,14 @@ class TerminalChat:
         )
 
     def send(self, text: str | bytes) -> None:
+        """Deliver complete keyboard bytes while draining output to avoid PTY deadlock.
+
+        Raises
+        ------
+        TimeoutError
+            The child did not drain all input within the fixed delivery deadline.
+
+        """
         pending = memoryview(text.encode("utf-8") if isinstance(text, str) else text)
         deadline = time.monotonic() + 30
         while pending:
@@ -131,20 +190,28 @@ class TerminalChat:
             self.poll(0.001)
 
     def command(self, text: str, expected: str, seconds: float = 15) -> None:
+        """Submit a command and wait for its expected visible response."""
         self.send(
             text
             + (
                 "\t\r"
                 if text.startswith("/") and not any(char.isspace() for char in text)
                 else "\r"
-            )
+            ),
         )
         self.wait(expected, seconds)
         for _ in range(3):
             self.poll()
 
     def command_complete(self, text: str, expected: str, seconds: float = 15) -> None:
-        """Wait for a new completed reply, including when old text matches."""
+        """Wait for a newly completed reply, including when old text also matches.
+
+        Raises
+        ------
+        AssertionError
+            No new completed reply appeared before the deadline or child exit.
+
+        """
         previous = self.screen()
         self.send(
             text
@@ -152,7 +219,7 @@ class TerminalChat:
                 "\t\r"
                 if text.startswith("/") and not any(char.isspace() for char in text)
                 else "\r"
-            )
+            ),
         )
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
@@ -162,9 +229,9 @@ class TerminalChat:
             composer = body.partition("─ MESSAGE ")[2]
             if (
                 screen != previous
-                and expected in screen
+                and _reply_contains(body, expected)
                 and any(state in header for state in ("[DONE]", "[ERROR]", "[IDLE]"))
-                and re.search(r"│ ›\s*│", composer)
+                and re.search(r"│ \u203a\s*│", composer)
             ):
                 return
             if self.process.poll() is not None:
@@ -179,6 +246,14 @@ class TerminalChat:
         self.send(f"\x1b[<0;{x};{y}M\x1b[<32;{end_x};{end_y}M\x1b[<0;{end_x};{end_y}m")
 
     def close(self, transcript: Path, *, expected_exit: int = 0) -> None:
+        """Stop and reap the child, save its transcript and verify mode restoration.
+
+        Raises
+        ------
+        AssertionError
+            Original terminal modes were not restored or the exit status was unexpected.
+
+        """
         if self.process.poll() is None:
             self.send(b"\x04")
             deadline = time.monotonic() + 10
