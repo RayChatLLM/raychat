@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 from dataclasses import replace
 from pathlib import Path
@@ -38,7 +39,12 @@ def _installation(api: PluginAPI) -> HarnessInstallation:
             )
             raise ValueError(message)
     workspace = api.context.workspace
-    overlay_path = workspace_path(workspace, config.overlay_path)
+    release_overlay = os.environ.get("RAYCHAT_CORE_OVERLAY")
+    overlay_path = (
+        Path(release_overlay)
+        if release_overlay
+        else workspace_path(workspace, config.overlay_path)
+    )
     if overlay_path.exists():
         with overlay_path.open("rb") as stream:
             data = stream.read(config.max_overlay_bytes + 1)

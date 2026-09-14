@@ -499,6 +499,35 @@ class ApprovalDetailTests(TypedTestCase):
 class StateTests(TypedTestCase):
     """Check State behavior and failure boundaries."""
 
+    def test_restore_keeps_update_notices_distinct_from_model_claims(self) -> None:
+        """Keep host attribution and hide internal feedback payloads after resume."""
+        state = tui_state.TuiState()
+        state.restore([
+            {"kind": "prompt", "content": "Change the core"},
+            {
+                "kind": "assistant",
+                "content": '{"action":"done","pending":true,'
+                '"message":"Validation pending"}',
+            },
+            {
+                "kind": "prompt",
+                "content": 'CORE_UPDATE_RESULT: {"status":"rejected",'
+                '"screen":"internal frame"}',
+            },
+            {
+                "kind": "assistant",
+                "content": '{"action":"done","message":"The update failed"}',
+            },
+        ])
+        self.equal(
+            [entry.kind for entry in state.entries],
+            ["user", "system", "system", "assistant"],
+        )
+        rendered = "\n".join(row.text for row in state.transcript_rows(100))
+        self.require("rejected" in rendered)
+        self.require("internal frame" not in rendered)
+        self.require("The update failed" in rendered)
+
     def test_complete_worker_and_approval_lifecycle(self) -> None:
         """Check complete worker and approval lifecycle."""
         state = tui_state.TuiState()

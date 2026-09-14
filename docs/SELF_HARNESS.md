@@ -1,5 +1,11 @@
 # Self-Harness
 
+This optional plugin is disabled in the default configuration. Ordinary chat can
+still modify and recover the running core through the built-in tools described in
+[Live core updates](LIVE_CORE.md). Enable Self-Harness explicitly only when its
+separate proposal/evaluation loop is desired by removing `self_harness` from the
+configuration's `plugins.disabled` list.
+
 The `self_harness` plugin adapts the proposal/validation loop in
 [Nano's self_harness.rs](https://github.com/skorotkiewicz/nano-agent/blob/main/src/self_harness.rs)
 and the failure-driven, held-in/held-out gate in
@@ -177,3 +183,11 @@ is also retained. No failed provider run is presented as an improvement.
 
 Evaluator JSON has its own bounded `max_evaluator_bytes` allowance (256 KiB by
 default), separate from the short output retained for ordinary command tools.
+
+## Supervised core updates
+
+Interactive sessions submit source proposals to the stable core supervisor. Changes
+to `raychat/` and `plugins/` (including Self-Harness itself) become isolated releases
+after the fixed quality, test, packaging, and restoration gates pass. The footer
+reports activation status; `/update-log` identifies detailed diagnostics. See
+[live updates and recovery](LIVE_CORE.md) for retained releases and emergency recovery.

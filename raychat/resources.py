@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import TextIO
 
+    from .core_bridge import CoreBridge
     from .plugins import Runtime
     from .sdk import SessionOptions
     from .storage import SessionStore
@@ -72,6 +73,7 @@ class AgentResources:
     log: TextIO | None = None
     store: SessionStore | None = None
     protocol: str | None = None
+    live: CoreBridge | None = None
 
     def close(self) -> None:
         """Close the host and every owned file, including after partial startup."""
@@ -174,7 +176,19 @@ def _prepare_resources(
         options.workspace,
         options_from_args(args, interactive=options.exec_prompt is None),
     )
+    resources.runtime.on_checkpoint = lambda owner: _checkpoint_before_chat(
+        resources,
+        owner,
+    )
     resources.api = LiveChat(resources.runtime)
+
+
+def _checkpoint_before_chat(resources: AgentResources, owner: str) -> None:
+    store = resources.store
+    if store is not None:
+        state = dict(configuration_fields(store.snapshot()["state"], "session state"))
+        state[owner] = resources.runtime.state.get(owner, {})
+        store.checkpoint(state)
 
 
 def create_resources(
@@ -182,6 +196,7 @@ def create_resources(
     environ: Mapping[str, str],
     *,
     protocol_override: str | None = None,
+    source_override: Mapping[str, object] | None = None,
 ) -> AgentResources:
     """Configure providers and open the selected log and session store.
 
@@ -195,7 +210,12 @@ def create_resources(
     runtime = build_runtime(
         options.workspace,
         options_from_args(args, interactive=options.exec_prompt is None),
-        {"args": args, "environ": environ, "timeout": options.session["timeout"]},
+        {
+            "args": args,
+            "environ": environ,
+            "timeout": options.session["timeout"],
+            **({"source": source_override} if source_override is not None else {}),
+        },
     )
     resources = AgentResources(runtime, None, protocol=protocol_override)
     try:

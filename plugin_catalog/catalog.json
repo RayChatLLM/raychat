@@ -68,10 +68,10 @@
       "description": "chat completions capabilities",
       "entrypoint": "__init__:register",
       "id": "chat_completions",
-      "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Operator launch options include --url, --model, --api-timeout and --request-options. Never expose provider credentials.",
+      "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Operator launch options include --url, --model, --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to fetch all model IDs from the configured GET /models endpoint, filter the menu, and select the model for subsequent requests.",
       "requires": {},
       "sdk": 4,
-      "sha256": "4660fb77ee6a38838054dfa8a0ced6f14b17fe9b16ad8daff0bc46c955ee24d8",
+      "sha256": "8a8f64a14b4233987d94e419d6d425c22abbca110fcd7fad94b9acacab382e8d",
       "url": "chat_completions-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -292,12 +292,11 @@
         "chat_completions": "1.0.0",
         "context": "1.0.0",
         "filesystem": "1.0.0",
-        "self_harness": "1.0.0",
         "subagents": "1.0.0",
         "workflows": "1.0.0"
       },
       "sdk": 4,
-      "sha256": "4ae69c604b1dcc576874b7f3d1ccc1a6fb4a04bc20c2be120f0307571f629e45",
+      "sha256": "9f0ca004ab089ef15036587089d916f391edc63c63cb79faaf6fc00f64c35872",
       "url": "optimization-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -379,6 +378,8 @@
         "candidate_count": 1,
         "directory": ".raychat/self-harness",
         "editable_roots": [
+          "raychat",
+          "plugins",
           ".raychat/plugins"
         ],
         "max_evaluator_bytes": 262144,
@@ -400,13 +401,13 @@
       "description": "self harness capabilities",
       "entrypoint": "__init__:register",
       "id": "self_harness",
-      "instructions": "When recurring failures indicate a harness weakness and an evaluator is configured, invoke {\"action\":\"self_harness\"} to propose and evaluate an improvement. The operator configures the fixed validator with /self-harness --scores -- python3 -B -S evaluator.py; /self-harness status shows paths. Proposals are gated by held-in/held-out scores and cannot modify the evaluator. Promotion takes effect after the current turn finishes; use done before relying on new behavior. Report measured results and limitations, not an assumed improvement.",
+      "instructions": "When recurring failures indicate a harness weakness and an evaluator is configured, invoke {\"action\":\"self_harness\"} to propose and evaluate an improvement. The operator configures the fixed validator with /self-harness --scores -- python3 -B -S evaluator.py; /self-harness status shows paths. Proposals are gated by held-in/held-out scores and cannot modify the evaluator. Promotion takes effect after the current turn finishes; use done before relying on new behavior. Report measured results and limitations, not an assumed improvement. In supervised interactive sessions, proposals can modify actual core Python files in raychat/ and plugins/. The fixed supervisor, recovery releases and evaluator cannot be edited by proposals.",
       "requires": {
         "filesystem": "1.0.0",
         "process": "1.0.0"
       },
       "sdk": 4,
-      "sha256": "6c2d2664b8685b6491f95543bd2eb2b6e5f9e6f84cf0e24d5d4549afd7d571ce",
+      "sha256": "57e2d33be7bed25c49aa7d363bcee0273bebe1444955a534d6dbd05272014854",
       "url": "self_harness-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -480,7 +481,7 @@
         "chat_completions": "1.0.0"
       },
       "sdk": 4,
-      "sha256": "74c047e590996246381ab359ef48a984f2ae4d1b3db14dd4a73cad54c4910302",
+      "sha256": "af8674b7165437de551c80b17fe3a3a67758cc7a2200b12db1106503469fe03f",
       "url": "subagents-1.0.0.zip",
       "version": "1.0.0"
     },

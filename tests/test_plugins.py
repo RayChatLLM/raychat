@@ -8,8 +8,9 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
+from unittest import mock
 
-from raychat.application import add_arguments
+from raychat.application import add_arguments, build_runtime
 from raychat.configuration import SETTINGS
 from raychat.packages import Manifest
 from raychat.plugins import Runtime
@@ -35,6 +36,37 @@ class _UncapturedPlugin(ModuleType):
 
 class PluginRuntimeTests(TypedTestCase):
     """Exercise PluginRuntime behavior."""
+
+    def test_application_disables_self_harness_without_requiring_it_installed(
+        self,
+    ) -> None:
+        """Keep bare startup usable and exclude the optional plugin by default."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(Path, "home", return_value=Path(directory)),
+        ):
+            bare = build_runtime(directory, {"no_plugins": True}, {})
+            try:
+                self.equal(bare.plugins, {})
+            finally:
+                bare.close()
+            with self.rejected(ValueError, "Unknown plugin to disable"):
+                build_runtime(
+                    directory,
+                    {"no_plugins": True, "disabled": ["missing_plugin"]},
+                    {},
+                )
+            runtime = build_runtime(directory, {}, {})
+            try:
+                self.require("self_harness" not in runtime.plugins)
+                self.require("self_harness" not in runtime.tools)
+                self.require("self-harness" not in runtime.commands)
+                self.require("run" in runtime.tools)
+                self.require("optimize" in runtime.commands)
+                with self.rejected(PluginError):
+                    runtime.command("/benchmark-harness --help")
+            finally:
+                runtime.close()
 
     def test_rejects_registration_without_captured_package(self) -> None:
         """Verify rejects registration without captured package."""

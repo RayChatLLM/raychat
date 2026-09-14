@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import sys
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, TypedDict
 from unittest.mock import patch
 
 from raychat.composition import create_session
+from raychat.core_bridge import CoreBridge
 from raychat.event_types import AFTER_TOOL, AfterTool
 from raychat.sdk import HTTP_PROVIDER, CancelCheck
 from raychat.service_contracts import (
@@ -32,6 +34,7 @@ from raychat.validation import (
     string_list_field,
     text_field,
 )
+from raychat_bootstrap.wire import decode
 from tests.plugin_support import (
     ScriptedChat,
     create_runtime,
@@ -351,6 +354,44 @@ class SelfHarnessTests(_HarnessFixture):
         )
         self.equal(runtime.generation, 0)
         self.equal(self.attempts()[-1]["decision"], "rejected")
+
+    def test_supervised_source_proposal_preserves_source_and_submits_release(
+        self,
+    ) -> None:
+        """A measured model proposal changes core source through the supervisor."""
+        runtime = self.runtime(
+            [self.proposal(files={"raychat/generated.py": "VALUE = 2\n"})],
+            editable_roots=["raychat"],
+        )
+        output = io.BytesIO()
+        bridge = CoreBridge(io.BytesIO(), output)
+        bridge.thread.join()
+        bridge.source_root = self.root / "runtime-source"
+        (bridge.source_root / "raychat").mkdir(parents=True)
+        (bridge.source_root / "plugins").mkdir()
+        runtime.services["core_updates"] = bridge
+        self.check(condition="validated" in runtime.command("/self-harness"))
+        message = decode(output.getvalue())
+        self.equal(message["kind"], "update")
+        self.equal(message["overlay"], "GOOD")
+        self.check(
+            condition="raychat/generated.py"
+            in object_field(message["changes"], "changes"),
+        )
+        self.check(condition=not (self.root / "raychat/generated.py").exists())
+        self.equal(runtime.generation, 0)
+        self.equal(self.attempts()[-1]["decision"], "submitted")
+
+    def test_supervised_proposal_cannot_edit_bootstrap(self) -> None:
+        """Even a configured editable root cannot authorize evaluator replacement."""
+        runtime = self.runtime(
+            [self.proposal(files={"raychat_bootstrap/supervisor.py": "VALUE = 2\n"})],
+            editable_roots=["raychat_bootstrap"],
+        )
+        self.check(condition="rejected" in runtime.command("/self-harness"))
+        self.check(
+            condition=not (self.root / "raychat_bootstrap/supervisor.py").exists(),
+        )
 
     def test_paths_evaluator_and_large_candidates_are_rejected(self) -> None:
         """Paths evaluator and large candidates are rejected."""

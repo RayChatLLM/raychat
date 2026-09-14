@@ -21,6 +21,14 @@ from enum import Enum
 from typing import TypeGuard, cast
 
 from raychat.configuration import SETTINGS
+from raychat.handoff import optional_index
+from raychat.validation import (
+    array_field,
+    boolean_field,
+    configuration_fields,
+    integer_field,
+    text_field,
+)
 
 MAX_SOURCE_CHARS = SETTINGS.limits.max_source_chars
 MAX_TITLE_CELLS = SETTINGS.limits.max_title_cells
@@ -1305,6 +1313,84 @@ class TuiState:
             self._dropped_entries,
         )
 
+    @property
+    def handoff(self) -> dict[str, object]:
+        """Capture display history independently of semantic session history.
+
+        Returns
+        -------
+        dict[str, object]
+            Exact transcript entries and idle lifecycle fields.
+
+        """
+        return {
+            "phase": self._phase.value,
+            "task": self._task,
+            "step": self._step,
+            "max_steps": self._max_steps,
+            "dropped": self._dropped_entries,
+            "next_sequence": self._next_sequence,
+            "entries": [
+                {
+                    "sequence": e.sequence,
+                    "kind": e.kind,
+                    "title": e.title,
+                    "body": e.body,
+                    "step": e.step,
+                    "max_steps": e.max_steps,
+                    "ok": e.ok,
+                }
+                for e in self._entries
+            ],
+        }
+
+    @handoff.setter
+    def handoff(self, value: object) -> None:
+        """Restore a validated idle transcript without synthesizing messages.
+
+        Raises
+        ------
+        ValueError
+            The snapshot contains an executing lifecycle phase.
+
+        """
+        data = configuration_fields(value, "transcript handoff")
+        phase = Phase(text_field(data["phase"], "phase"))
+        if phase in {Phase.RUNNING, Phase.APPROVAL, Phase.STOPPING}:
+            message = "Cannot hand off an executing transcript."
+            raise ValueError(message)
+        entries = []
+        for raw in array_field(data["entries"], "transcript entries"):
+            entry = configuration_fields(raw, "transcript entry")
+            entries.append(
+                TranscriptEntry(
+                    integer_field(entry["sequence"], "sequence", minimum=1),
+                    text_field(entry["kind"], "entry kind"),
+                    text_field(entry["title"], "entry title", allow_empty=True),
+                    text_field(entry["body"], "entry body", allow_empty=True),
+                    optional_index(entry["step"], "entry step"),
+                    optional_index(entry["max_steps"], "entry max steps"),
+                    None
+                    if entry["ok"] is None
+                    else boolean_field(entry["ok"], "entry ok"),
+                ),
+            )
+        self._phase, self._entries = phase, entries
+        self._task = text_field(data["task"], "task", allow_empty=True)
+        self._step = integer_field(data["step"], "step", minimum=0)
+        self._max_steps = integer_field(data["max_steps"], "max steps", minimum=0)
+        self._dropped_entries = integer_field(data["dropped"], "dropped", minimum=0)
+        self._next_sequence = integer_field(
+            data["next_sequence"],
+            "sequence",
+            minimum=1,
+        )
+        if self._next_sequence <= max((e.sequence for e in entries), default=0):
+            message = "Invalid transcript sequence."
+            raise ValueError(message)
+        self._transcript_cache_width = None
+        self._pending_approval = None
+
     def _append(
         self,
         kind: str,
@@ -1391,18 +1477,47 @@ class TuiState:
                 if not _is_text(content):
                     error = "Committed user prompts must contain text."
                     raise TypeError(error)
-                self._append("user", "You", content)
+                if content.startswith("CORE_UPDATE_RESULT: "):
+                    result = _restored_action(
+                        content.removeprefix("CORE_UPDATE_RESULT: "),
+                    )
+                    status = (
+                        result.get("status", "unknown")
+                        if result is not None
+                        else "unknown"
+                    )
+                    self._append(
+                        "system",
+                        "Core update",
+                        "Update result: " + str(status),
+                    )
+                else:
+                    self._append("user", "You", content)
             elif message["kind"] == "assistant":
                 action = _restored_action(message["content"])
                 if action is None:
                     continue
                 response = action.get("message")
                 if action.get("action") == "done" and _is_text(response):
-                    self._append("assistant", "Agent", response)
+                    host_generated = (
+                        action.get("pending") is True
+                        or action.get("host_generated") is True
+                    )
+                    self._append(
+                        "system" if host_generated else "assistant",
+                        "System" if host_generated else "Agent",
+                        response,
+                    )
                 elif action.get("action") == "run":
                     self._append("command", "Command", format_command(action))
 
-    def start(self, task: str, *, max_steps: int = 0) -> None:
+    def start(
+        self,
+        task: str,
+        *,
+        max_steps: int = 0,
+        host_notification: bool = False,
+    ) -> None:
         """Begin a task and append its sanitized prompt to the transcript.
 
         Raises
@@ -1428,7 +1543,11 @@ class TuiState:
         self._max_steps = _event_step(max_steps)
         self._pending_approval = None
         self._phase = Phase.RUNNING
-        self._append("user", "You", self._task)
+        self._append(
+            "system" if host_notification else "user",
+            "System" if host_notification else "You",
+            self._task,
+        )
 
     def begin_approval(
         self,
@@ -1552,8 +1671,8 @@ class TuiState:
             self._pending_approval = None
             self._phase = Phase.DONE
             self._append(
-                "assistant",
-                "Assistant",
+                "system" if payload.get("host_generated") is True else "assistant",
+                "System" if payload.get("host_generated") is True else "Assistant",
                 message,
                 ok=True,
             )
