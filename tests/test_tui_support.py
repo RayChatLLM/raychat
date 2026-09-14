@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -19,12 +20,65 @@ from tests.plugin_support import create_runtime, package
 from tests.tui_support import argument_fields, arguments
 
 if os.name == "posix":
+    from tools import ui_stress_tui
     from tools.adversarial_agents_tui import BACKGROUND_COMMAND_PLUGIN
     from tools.drive_tui import completed_reply
 
 
+class _PickerTerminal:
+    def __init__(self, *screens: str) -> None:
+        self.screens = screens
+        self.poll_timeouts: list[float] = []
+        self.input: list[str | bytes] = []
+
+    def send(self, text: str | bytes) -> None:
+        self.input.append(text)
+
+    def poll(self, seconds: float = 0.04) -> None:
+        self.poll_timeouts.append(seconds)
+
+    def screen(self) -> str:
+        return self.screens[min(len(self.poll_timeouts), len(self.screens) - 1)]
+
+
 class TuiFixtureTests(TypedTestCase):
     """Exercise TuiFixture behavior."""
+
+    def test_picker_close_waits_for_delayed_escape_frame(self) -> None:
+        """Keep observing when Escape is still pending after the old fixed pause."""
+        if os.name != "posix":
+            self.skipTest("The terminal acceptance driver requires POSIX.")
+        title = "QA empty picker"
+        chat = _PickerTerminal(title, title, title, "Main chat")
+        timestamps: list[float] = [0.0, 0.0, 0.4, 0.8]
+        with mock.patch.object(
+            time,
+            "monotonic",
+            side_effect=timestamps,
+        ):
+            ui_stress_tui.close_picker(chat, title)
+        self.equal(chat.input, [b"\x1b"])
+        self.equal(chat.poll_timeouts, [0.04, 0.04, 0.04])
+        self.equal(chat.screen(), "Main chat")
+
+    def test_picker_close_rejects_unhandled_escape_at_deadline(self) -> None:
+        """Fail with the visible picker when Escape never closes the overlay."""
+        if os.name != "posix":
+            self.skipTest("The terminal acceptance driver requires POSIX.")
+        title = "QA empty picker"
+        chat = _PickerTerminal(title)
+        timestamps: list[float] = [0.0, 0.0, 15.0]
+        with (
+            mock.patch.object(
+                time,
+                "monotonic",
+                side_effect=timestamps,
+            ),
+            self.rejected(AssertionError, "Picker did not close: 'QA empty picker'"),
+        ):
+            ui_stress_tui.close_picker(chat, title)
+        self.equal(chat.input, [b"\x1b"])
+        self.equal(chat.screen(), title)
 
     def test_completed_reply_waits_for_worker_cleanup_in_rendered_composer(
         self,
