@@ -12,6 +12,8 @@
     "overlay_path": ".raychat/harness.md",
     "directory": ".raychat/self-harness",
     "editable_roots": [
+      "raychat",
+      "plugins",
       ".raychat/plugins"
     ],
     "validation_argv": [],
@@ -30,5 +32,5 @@
     "max_evaluator_bytes": 262144,
     "proposal_retries": 1
   },
-  "instructions": "When recurring failures indicate a harness weakness and an evaluator is configured, invoke {\"action\":\"self_harness\"} to propose and evaluate an improvement. The operator configures the fixed validator with /self-harness --scores -- python3 -B -S evaluator.py; /self-harness status shows paths. Proposals are gated by held-in/held-out scores and cannot modify the evaluator. Promotion takes effect after the current turn finishes; use done before relying on new behavior. Report measured results and limitations, not an assumed improvement."
+  "instructions": "When recurring failures indicate a harness weakness and an evaluator is configured, invoke {\"action\":\"self_harness\"} to propose and evaluate an improvement. The operator configures the fixed validator with /self-harness --scores -- python3 -B -S evaluator.py; /self-harness status shows paths. Proposals are gated by held-in/held-out scores and cannot modify the evaluator. Promotion takes effect after the current turn finishes; use done before relying on new behavior. Report measured results and limitations, not an assumed improvement. In supervised interactive sessions, proposals can modify actual core Python files in raychat/ and plugins/. The fixed supervisor, recovery releases and evaluator cannot be edited by proposals."
 }

@@ -75,7 +75,7 @@ def _exercise(
     for request in requests:
         instructions = request[0]["content"]
         require(
-            USAGE_MARKER in instructions,
+            USAGE_MARKER in instructions and "Never delete .raychat" in instructions,
             "bare_tui: acceptance check at original line 126",
         )
         require(
@@ -86,7 +86,10 @@ def _exercise(
             "bare_tui: acceptance check at original line 127",
         )
         require(
-            instructions.endswith("Enabled tools: []"),
+            all(
+                name in instructions
+                for name in ("core_source", "core_update", "core_recover")
+            ),
             "bare_tui: acceptance check at original line 130",
         )
     require(
@@ -97,6 +100,7 @@ def _exercise(
         {path.name for path in app.iterdir()}
         == {
             "raychat",
+            "raychat_bootstrap",
             "raychat.json",
             *APPLICATION_FILES,
         },
@@ -113,8 +117,8 @@ def _exercise(
         checks=[
             "core runs without feature source, GEPA, or a distribution catalog",
             "one explicit external SDK provider supplies working chat",
-            "only external manifest instructions reach every model request",
-            "no feature tools are registered",
+            "external provider and host update instructions reach every request",
+            "core source tools work without feature plugins",
             "unknown /agents and /plugins commands recover on the next prompt",
             "unavailable list action is rejected and chat remains usable",
         ],
@@ -136,6 +140,11 @@ def run(root: Path, output: Path) -> dict[str, object]:
     shutil.copytree(
         root / "raychat",
         app / "raychat",
+        ignore=ignore_bytecode,
+    )
+    shutil.copytree(
+        root / "raychat_bootstrap",
+        app / "raychat_bootstrap",
         ignore=ignore_bytecode,
     )
     for name in APPLICATION_FILES:

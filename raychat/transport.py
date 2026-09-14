@@ -446,6 +446,7 @@ async def _run_process(request: _ChildRequest) -> str:
         "-B",
         "-S",
         str(child_path),
+        str(os.getpid()),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,

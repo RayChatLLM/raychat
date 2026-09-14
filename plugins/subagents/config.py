@@ -157,6 +157,7 @@ class _CoordinatorBuilder:
             self.options.instruction_role,
             self.options.context_chars,
             self.options.keep_recent_turns,
+            inherits_primary=True,
         )
         profile_limit = data.max_profiles - 1
         if len(data.profiles) > profile_limit:

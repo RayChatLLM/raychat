@@ -13,6 +13,11 @@ class _Launcher(Protocol):
     def __call__(self) -> int: ...
 
 
+@runtime_checkable
+class _Recovery(Protocol):
+    def __call__(self) -> None: ...
+
+
 def main() -> int:
     """Apply the configuration path before importing the application.
 
@@ -27,16 +32,34 @@ def main() -> int:
         The installed entrypoint does not supply a callable launcher.
 
     """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    prepare: object = importlib.import_module("raychat_bootstrap.recovery").prepare
+    if not isinstance(prepare, _Recovery):
+        message = "The RayChat recovery entrypoint is unavailable."
+        raise TypeError(message)
+    try:
+        prepare()
+    except (ValueError, TypeError, KeyError, OSError) as error:
+        sys.stderr.write("Recovery error: " + str(error) + "\n")
+        return 1
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", type=Path)
     options, _ = bootstrap.parse_known_args()
     config: object = options.config
-    if isinstance(config, Path):
+    if isinstance(config, Path) and "RAYCHAT_RECOVERY" not in os.environ:
         os.environ["RAYCHAT_CONFIG"] = str(config.resolve())
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
         # Host settings load on import, after the bootstrap configuration above.
-        launch: object = importlib.import_module("raychat.entrypoint").main
+        interactive = (
+            os.isatty(0)
+            and os.isatty(1)
+            and not any(
+                arg in {"--exec", "--help", "-h"} or arg.startswith("--exec=")
+                for arg in sys.argv[1:]
+            )
+        )
+        module = "raychat_bootstrap.supervisor" if interactive else "raychat.entrypoint"
+        launch: object = importlib.import_module(module).main
     except RuntimeError as exc:
         message = str(exc).encode("unicode_escape").decode("ascii")
         sys.stderr.write("Configuration error: " + message + "\n")

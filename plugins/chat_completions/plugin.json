@@ -69,5 +69,5 @@
       "environment": "LLM_REQUEST_OPTIONS"
     }
   ],
-  "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Operator launch options include --url, --model, --api-timeout and --request-options. Never expose provider credentials."
+  "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Operator launch options include --url, --model, --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to fetch all model IDs from the configured GET /models endpoint, filter the menu, and select the model for subsequent requests."
 }

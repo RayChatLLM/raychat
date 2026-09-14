@@ -5,20 +5,26 @@ from __future__ import annotations
 import copy
 import http.client
 import io
+import json
 import math
 import re
 import tempfile
-import unittest
 from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
+from unittest import mock
 from urllib.error import HTTPError, URLError
 
 from raychat.configuration import SETTINGS
+from raychat.event_types import SESSION_RESTORE, Lifecycle
+from raychat.resources import create_resources, create_worker
 from raychat.sdk import HTTP_PROVIDER, ProviderError
+from raychat.service_contracts import CHAT, ExportedProvider
 from raychat.validation import json_object
+from tests.assertions import TypedTestCase
 from tests.plugin_support import registered_service, registered_session
 from tests.provider_support import api_response, make_api, provider, registered_provider
+from tests.tui_support import arguments
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,7 +33,7 @@ _Error = TypeVar("_Error", bound=Exception)
 _Arguments = ParamSpec("_Arguments")
 
 
-class ProviderTestCase(unittest.TestCase):
+class ProviderTestCase(TypedTestCase):
     """Require an expected failure without weakening the operation's input types."""
 
     def reject(
@@ -64,6 +70,85 @@ class ProviderTestCase(unittest.TestCase):
 
 class ChatAPITests(ProviderTestCase):
     """Check endpoint validation, request bytes and bounded completion responses."""
+
+    def test_model_selection_survives_plugin_reload_and_session_restore(self) -> None:
+        """Use the chosen identifier across replacement clients and restored state."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(Path, "home", return_value=Path(directory)),
+        ):
+            args = arguments([
+                "--workspace",
+                directory,
+                "--no-memory",
+                "--model",
+                "original",
+            ])
+            resources = create_resources(args, {})
+            self.addCleanup(resources.close)
+            runtime = resources.runtime
+            primary: object = CHAT.validate(runtime.services[CHAT.name]).chat
+            clone: object = CHAT.validate(runtime.services[CHAT.name]).factory()
+            runtime.state.setdefault("chat_completions", {})["models"] = [
+                "original",
+                "nemotron",
+            ]
+            runtime.select_menu("models", "nemotron")
+            if not isinstance(primary, ExportedProvider) or not isinstance(
+                clone,
+                ExportedProvider,
+            ):
+                self.fail("Expected HTTP provider clients.")
+            self.equal(primary.private_payload()["options"]["model"], "nemotron")
+            self.equal(clone.private_payload()["options"]["model"], "original")
+            if resources.store is None:
+                self.fail("The fixture requires a session journal.")
+            worker = create_worker(args, resources)
+            self.addCleanup(worker.join)
+            self.addCleanup(worker.stop)
+            worker.restore_conversation(resources.store.snapshot())
+            self.equal(runtime.menu("models").selected, "nemotron")
+            runtime.reload()
+            self.equal(runtime.menu("models").selected, "nemotron")
+            runtime.state["chat_completions"]["model"] = "restored-model"
+            runtime.emit(SESSION_RESTORE, Lifecycle(), strict=True)
+            self.equal(runtime.menu("models").selected, "restored-model")
+
+    def test_models_uses_get_and_configured_credentials(self) -> None:
+        """Discover all identifiers without posting a completion or changing model."""
+        catalog: dict[str, object] = {
+            "data": [{"id": "nemotron"}, {"id": "alpha"}, {"id": "nemotron"}],
+        }
+        api, opener, response = make_api(json.dumps(catalog).encode())
+        api.url = "https://example.test/prefix/v1/chat/completions?version=1"
+        original = api.model
+        self.equal(api.list_models(), ["alpha", "nemotron"])
+        request = opener.single_request()
+        self.equal(request.get_method(), "GET")
+        self.equal(request.data, None)
+        self.equal(
+            request.full_url,
+            "https://example.test/prefix/v1/models?version=1",
+        )
+        self.equal(
+            request.get_header("Authorization"),
+            "Bearer fixture-credential",
+        )
+        self.equal(api.model, original)
+        self.equal(response.read_limit, provider.MAX_HTTP_BYTES + 1)
+
+    def test_invalid_model_catalog_does_not_change_selection(self) -> None:
+        """Reject malformed and oversized discovery responses without partial state."""
+        for raw in (
+            b"{}",
+            b'{"data":[{"id":null}]}',
+            b"x" * (provider.MAX_HTTP_BYTES + 1),
+        ):
+            api, _, _ = make_api(raw)
+            original = api.model
+            with self.rejected((ValueError, RuntimeError)):
+                api.list_models()
+            self.equal(api.model, original)
 
     def test_endpoint_changes_are_validated_before_opening_a_request(self) -> None:
         """Reject unsafe URLs even if a caller replaces the validated endpoint."""

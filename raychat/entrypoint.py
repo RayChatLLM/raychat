@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from .ui.terminal import InteractiveTerminal
     from .workers import AgentWorker
 
 from raychat.configuration import SETTINGS
@@ -301,7 +302,7 @@ def _encoding(stream: object) -> str | None:
 
 def _choose_session(
     options: _LaunchOptions,
-    terminal: terminal_ui.TerminalSession,
+    terminal: InteractiveTerminal,
 ) -> str | None:
     saved = SessionStore.list_sessions(options.workspace, options.session_dir)
     if not saved:
@@ -326,6 +327,28 @@ def _choose_session(
         ascii_only=options.ascii,
         truecolor=not options.color_256,
     )
+
+
+def prepare_interactive(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    terminal: InteractiveTerminal,
+) -> bool:
+    """Validate options and perform an optional resume choice before opening stores.
+
+    Returns
+    -------
+    bool
+        False when the user cancels the startup resume picker.
+
+    """
+    options = _launch_options(args)
+    _check_arguments(parser, options)
+    if options.resume is not None and not options.resume:
+        selected = _choose_session(options, terminal)
+        args.resume = selected
+        return selected is not None
+    return True
 
 
 def _launch(

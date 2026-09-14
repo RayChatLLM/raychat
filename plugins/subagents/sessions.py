@@ -7,7 +7,10 @@ import uuid
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from raychat.handoff import export_plugins, restore_plugins
+from raychat.plugins import Runtime
 from raychat.service_contracts import AgentChat, SessionCatalogState
+from raychat.validation import array_field, configuration_fields, text_field
 from raychat.workers import AgentWorker, WorkerExecution
 
 from .configuration import load as load_settings
@@ -291,6 +294,111 @@ class AgentSessions:
             }
             if self.status_changed is not None:
                 self.status_changed(len(self._active))
+
+    def export_handoff(self) -> dict[str, object]:
+        """Detach child identities, relationships and complete idle conversations.
+
+        Returns
+        -------
+        dict[str, object]
+            JSON catalog state with no live worker references.
+
+        Raises
+        ------
+        RuntimeError
+            A child is still executing work.
+
+        """
+        children = []
+        for entry in self.entries():
+            if not entry.owned:
+                continue
+            if not entry.worker.quiescent:
+                message = "Child work has not finished."
+                raise RuntimeError(message)
+            session = entry.worker.session
+            runtime: object = getattr(session, "runtime", None)
+            children.append({
+                "id": entry.id,
+                "name": entry.name,
+                "parent": entry.parent_id,
+                "profile": entry.profile,
+                "task": entry.task,
+                "status": entry.status,
+                "snapshot": None if session is None else session.export_snapshot(),
+                "resources": export_plugins(runtime)
+                if isinstance(runtime, Runtime)
+                else None,
+            })
+        return {"focused": self.focused_id, "children": children}
+
+    def restore_handoff(
+        self,
+        value: object,
+        coordinator: SessionCoordinator | None,
+    ) -> None:
+        """Recreate child workers without submitting or replaying completed tasks.
+
+        Raises
+        ------
+        ValueError
+            Child identities or their required model profiles cannot be restored.
+
+        """
+        data = configuration_fields(value, "child catalog")
+        for raw in array_field(data["children"], "child chats"):
+            if coordinator is None:
+                message = "Child restoration requires a configured coordinator."
+                raise ValueError(message)
+            child = configuration_fields(raw, "child chat")
+            profile = coordinator.router.get_profile(
+                text_field(child["profile"], "profile"),
+            )
+            identifier = text_field(child["id"], "child id")
+            if identifier in self._chats or identifier == self.root_id:
+                message = "Duplicate child identifier."
+                raise ValueError(message)
+
+            def factory(profile: ModelProfile = profile) -> Conversation:
+                return self.create_conversation(profile, coordinator)
+
+            worker = AgentWorker(
+                None,
+                coordinator.workspace,
+                execution=WorkerExecution(
+                    factory=factory,
+                    on_activity=self._activity_callback(identifier),
+                ),
+            )
+            entry = AgentChat(
+                identifier,
+                text_field(child["name"], "child name"),
+                text_field(child["parent"], "parent", nullable=True),
+                profile.name,
+                worker,
+                task=text_field(child["task"], "child task"),
+                status=text_field(child["status"], "child status"),
+            )
+            self._chats[identifier] = entry
+            if child["snapshot"] is not None:
+                worker.restore_conversation(
+                    configuration_fields(child["snapshot"], "child snapshot"),
+                )
+                runtime: object = getattr(worker.session, "runtime", None)
+                if child["resources"] is not None and isinstance(runtime, Runtime):
+                    restore_plugins(runtime, child["resources"])
+        identifiers = set(self._chats) | {self.root_id}
+        if any(
+            entry.parent_id not in identifiers
+            for entry in self._chats.values()
+            if entry.owned
+        ):
+            message = "Missing child parent in handoff."
+            raise ValueError(message)
+        self.focused_id = text_field(data["focused"], "focused child")
+        if self.focused_id not in identifiers:
+            message = "Missing focused child in handoff."
+            raise ValueError(message)
 
     def reconfigure(self, coordinator: SessionCoordinator | None) -> None:
         """Replace owned child runtimes while retaining history and worker queues."""

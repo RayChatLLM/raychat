@@ -59,6 +59,9 @@ def copy_workspace(
         "venv",
         "node_modules",
         "dist",
+        "build",
+        ".mypy_cache",
+        ".ruff_cache",
         ".codex",
         ".agents",
     }
@@ -74,7 +77,7 @@ def copy_workspace(
                 or secret
                 or path.is_symlink()
                 or path == excluded
-                or path.parts[-2:] == (".raychat", "sessions")
+                or path.parts[-2:] in {(".raychat", "sessions"), (".raychat", "live")}
             ):
                 continue
             target = destination / path.relative_to(source)

@@ -48,7 +48,9 @@ if TYPE_CHECKING:
 
 REFERENCE_PAGES = 6
 CHILD_CONTEXT_CHARS = 10000
-PARENT_CONTEXT_CHARS = 32000
+# Keep all seven batch pages visible alongside the live-core tool instructions.
+# Child budgets below still force compaction independently in every worker.
+PARENT_CONTEXT_CHARS = 40000
 MINIMUM_AGENTS = 50
 LOGGER = logging.getLogger(__name__)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from raychat.core_bridge import CoreBridge
 from raychat.sdk import API_VERSION, workspace_path
 from raychat.service_contracts import ATOMIC_WRITE
 from raychat.validation import json_object, object_field
@@ -107,9 +108,11 @@ def _checked_source(
         or ".." in path.parts
         or not allowed_kind
         or not any(target.is_relative_to(root) for root in roots)
-        or "self_harness" in path.parts
+        or path.parts[0] in {"raychat_bootstrap", "tests", "tools"}
     ):
-        message = "Proposal may edit only Python files inside configured plugin roots."
+        message = (
+            "Proposal may edit only source files inside configured editable roots."
+        )
         raise ValueError(message)
     if path.name == "plugin.json":
         value = json_object(content)
@@ -161,6 +164,30 @@ def parse(
     return proposal, changes
 
 
+def _submit_core(
+    service: CoreBridge,
+    changes: Mapping[str, bytes],
+    config: SelfHarnessSettings,
+    record: Callable[[str, str], None],
+) -> bool:
+    core_changes = {
+        name: data for name, data in changes.items() if name != config.overlay_path
+    }
+    if any(Path(name).parts[0] not in {"raychat", "plugins"} for name in core_changes):
+        message = "Live core proposals must use raychat/ or plugins/ paths."
+        raise ValueError(message)
+    service.request(
+        str(service.source_root),
+        core_changes,
+        overlay=changes.get(config.overlay_path),
+    )
+    record(
+        "submitted",
+        "Candidate sent to the fixed core evaluator; activation waits for idle.",
+    )
+    return False
+
+
 def promote(
     changes: Mapping[str, bytes],
     originals: Mapping[str, bytes | None],
@@ -176,6 +203,9 @@ def promote(
         The checked result described above.
 
     """
+    service = ctx.optional_service("core_updates")
+    if isinstance(service, CoreBridge):
+        return _submit_core(service, changes, config, record)
     write = ctx.require_service(ATOMIC_WRITE).write
     applied: list[str] = []
 

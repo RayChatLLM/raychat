@@ -698,6 +698,14 @@ class SessionHost(Protocol):
         """Collect usage instructions from installed plugin manifests."""
         ...
 
+    def instruction_contributions(
+        self,
+        session: InstructionSession,
+        limit: int,
+    ) -> tuple[InstructionContribution, ...]:
+        """Collect ordered instruction contributions for a session."""
+        ...
+
     def close(self) -> None:
         """Release resources owned by this session."""
         ...
@@ -746,14 +754,6 @@ class PluginHost(SessionHost, Protocol):
 
     def export_sources(self, names: Iterable[str] | None = None) -> PluginSources:
         """Capture selected plugin sources for isolated workers."""
-        ...
-
-    def instruction_contributions(
-        self,
-        session: InstructionSession,
-        limit: int,
-    ) -> tuple[InstructionContribution, ...]:
-        """Collect ordered instruction contributions for a session."""
         ...
 
     def tool_catalog(self) -> tuple[dict[str, object], ...]:
@@ -818,6 +818,7 @@ class Menu:
     choices: tuple[tuple[str, str], ...]
     select: Callable[[str, PluginContext], None]
     selected: str | None = None
+    searchable: bool = False
 
 
 @dataclass(frozen=True)
@@ -838,6 +839,7 @@ class ToolDefinition:
     execute: Callable[[dict[str, object], PluginContext], Mapping[str, object]]
     requires_approval: bool = True
     parameters: Mapping[str, object] = field(default_factory=dict)
+    finishes_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -1285,6 +1287,16 @@ class PluginAPI(Protocol):
         restore: Callable[[object, PluginContext], None],
     ) -> None:
         """Transfer resources between successfully activated plugin generations."""
+        ...
+
+    def on_handoff(
+        self,
+        export: Callable[[PluginContext], object],
+        restore: Callable[[object, PluginContext], None],
+        *,
+        idle: Callable[[], bool] | None = None,
+    ) -> None:
+        """Register finite JSON state transfer for an idle process replacement."""
         ...
 
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
+from raychat.core_bridge import CoreBridge
 from raychat.sdk import workspace_path
 from raychat.service_contracts import ATOMIC_WRITE, CHAT, PROCESS_RUNNER
 
@@ -209,6 +211,14 @@ class _HarnessRun:
             config,
             self.ctx.check_cancelled,
         )
+        service = self.ctx.optional_service("core_updates")
+        if isinstance(service, CoreBridge):
+            for name in ("raychat", "plugins"):
+                shutil.copytree(
+                    service.source_root / name,
+                    pristine / name,
+                    dirs_exist_ok=True,
+                )
         baseline_root = root / "baseline"
         copy_workspace(pristine, baseline_root, config, self.ctx.check_cancelled)
         baseline = evaluate(baseline_root, self.request)
@@ -282,8 +292,8 @@ class _HarnessRun:
             "message": "Self-harness candidate accepted."
             if immediate
             else (
-                "Candidate validated; promotion queued for the end of this "
-                "turn. Finish with done."
+                "Candidate validated; submitted for activation after completion of "
+                "active work. Finish with done."
             ),
             "attempt": best.details["attempt"],
         }

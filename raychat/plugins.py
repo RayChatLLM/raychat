@@ -510,6 +510,21 @@ class PluginAPI:
             lambda registry: registry.reload_handlers,
         )
 
+    def on_handoff(
+        self,
+        export: Callable[[PluginContext], object],
+        restore: Callable[[object, PluginContext], None],
+        *,
+        idle: Callable[[], bool] | None = None,
+    ) -> None:
+        """Register JSON resource transfer between idle application processes."""
+        self._add(
+            "handoff_handlers",
+            self.plugin_id,
+            (export, restore, idle),
+            lambda registry: registry.handoff_handlers,
+        )
+
 
 @dataclass
 class Registry:
@@ -534,6 +549,14 @@ class Registry:
         tuple[
             Callable[[PluginContext], object],
             Callable[[object, PluginContext], None],
+        ],
+    ] = field(default_factory=dict)
+    handoff_handlers: dict[
+        str,
+        tuple[
+            Callable[[PluginContext], object],
+            Callable[[object, PluginContext], None],
+            Callable[[], bool] | None,
         ],
     ] = field(default_factory=dict)
     source_trees: list[SourceTree] = field(default_factory=list)
@@ -569,6 +592,7 @@ class Registry:
             state=copy.deepcopy(self.state),
             modules=copy.copy(self.modules),
             reload_handlers=copy.copy(self.reload_handlers),
+            handoff_handlers=copy.copy(self.handoff_handlers),
             source_trees=copy.copy(self.source_trees),
             source_snapshots=copy.copy(self.source_snapshots),
             status_store=self.status_store.fork(),
@@ -593,6 +617,7 @@ class Registry:
         self.state = previous.state
         self.modules = previous.modules
         self.reload_handlers = previous.reload_handlers
+        self.handoff_handlers = previous.handoff_handlers
         self.source_trees = previous.source_trees
         self.source_snapshots = previous.source_snapshots
         self.status_store = previous.status_store
@@ -699,6 +724,7 @@ class _RuntimeRegistry:
     _current: Registry
     _applying: bool
     session: SessionLifecycle | None
+    on_checkpoint: Callable[[str], None] | None
 
     options = RegistryField[dict[str, object]](lambda registry: registry.options)
 
@@ -746,6 +772,17 @@ class _RuntimeRegistry:
             ],
         ]
     ](lambda registry: registry.reload_handlers)
+
+    handoff_handlers = RegistryField[
+        dict[
+            str,
+            tuple[
+                Callable[[PluginContext], object],
+                Callable[[object, PluginContext], None],
+                Callable[[], bool] | None,
+            ],
+        ]
+    ](lambda registry: registry.handoff_handlers)
 
     source_trees = RegistryField[list[SourceTree]](
         lambda registry: registry.source_trees,
@@ -856,6 +893,8 @@ class _RuntimeRegistry:
         """Persist the current namespaced plugin state."""
         if self.session is not None:
             self.session.checkpoint(owner)
+        elif self.on_checkpoint is not None:
+            self.on_checkpoint(owner)
 
     def export_sources(self, names: Iterable[str] | None = None) -> PluginSources:
         """Capture selected plugin sources for isolated workers.
@@ -983,6 +1022,7 @@ class Runtime(_RuntimeRegistry):
         self.watch_directories: list[Path] = []
         self._fingerprints: dict[str, str] = {}
         self.on_configure: Callable[[], None] | None = None
+        self.on_checkpoint: Callable[[str], None] | None = None
         self.workspace = Path(workspace).resolve()
         self.session: SessionLifecycle | None = None
         self.closed = False
@@ -1410,6 +1450,18 @@ class Runtime(_RuntimeRegistry):
             message = f"/{name} must return text."
             raise PluginError(message)
         return result
+
+    @property
+    def quiescent(self) -> bool:
+        """Whether all runtime operations and pending plugin transitions finished."""
+        with self._lock:
+            inactive = not (
+                self._busy or self._applying or self._pending or self._closing
+            )
+            return inactive and all(
+                idle is None or idle()
+                for _export, _restore, idle in self.handoff_handlers.values()
+            )
 
     def close(self) -> None:
         """Retire plugin resources after outstanding operations have completed.

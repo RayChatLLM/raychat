@@ -10,7 +10,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
-from raychat.sdk import HTTP_PROVIDER, CommandDefinition
+from raychat.sdk import HTTP_PROVIDER, CommandDefinition, PluginError
 from raychat.service_contracts import (
     OPTIMIZATION,
     OptimizationBindings,
@@ -84,6 +84,17 @@ class _Registration:
 
     def execute(self, name: str, arguments: str, ctx: PluginContext) -> str:
         ctx.check_cancelled()
+        if name == "benchmark-harness":
+            # This one benchmark needs the optional plugin; other optimization
+            # commands remain usable while Self-Harness is disabled.
+            try:
+                ctx.plugin_sources(["self_harness"])
+            except KeyError:
+                message = (
+                    "/benchmark-harness requires the optional Self-Harness plugin. "
+                    "Enable self_harness for that command."
+                )
+                raise PluginError(message) from None
         if not self.api.context.options.get("isolated_command"):
             payload: dict[str, object] = {
                 "mode": "plugin_command",

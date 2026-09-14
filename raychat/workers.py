@@ -8,15 +8,16 @@ from __future__ import annotations
 
 import copy
 import itertools
+import logging
 import queue
 import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from concurrent.futures import Future
     from pathlib import Path
     from types import TracebackType
 
@@ -216,6 +217,8 @@ class AgentWorker:
         self._accepted_jobs: set[int] = set()
         self._state_lock = threading.Lock()
         self._started = False
+        self._processing = False
+        self._pending_controls = 0
         self._pending_approval: int | None = None
         self._approval_answered = False
         self._job_ids = itertools.count(1)
@@ -225,6 +228,17 @@ class AgentWorker:
             name="chat-agent-worker",
             daemon=False,
         )
+
+    @property
+    def quiescent(self) -> bool:
+        """Whether accepted jobs, control callbacks and activity observers finished."""
+        with self._state_lock:
+            return not (
+                self._accepted_jobs
+                or self._processing
+                or self._pending_controls
+                or not self._jobs.empty()
+            )
 
     @property
     def is_alive(self) -> bool:
@@ -238,14 +252,60 @@ class AgentWorker:
         """
         return self.thread.is_alive()
 
+    def restore_conversation(self, snapshot: Mapping[str, object]) -> None:
+        """Construct and restore a conversation on its worker before accepting work.
+
+        Raises
+        ------
+        RuntimeError
+            A conversation cannot be created or the worker is not idle.
+
+        """
+        if not self.quiescent or self.session_factory is None:
+            message = "Restoration requires an idle conversation worker."
+            raise RuntimeError(message)
+        completion: Future[None] = Future()
+        factory = self.session_factory
+
+        def restore(previous: Conversation | None) -> Conversation | None:
+            session = previous
+            try:
+                session = factory() if session is None else session
+                session.restore_snapshot(snapshot)
+            except BaseException as error:
+                logging.getLogger(__name__).debug(
+                    "Worker restoration failed",
+                    exc_info=True,
+                )
+                self.session = session
+                completion.set_exception(error)
+            else:
+                self.session = session
+                completion.set_result(None)
+            return session
+
+        self.start()
+        self.reconfigure(restore)
+        completion.result()
+
     def reconfigure(
         self,
         callback: Callable[[Conversation | None], Conversation | None],
     ) -> None:
-        """Apply a plugin's session handoff between jobs on its owning thread."""
+        """Apply a plugin's session handoff between jobs on its owning thread.
+
+        Raises
+        ------
+        RuntimeError
+            The worker has stopped accepting control callbacks.
+
+        """
         with self._state_lock:
-            if not self._stop_flag.is_set():
-                self._jobs.put(_Reconfigure(callback))
+            if self._stop_flag.is_set():
+                message = "A stopping worker cannot accept session reconfiguration."
+                raise RuntimeError(message)
+            self._pending_controls += 1
+            self._jobs.put(_Reconfigure(callback))
 
     @property
     def pending_approval_id(self) -> int | None:
@@ -434,6 +494,7 @@ class AgentWorker:
             if self._stop_flag.is_set():
                 error_message = "AgentWorker is stopping."
                 raise RuntimeError(error_message)
+            self._pending_controls += 1
             self._jobs.put(self._RESET)
 
     @property
@@ -714,12 +775,23 @@ class AgentWorker:
                 command = self._jobs.get()
                 if command is _Control.STOP:
                     break
-                if isinstance(command, _Reconfigure):
-                    self._reconfigure(command)
-                elif command is _Control.RESET:
-                    self._reset_session()
-                elif isinstance(command, _Job):
-                    self._run_job(command)
+                with self._state_lock:
+                    self._processing = True
+                try:
+                    if isinstance(command, _Reconfigure):
+                        self._reconfigure(command)
+                    elif command is _Control.RESET:
+                        self._reset_session()
+                    elif isinstance(command, _Job):
+                        self._run_job(command)
+                finally:
+                    with self._state_lock:
+                        self._processing = False
+                        if (
+                            isinstance(command, _Reconfigure)
+                            or command is _Control.RESET
+                        ):
+                            self._pending_controls -= 1
         finally:
             failure = _CapturedFailure()
             with failure:

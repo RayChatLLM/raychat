@@ -26,7 +26,12 @@ if TYPE_CHECKING:
 from raychat.configuration import SETTINGS
 from raychat.ui.clipboard import copy_native_clipboard
 from raychat.ui.terminal_backend import native_backend
-from raychat.validation import finite_timeout
+from raychat.validation import (
+    boolean_field,
+    configuration_fields,
+    finite_timeout,
+    text_field,
+)
 
 if TYPE_CHECKING:
     from raychat.ui.terminal_backend import TerminalBackend
@@ -135,6 +140,49 @@ class KeyDecoder:
         self._in_paste = False
         self._paste_rejected = False
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def export_handoff(self) -> dict[str, object]:
+        """Capture partial escape sequences, pastes and UTF-8 decoder bytes.
+
+        Returns
+        -------
+        dict[str, object]
+            JSON-safe incremental input state.
+
+        """
+        pending, _flag = self._decoder.getstate()
+        return {
+            "buffer": base64.b64encode(self._buffer).decode("ascii"),
+            "paste": base64.b64encode(self._paste).decode("ascii"),
+            "unicode": base64.b64encode(pending).decode("ascii"),
+            "in_paste": self._in_paste,
+            "paste_rejected": self._paste_rejected,
+        }
+
+    def restore_handoff(self, value: object) -> None:
+        """Restore input without flushing incomplete code points or paste markers."""
+        data = configuration_fields(value, "decoder handoff")
+        self._buffer = bytearray(
+            base64.b64decode(
+                text_field(data["buffer"], "buffer", allow_empty=True),
+                validate=True,
+            ),
+        )
+        self._paste = bytearray(
+            base64.b64decode(
+                text_field(data["paste"], "paste", allow_empty=True),
+                validate=True,
+            ),
+        )
+        self._decoder.setstate((
+            base64.b64decode(
+                text_field(data["unicode"], "unicode", allow_empty=True),
+                validate=True,
+            ),
+            0,
+        ))
+        self._in_paste = boolean_field(data["in_paste"], "in paste")
+        self._paste_rejected = boolean_field(data["paste_rejected"], "paste rejected")
 
     def reset(self) -> None:
         """Discard buffered partial input and restore the initial state."""

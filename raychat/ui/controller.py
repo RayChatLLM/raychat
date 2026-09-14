@@ -7,6 +7,7 @@ so the interface remains responsive while the model or a command is running.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import queue
@@ -28,6 +29,7 @@ from raychat.resources import AgentResources, create_worker
 from raychat.session import AgentSession
 from raychat.status import StatusItem, StatusRecord, StatusStore, decode_update
 from raychat.storage import SessionStore
+from raychat.ui import handoff
 from raychat.ui.caching import CacheControls, cache_function
 from raychat.ui.commands import CommandCompletion, command_catalog
 from raychat.ui.feedback import ComposerPanel, PanelStyle, footer_text
@@ -154,6 +156,7 @@ def _history_records(value: object) -> list[Mapping[str, object]]:
 
 
 def _model_name(service: object) -> str | None:
+    service = getattr(service, "chat", service)
     model: object = getattr(service, "model", None)
     return model if isinstance(model, str) else None
 
@@ -536,6 +539,9 @@ class _ComposerWrap:
     def append_character(self, character: str) -> None:
         cells = _composer_cell_width(character)
         rendered = character
+        cursor = bool(self.lines[-1]) and self.lines[-1][-1] is None
+        if cursor:
+            self.lines[-1].pop()
         if cells > self.width:
             rendered = "�"
             cells = 1
@@ -553,6 +559,8 @@ class _ComposerWrap:
                 self.next_line(carried)
             else:
                 self.next_line()
+        if cursor:
+            self.lines[-1].append(None)
         self.lines[-1].append(rendered)
         self.widths[-1] += cells
 
@@ -566,7 +574,9 @@ class _ComposerWrap:
                 cursor_line = index
                 cursor_column = self.line_width(line[:marker_index])
             rendered_lines.append("".join(item for item in line if item is not None))
-        if display_width(cursor_char) != 1:
+        if display_width(cursor_char) > self.width:
+            cursor_char = "�"
+        elif not display_width(cursor_char):
             cursor_char = " "
         return ComposerView(
             tuple(rendered_lines),
@@ -898,7 +908,9 @@ def _paint_sidebar(
         or rect.height < _MIN_CONTENT_ROWS
     ):
         return
-    info_height = min(rect.height, 19)
+    # Keep the LIVE RAY FIELD graphic, label and panel background in sync.
+    show_live_ray_field = True
+    info_height = min(rect.height, 19) if show_live_ray_field else rect.height
     surface.box(
         Rect(rect.x, rect.y, rect.width, info_height),
         border=MAGENTA,
@@ -959,7 +971,7 @@ def _paint_sidebar(
             style=_STYLE_GREEN_PANEL_ALT,
             max_width=available,
         )
-    if rect.height > info_height + 2:
+    if show_live_ray_field and rect.height > info_height + 2:
         label_y = rect.y + info_height + 1
         badge = " LIVE RAY FIELD "
         surface.fill_rect(
@@ -1684,6 +1696,9 @@ class _TuiController:
         ] = queue.SimpleQueue()
         self.ui_thread = threading.get_ident()
         self._start_clipboard()
+        self.handoff_idle_sent = False
+        self.handoff_saved = False
+        self.checkpoint_time = 0.0
 
     def _clipboard_worker(self) -> None:
         while True:
@@ -1770,6 +1785,17 @@ class _TuiController:
                     None,
                 ),
             )
+        live = self.resources.live
+        if live is not None and live.status:
+            result.append(
+                StatusRecord(
+                    "host",
+                    "core-update",
+                    StatusItem(live.status, priority=110),
+                    "application",
+                    None,
+                ),
+            )
         return tuple(result)
 
     def _update_composer_panel(self) -> None:
@@ -1815,7 +1841,39 @@ class _TuiController:
             )
             self.view.panel.selected = self.view.message_queue.selected
 
+    def _authorize_dispatch(self, *, update_result: str = "") -> bool:
+        live = self.resources.live
+        if live is not None:
+            if live.paused:
+                return False
+            identifier = next(
+                key for key, view in self.views.items() if view is self.view
+            )
+            live.authorize_dispatch(
+                identifier,
+                handoff.capture_view(self.view),
+                handoff.writer(self),
+                update_result=update_result,
+            )
+        return live is None or not live.paused
+
+    def _submit_task(self, text: str) -> int | None:
+        live = self.resources.live
+        if live is not None and live.paused:
+            self.view.message_queue.append(text)
+            return None
+        if not self._authorize_dispatch():
+            self.view.message_queue.append(text)
+            return None
+        return _submit(self.view.state, self.view.worker, text, self.args.max_steps)
+
     def _drain_queue(self) -> None:
+        if self.resources.live is not None and self.resources.live.paused:
+            return
+        if self._continue_update():
+            return
+        if self.view.message_queue.editing or not self.view.message_queue.items:
+            return
         if (
             self.quitting
             or self.view.active_job_id is not None
@@ -1823,15 +1881,56 @@ class _TuiController:
             or (self.view.state.phase is Phase.APPROVAL)
         ):
             return
+        queued = self.view.message_queue.export_handoff()
         prompt = self.view.message_queue.take()
         if prompt is not None:
-            self.view.active_job_id = _submit(
-                self.view.state,
-                self.view.worker,
-                prompt,
-                self.args.max_steps,
-            )
+            self.view.active_job_id = self._submit_task(prompt)
+            if self.view.active_job_id is None:
+                self.view.message_queue.restore_handoff(queued)
             self.view.scroll_offset = 0
+
+    def _continue_update(self) -> bool:
+        live = self.resources.live
+        if (
+            live is None
+            or not live.update_results
+            or self.view is not self.views[self.root_id]
+        ):
+            return False
+        if (
+            self.quitting
+            or self.view.active_job_id is not None
+            or self.view.command_job_id is not None
+            or not self.view.worker.quiescent
+            or self.displayed_surface is None
+        ):
+            return True
+        session = self.view.worker.session
+        store = self.resources.store if session is None else session.store
+        session_id = store.session_id if isinstance(store, SessionStore) else ""
+        pending = next(
+            (
+                (identifier, result)
+                for identifier, result in live.update_results.items()
+                if result.get("session_id", "") in {"", session_id}
+            ),
+            None,
+        )
+        if pending is None:
+            return False
+        identifier, result = pending
+        if not self._authorize_dispatch(update_result=identifier):
+            return True
+        live.update_results.pop(identifier, None)
+        payload = {**result, "screen": live.screen[-10000:]}
+        prompt = "CORE_UPDATE_RESULT: " + json.dumps(payload, ensure_ascii=False)
+        self.view.state.start(
+            "Reviewing core update result: " + str(result["status"]),
+            host_notification=True,
+        )
+        self.view.active_job_id = self.view.worker.submit(prompt)
+        self.view.scroll_offset = 0
+        return True
 
     def _start_clipboard(self) -> None:
         self.clipboard_stopped = threading.Event()
@@ -1949,7 +2048,12 @@ class _TuiController:
                 menu.title,
                 self._menu_choices(),
                 selected=menu.selected,
+                searchable=menu.searchable,
             )
+            query = payload.get("filter")
+            if menu.searchable and isinstance(query, str):
+                self.picker.query = query
+                self.picker.replace(self.picker.all_choices)
         elif isinstance(requested_session, str) and requested_session:
             self._activate(requested_session)
 
@@ -2011,6 +2115,9 @@ class _TuiController:
                 execution=WorkerExecution(task=run_command),
             )
             self.command_workers.append(self.view.command_worker)
+        if not self._authorize_dispatch():
+            self.view.message_queue.append(text)
+            return
         self.view.command_started_idle = self.view.active_job_id is None
         if self.view.command_started_idle:
             self.view.state.start(text)
@@ -2290,12 +2397,7 @@ class _TuiController:
                     notify=self._application_notify(self.focused_id),
                 )
             elif target is not None:
-                self.view.active_job_id = _submit(
-                    self.view.state,
-                    self.view.worker,
-                    "/resume " + target,
-                    self.args.max_steps,
-                )
+                self.view.active_job_id = self._submit_task("/resume " + target)
         return True
 
     def _process_composer_key(self, event: KeyEvent) -> bool:
@@ -2578,27 +2680,119 @@ class _TuiController:
         elif command == "/resume" and self._open_resume_picker():
             return
         elif command.startswith("/") and command not in {"/clear", "/quit", "/exit"}:
-            self.view.active_job_id = _submit(
-                self.view.state,
-                self.view.worker,
-                command,
-                self.args.max_steps,
-            )
+            self.view.active_job_id = self._submit_task(command)
         elif command == "/clear":
             self.view.selection.clear()
             self.view.state.reset()
             self.view.worker.reset()
             self.view.scroll_offset = 0
         elif command:
-            self.view.active_job_id = _submit(
-                self.view.state,
-                self.view.worker,
-                command,
-                self.args.max_steps,
-            )
+            self.view.active_job_id = self._submit_task(command)
             self.view.scroll_offset = 0
 
+    def _process_update_key(self, event: KeyEvent) -> bool:
+        live = self.resources.live
+        if live is None or event.kind != "enter" or self.view.message_queue.editing:
+            return False
+        command = self.view.editor.text.strip()
+        name, _, argument = command.partition(" ")
+        if name == "/update":
+            self.view.editor.clear()
+            live.request(argument.strip())
+        elif name == "/recover":
+            self.view.editor.clear()
+            live.send("recover", target=argument.strip() or "previous")
+        elif name == "/resume-queue":
+            self.view.editor.clear()
+            live.send("resume_queue")
+        elif name == "/update-log":
+            self.view.editor.clear()
+            live.send("diagnostics")
+        elif (
+            live.paused
+            and command
+            and name not in {"/quit", "/exit", "/agents", "/parent", "/system"}
+        ):
+            self.view.message_queue.append(self.view.editor.submit())
+        else:
+            return False
+        return True
+
+    def sync_handoff_chats(self) -> None:
+        """Expose restored plugin navigation to the handoff decoder."""
+        self._sync_chats()
+
+    def activate_handoff_chat(self, identifier: str) -> None:
+        """Restore focus only after every navigation provider is ready."""
+        self._activate(identifier)
+
+    def handoff_quiescent(self) -> bool:
+        """Require every chat, background command and runtime to finish.
+
+        Returns
+        -------
+        bool
+            Whether capturing state can transfer exclusive resource ownership.
+
+        """
+        if any(
+            owner.active_job_id is not None
+            or owner.command_job_id is not None
+            or not owner.worker.quiescent
+            for owner in self.views.values()
+        ) or any(not worker.quiescent for worker in self.command_workers):
+            return False
+        return all(
+            runtime is None or runtime.quiescent
+            for runtime in (
+                self._focused_runtime(owner) for owner in self.views.values()
+            )
+        )
+
+    def _checkpoint_handoff(self) -> None:
+        live = self.resources.live
+        if (
+            live is None
+            or not live.active
+            or time.monotonic() - self.checkpoint_time <= 1
+        ):
+            return
+        if not self.handoff_quiescent():
+            return
+        self.checkpoint_time = time.monotonic()
+        try:
+            saved = handoff.capture(self, strict=False)
+        except Exception:
+            _LOGGER.debug("Core recovery checkpoint failed", exc_info=True)
+        else:
+            live.send("checkpoint", state=saved)
+
+    def _process_handoff(self) -> bool:
+        live = self.resources.live
+        if live is None:
+            return False
+        if live.retire:
+            return True
+        if not live.draining:
+            self.handoff_idle_sent = self.handoff_saved = False
+            self._checkpoint_handoff()
+        if live.draining and not self.handoff_idle_sent and self.handoff_quiescent():
+            self.handoff_idle_sent = True
+            live.send("idle")
+        if live.capture and not self.handoff_saved:
+            try:
+                saved = handoff.capture(self)
+            except Exception as error:
+                _LOGGER.debug("Core handoff capture failed", exc_info=True)
+                live.send("capture_failed", error=str(error))
+            else:
+                live.send("handoff", state=saved)
+            self.handoff_saved = True
+        return False
+
     def _process_key(self, event: KeyEvent) -> None:
+        if self._process_update_key(event):
+            return
         if self._process_global_key(event):
             return
         if self._process_overlay_key(event):
@@ -2644,9 +2838,10 @@ class _TuiController:
                 SETTINGS.tui.fallback_rows,
             ),
         )
+        live = self.resources.live
         self.width, self.height = (
-            max(1, dimensions.columns),
-            max(1, dimensions.lines),
+            max(1, dimensions.columns if live is None else live.columns),
+            max(1, dimensions.lines if live is None else live.rows),
         )
         if self.last_size != (self.width, self.height):
             if self.view.state.phase is Phase.APPROVAL:
@@ -2829,13 +3024,25 @@ class _TuiController:
         if frame:
             self.terminal.present(frame)
         self.displayed_surface = surface
+        if self.resources.live is not None:
+            self.resources.live.screen = surface.to_plain()
         self._update_approval_review(
             confirmation_ready=composition.approval_confirmation_ready,
         )
         self._finish_frame(tick)
 
     def _process_frame(self, tick: FrameTick) -> bool:
-        self._process_all_events()
+        live = self.resources.live
+        if live is not None:
+            live.poll()
+            for notice in live.notices:
+                self.views[self.root_id].state.notice("Core update", notice)
+            live.notices.clear()
+        if live is None or not live.frozen:
+            self._process_all_events()
+        if self._process_handoff():
+            self.scheduler.end_frame(tick)
+            return False
         self._update_dimensions()
         self._read_input()
         if (
@@ -2897,13 +3104,26 @@ class _TuiController:
     def run(self) -> int:
         try:
             self.view.worker.start()
-            if self.args.initial_prompt:
-                self.view.active_job_id = _submit(
-                    self.view.state,
-                    self.view.worker,
-                    self.args.initial_prompt,
-                    self.args.max_steps,
+            live = self.resources.live
+            if live is not None:
+                if live.restore is not None:
+                    handoff.restore(self, live.restore)
+                    if live.recover_history:
+                        root = self.views[self.root_id]
+                        session = root.worker.session
+                        if session is not None:
+                            root.state.restore(
+                                _history_records(session.export_snapshot()["history"]),
+                            )
+                    self.args.initial_prompt = None
+                live.send(
+                    "ready",
+                    state=handoff.capture(self, strict=live.restore is not None),
                 )
+            if self.args.initial_prompt and live is not None:
+                self.view.message_queue.append(self.args.initial_prompt)
+            elif self.args.initial_prompt:
+                self.view.active_job_id = self._submit_task(self.args.initial_prompt)
             while self._step_frame():
                 pass
         finally:

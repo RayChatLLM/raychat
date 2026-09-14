@@ -145,14 +145,27 @@ def text_field(
     path: str,
     *,
     nullable: Literal[False] = False,
+    allow_empty: bool = False,
 ) -> str: ...
 
 
 @overload
-def text_field(value: object, path: str, *, nullable: Literal[True]) -> str | None: ...
+def text_field(
+    value: object,
+    path: str,
+    *,
+    nullable: Literal[True],
+    allow_empty: bool = False,
+) -> str | None: ...
 
 
-def text_field(value: object, path: str, *, nullable: bool = False) -> str | None:
+def text_field(
+    value: object,
+    path: str,
+    *,
+    nullable: bool = False,
+    allow_empty: bool = False,
+) -> str | None:
     """Validate required text or an explicitly nullable text field.
 
     Returns
@@ -168,7 +181,7 @@ def text_field(value: object, path: str, *, nullable: bool = False) -> str | Non
     """
     if nullable and value is None:
         return None
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or (not value and not allow_empty):
         error_message = f"{path} must be nonempty text."
         raise ConfigurationError(error_message)
     return value

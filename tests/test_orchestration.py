@@ -8,9 +8,12 @@ import json
 import logging
 import os
 import secrets
+import signal
+import sys
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -80,6 +83,61 @@ def _json_fields(value: str | bytes) -> dict[str, object]:
 def _unused_factory() -> Chat:
     message = "The model factory must not be called."
     raise AssertionError(message)
+
+
+def _wait_for_path(path: Path, timeout: float) -> bool:
+    """Wait for a real child process to publish its synchronization marker.
+
+    Returns
+    -------
+    bool
+        Whether the marker appeared before the deadline.
+
+    """
+    deadline = time.monotonic() + timeout
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return path.exists()
+
+
+def _alive_processes(process_ids: list[int]) -> list[int]:
+    """Return exact owned process identifiers that still exist.
+
+    Returns
+    -------
+    list[int]
+        The subset that still resolves in the operating-system process table.
+
+    """
+    alive = []
+    for process_id in process_ids:
+        try:
+            os.kill(process_id, 0)
+        except ProcessLookupError:
+            continue
+        alive.append(process_id)
+    return alive
+
+
+def _wait_for_owned_exit(
+    process_ids: list[int],
+    cleanup: Path,
+    timeout: float,
+) -> list[int]:
+    """Wait for cleanup evidence and every exact owned process to disappear.
+
+    Returns
+    -------
+    list[int]
+        Owned process identifiers still present after the deadline.
+
+    """
+    deadline = time.monotonic() + timeout
+    alive = list(process_ids)
+    while (alive or not cleanup.exists()) and time.monotonic() < deadline:
+        alive = _alive_processes(process_ids)
+        time.sleep(0.01)
+    return alive
 
 
 def _agents(result: Mapping[str, object]) -> list[dict[str, object]]:
@@ -1384,6 +1442,102 @@ class ActionProtocolTests(PackageTestCase):
 
 class TransportBoundaryTests(PackageTestCase):
     """Exercise framing and failure cleanup through real isolated interpreters."""
+
+    def test_parent_sigkill_cancels_isolated_command_process_tree(self) -> None:
+        """Reap an isolated command tree when its owning core is killed."""
+        if os.name != "posix":
+            self.skipTest("The real SIGKILL ownership test requires POSIX.")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            runtime = create_runtime(
+                workspace,
+                plugins=[Path(__file__).parent / "fixtures/probe"],
+            )
+            try:
+                source = runtime.export_sources()
+            finally:
+                runtime.close()
+            request = workspace / "request.json"
+            request.write_text(
+                _json({
+                    "mode": "plugin_command",
+                    "plugin": "probe",
+                    "command": "/probe-isolated",
+                    "workspace": str(workspace),
+                    "plugin_source": source,
+                }),
+                encoding="utf-8",
+            )
+            script = (
+                "import json,sys\n"
+                "from pathlib import Path\n"
+                "from raychat.transport import run_child\n"
+                "payload=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))\n"
+                "run_child(None,payload,None)\n"
+            )
+            owned_pids: list[int] = []
+            project_root = Path(__file__).resolve().parents[1]
+
+            async def exercise() -> None:
+                creation: Awaitable[asyncio.subprocess.Process] = (
+                    asyncio.create_subprocess_exec(
+                        sys.executable,
+                        "-B",
+                        "-S",
+                        "-c",
+                        script,
+                        str(request),
+                        cwd=project_root,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                )
+                parent = await creation
+                try:
+                    marker = workspace / "isolated-pids-main.json"
+                    started = await asyncio.to_thread(_wait_for_path, marker, 5)
+                    require(started, "The isolated process tree did not start.")
+                    owned_pids.extend(
+                        integer_field(item, "owned process ID", minimum=1)
+                        for item in array_field(
+                            json_object(marker.read_text(encoding="utf-8")),
+                            "owned process IDs",
+                        )
+                    )
+                    worker_pid = integer_field(
+                        json_object(
+                            (workspace / "isolated-worker-main.json").read_text(
+                                encoding="utf-8",
+                            ),
+                        ),
+                        "isolated worker process ID",
+                        minimum=1,
+                    )
+                    owned_pids.append(worker_pid)
+                    parent.kill()
+                    exit_status = await asyncio.wait_for(parent.wait(), timeout=3)
+                    equal(exit_status, -signal.SIGKILL)
+                    cleanup = workspace / "isolated-cleanup-main.json"
+                    alive = await asyncio.to_thread(
+                        _wait_for_owned_exit,
+                        owned_pids,
+                        cleanup,
+                        4,
+                    )
+                    require(cleanup.exists(), "Parent loss skipped command cleanup.")
+                    equal(alive, [])
+                    require(marker.exists(), "Completed external evidence was removed.")
+                finally:
+                    if parent.returncode is None:
+                        parent.kill()
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(parent.wait(), timeout=3)
+                    for process_id in owned_pids:
+                        with suppress(ProcessLookupError):
+                            os.kill(process_id, signal.SIGKILL)
+
+            asyncio.run(exercise())
 
     def test_invalid_child_frames_fail_and_reap_the_child(self) -> None:
         """Reject malformed, duplicate and missing terminal records."""
