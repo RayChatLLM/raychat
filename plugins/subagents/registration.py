@@ -162,6 +162,10 @@ class _Registration:
         api.register_menu("agents", self.menu)
         api.on_close(self.sessions.close, on_reload=False)
         api.on_reload(lambda _ctx: self.sessions.export(), self.restore)
+        api.on_handoff(
+            lambda _ctx: self.sessions.export_handoff(),
+            lambda value, _ctx: self.sessions.restore_handoff(value, self.coordinator),
+        )
         api.on(PLUGINS_RELOADED, self.reconfigure)
         api.register_command(
             CommandDefinition(

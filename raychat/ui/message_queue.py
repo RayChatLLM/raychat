@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from raychat.handoff import editor_parts, editor_state, optional_index
+from raychat.validation import (
+    array_field,
+    configuration_fields,
+    integer_field,
+    text_field,
+)
+
 if TYPE_CHECKING:
     from .terminal import LineEditor
 
@@ -27,6 +35,66 @@ class MessageQueue:
         self._next_id = 0
         self._edits: dict[int, str] = {}
         self._draft: tuple[str, int] | None = None
+
+    def export_handoff(self) -> dict[str, object]:
+        """Capture committed prompts and the complete uncommitted edit transaction.
+
+        Returns
+        -------
+        dict[str, object]
+            Detached queue fields with stable message identifiers.
+
+        """
+        return {
+            "items": [
+                {"id": item.identifier, "text": item.text} for item in self.items
+            ],
+            "selected": self.selected,
+            "next_id": self._next_id,
+            "edits": {str(key): value for key, value in self._edits.items()},
+            "draft": None if self._draft is None else editor_state(*self._draft),
+        }
+
+    def restore_handoff(self, value: object) -> None:
+        """Validate and restore a queue without committing temporary edits.
+
+        Raises
+        ------
+        ValueError
+            Queue identities or the editing selection are inconsistent.
+
+        """
+        data = configuration_fields(value, "queue handoff")
+        items = []
+        for raw in array_field(data["items"], "queue items"):
+            item = configuration_fields(raw, "queue item")
+            items.append(
+                QueuedMessage(
+                    integer_field(item["id"], "message id", minimum=1),
+                    text_field(item["text"], "queued text"),
+                ),
+            )
+        selected = optional_index(data["selected"], "queue selection")
+        next_id = integer_field(data["next_id"], "next message id", minimum=0)
+        edits = {
+            int(key): text_field(text, "temporary edit", allow_empty=True)
+            for key, text in configuration_fields(data["edits"], "queue edits").items()
+        }
+        draft = None if data["draft"] is None else editor_parts(data["draft"])
+        identifiers = {item.identifier for item in items}
+        if (
+            len(identifiers) != len(items)
+            or max(identifiers, default=0) > next_id
+            or edits.keys() - identifiers
+            or (selected is not None and selected >= len(items))
+        ):
+            message = "Inconsistent queue handoff."
+            raise ValueError(message)
+        if (selected is None) != (draft is None):
+            message = "Queue edit draft and selection must be transferred together."
+            raise ValueError(message)
+        self.items, self.selected, self._next_id = items, selected, next_id
+        self._edits, self._draft = edits, draft
 
     @property
     def editing(self) -> bool:

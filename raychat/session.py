@@ -37,7 +37,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import Protocol, TypedDict, runtime_checkable
 
 from raychat.configuration import SETTINGS
 from raychat.service_contracts import CONTEXT_FACTORY
@@ -77,6 +77,29 @@ from .validation import (
     object_field,
     text_field,
 )
+
+_CORE_REVIEW_STEPS = 20
+
+
+@runtime_checkable
+class _CoreReview(Protocol):
+    """Use optional supervised feedback without importing the terminal bootstrap."""
+
+    def claim_result(
+        self,
+        identifier: str,
+        cancel_check: CancelCheck | None = None,
+    ) -> None:
+        """Durably claim one result before requesting its model review."""
+        ...
+
+    def finish_result(self, identifier: str) -> None:
+        """Acknowledge that the review's response has committed successfully."""
+        ...
+
+    def review_completion(self, outcome: Mapping[str, object]) -> dict[str, object]:
+        """Report host evidence separately from an unverified model assessment."""
+        ...
 
 
 class _HistoryRecord(TypedDict):
@@ -294,6 +317,9 @@ class AgentSession:
         self._history: list[SessionMessage] = []
         self._next_prompt_id = 1
         self._sending = self._turn_open = False
+        self._core_review = False
+        self._core_editing = False
+        self._core_result_id = ""
         self._state_lock = threading.RLock()
         self._rollback_state: dict[str, dict[str, object]] | None = None
         self._checkpoint_owners: set[str] = set()
@@ -319,6 +345,15 @@ class AgentSession:
     def allowed_actions(self) -> frozenset[str]:
         """Configured actions still available in the active host."""
         available = frozenset(self.runtime.tools) | {"done"}
+        if self._core_review or self._core_editing:
+            available &= {
+                "core_source",
+                "core_update",
+                "core_recover",
+                "core_status",
+                "core_verify",
+                "done",
+            }
         return (
             available
             if self._allowed_actions is None
@@ -492,7 +527,13 @@ class AgentSession:
             ]
             instructions = (
                 self.protocol
-                + self.runtime.plugin_instructions()
+                + "\n".join(
+                    item.text
+                    for item in self.runtime.instruction_contributions(
+                        self,
+                        self.context_chars,
+                    )
+                )
                 + "\nEnabled tools: "
                 + json.dumps(tools)
             )
@@ -571,6 +612,9 @@ class AgentSession:
         finally:
             with self._state_lock:
                 self._sending = False
+                self._core_review = False
+                self._core_editing = False
+                self._core_result_id = ""
 
     def checkpoint(self, owner: str) -> None:
         """Save explicit command state without accepting another owner's turn state."""
@@ -661,11 +705,6 @@ class AgentSession:
         str
             The validated completion message from the final done action.
 
-        Raises
-        ------
-        RuntimeError
-            When the model exhausts the configured step limit.
-
         """
         state = _SendState(
             prompt_id=self._next_prompt_id,
@@ -675,8 +714,13 @@ class AgentSession:
             cancel_check=cancel_check,
         )
         state.validate(prompt)
+        if prompt.startswith("CORE_UPDATE_RESULT: "):
+            max_steps = min(max_steps or _CORE_REVIEW_STEPS, _CORE_REVIEW_STEPS)
+            state.max_steps = max_steps
         with self.turn(notify=event_callback):
+            self._core_review = prompt.startswith("CORE_UPDATE_RESULT: ")
             request_messages = self._start_prompt(state, prompt)
+            self._claim_core_result(prompt, cancel_check)
             while max_steps is None or state.step < max_steps:
                 state.step += 1
                 action = self._next_action(state, request_messages)
@@ -688,10 +732,56 @@ class AgentSession:
                     )
                     if action_name(action) == "done":
                         return self._complete_prompt(state, action)
-                    self._perform_action(state, action)
-                request_messages = self._request_messages(state.prompt_id)
-            error_message = f"Stopped at {max_steps} model turns without a done action."
-            raise RuntimeError(error_message)
+                    completion = self._perform_action(state, action)
+                    if completion is not None:
+                        self._add_history(
+                            "assistant",
+                            json.dumps(completion),
+                            "assistant",
+                            state.prompt_id,
+                        )
+                        return self._complete_prompt(state, completion)
+                if max_steps is None or state.step < max_steps:
+                    request_messages = self._request_messages(state.prompt_id)
+            return self._complete_exhausted_review(state)
+
+    def _complete_exhausted_review(self, state: _SendState) -> str:
+        message = f"Stopped at {state.max_steps} model turns without a done action."
+        unfinished: Action = {"action": "done", "message": message}
+        completion = self._review_completion(unfinished)
+        if completion is unfinished:
+            raise RuntimeError(message)
+        self._check_cancel(state.cancel_check)
+        completion.update(
+            review_exhausted=True,
+            stop_reason="review_turn_limit",
+            model_turns=state.step,
+            message=text_field(completion["message"], "review completion")
+            + f"\nAutomatic review stopped after {state.step} model turns. "
+            "Awaiting your next instruction.",
+        )
+        self._add_history(
+            "assistant",
+            json.dumps(completion),
+            "assistant",
+            state.prompt_id,
+        )
+        return self._complete_prompt(state, completion)
+
+    def _claim_core_result(self, prompt: str, cancel_check: CancelCheck | None) -> None:
+        bridge = self.runtime.services.get("core_updates")
+        if not self._core_review or not isinstance(bridge, _CoreReview):
+            return
+        raw: object = json.loads(prompt.removeprefix("CORE_UPDATE_RESULT: "))
+        result = object_field(raw, "core update result")
+        identifier = text_field(result.get("request_id"), "update request id")
+        bridge.claim_result(identifier, cancel_check)
+        self._core_result_id = identifier
+
+    def _finish_core_result(self) -> None:
+        bridge = self.runtime.services.get("core_updates")
+        if self._core_result_id and isinstance(bridge, _CoreReview):
+            bridge.finish_result(self._core_result_id)
 
     def _start_prompt(self, state: _SendState, prompt: str) -> Messages:
         state.prompt_id = self._next_prompt_id
@@ -735,12 +825,15 @@ class AgentSession:
             maximum_chars=SETTINGS.limits.max_reply_chars,
         )
         self._check_cancel(state.cancel_check)
-        self._add_history("assistant", reply, "assistant", state.prompt_id)
         action = None
         try:
             action = decode_action(reply)
             self._validate_action(action)
+            reviewed = self._review_completion(action)
+            if reviewed is not action:
+                action, reply = reviewed, json.dumps(reviewed)
         except (ValueError, OSError, RuntimeError, TypeError, RecursionError) as exc:
+            self._add_history("assistant", reply, "assistant", state.prompt_id)
             result: dict[str, object] = {
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
@@ -749,7 +842,24 @@ class AgentSession:
                 result["denied"] = True
             self._publish_result(state, None, result)
             return None
+        self._add_history("assistant", reply, "assistant", state.prompt_id)
         return action
+
+    def _review_completion(self, action: Action) -> Action:
+        bridge = self.runtime.services.get("core_updates")
+        if (
+            not self._core_review
+            or action.get("action") != "done"
+            or not isinstance(bridge, _CoreReview)
+        ):
+            return action
+        prompt = next(
+            message.content
+            for message in reversed(self._history)
+            if message.kind == "prompt"
+        )
+        raw: object = json.loads(prompt.removeprefix("CORE_UPDATE_RESULT: "))
+        return bridge.review_completion(object_field(raw, "core update result"))
 
     def _complete_prompt(self, state: _SendState, action: Action) -> str:
         message = text_field(action["message"], "completion message")
@@ -761,10 +871,21 @@ class AgentSession:
             notify=state.event_callback,
         )
         self.commit_turn()
+        self._finish_core_result()
         self._emit(
             state.event_callback,
             "done",
-            {"step": state.step, "max_steps": state.max_steps, "message": message},
+            {
+                "step": state.step,
+                "max_steps": state.max_steps,
+                "message": message,
+                **(
+                    {"host_generated": True}
+                    if action.get("pending") is True
+                    or action.get("host_generated") is True
+                    else {}
+                ),
+            },
         )
         return message
 
@@ -823,7 +944,7 @@ class AgentSession:
             return True
         return state.approval_callback(_detached_callback_payload(action)) is not True
 
-    def _perform_action(self, state: _SendState, action: Action) -> None:
+    def _perform_action(self, state: _SendState, action: Action) -> Action | None:
         self._check_cancel(state.cancel_check)
         name = action_name(action)
         if name not in self.allowed_actions:
@@ -834,10 +955,17 @@ class AgentSession:
                     "ok": False,
                     "denied": True,
                     "error": f"Action {name!r} is disabled for this agent. "
-                    "Use an enabled action instead.",
+                    + (
+                        "This task is inspecting the running application's source. "
+                        "Use core_source to read it and core_update to edit it; "
+                        "workspace tools cannot inspect the active release."
+                        if self._core_editing
+                        else "Use an enabled action instead."
+                    ),
+                    "allowed_actions": sorted(self.allowed_actions),
                 },
             )
-            return
+            return None
         result = self._guard_action(state, action)
         if result is None:
             if self._approval_denied(state, action):
@@ -849,7 +977,25 @@ class AgentSession:
             else:
                 result = self._execute_action(state, action)
         self._check_cancel(state.cancel_check)
+        if (
+            name == "core_source"
+            and isinstance(self.runtime.services.get("core_updates"), _CoreReview)
+            and result.get("ok") is not False
+        ):
+            self._core_editing = True
+            result["source_scope"] = "active_application_release"
+            result["allowed_actions"] = sorted(self.allowed_actions)
         self._publish_result(state, action, result)
+        if self.runtime.tools[name].finishes_turn and (
+            result.get("ok") is True or result.get("finish_turn") is True
+        ):
+            return {
+                "action": "done",
+                "pending": result.get("status") == "submitted",
+                "host_generated": True,
+                "message": text_field(result.get("message"), "tool completion"),
+            }
+        return None
 
     def _execute_action(self, state: _SendState, action: Action) -> dict[str, object]:
         cancelled = False

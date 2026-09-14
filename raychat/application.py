@@ -174,9 +174,7 @@ def build_runtime(
         trusted=trusted_workspace,
         install_profile=not selected_options.no_plugins,
     )
-    requested_disabled = set(selected_options.disabled) | set(
-        SETTINGS.plugins.disabled,
-    )
+    requested_disabled = set(selected_options.disabled)
     available = manager.paths(include_disabled=True)
     explicitly_enabled = set()
     for value in [*SETTINGS.plugins.paths, *selected_options.paths]:
@@ -191,7 +189,11 @@ def build_runtime(
             "Unknown plugin to disable: "
             + ", ".join(sorted(requested_disabled - available.keys())),
         )
-    disabled = requested_disabled | (manager.disabled - explicitly_enabled)
+    disabled = (
+        requested_disabled
+        | (set(SETTINGS.plugins.disabled) & available.keys())
+        | (manager.disabled - explicitly_enabled)
+    )
     selected = (
         []
         if selected_options.no_plugins
@@ -203,7 +205,7 @@ def build_runtime(
     runtime = create_runtime(
         workspace,
         source=source,
-        plugins=selected,
+        plugins=None if source is not None else selected,
         selection=PluginSelection(disabled=disabled, enabled=explicitly_enabled),
         manager=manager,
         **remaining,

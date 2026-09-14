@@ -60,6 +60,21 @@ class _PickerTerminal(TerminalSession):
 class PickerTests(TypedTestCase):
     """Exercise Picker behavior."""
 
+    def test_search_filters_large_catalog_without_losing_full_choices(self) -> None:
+        """Filter incrementally, retain the search on repaint and recover all rows."""
+        choices = [Choice("alpha", "Alpha"), Choice("nemotron", "Nemotron 雪")]
+        picker = Picker("Models", choices, searchable=True)
+        picker.handle(KeyEvent("text", "NEM"))
+        self.equal(picker.handle(KeyEvent("enter")), (True, "nemotron"))
+        picker.replace(choices)
+        self.equal(len(picker.choices), 1)
+        picker.handle(KeyEvent("paste", "missing"))
+        self.equal(picker.handle(KeyEvent("enter")), (False, None))
+        for _ in range(len(picker.query)):
+            picker.handle(KeyEvent("backspace"))
+        self.equal(picker.choices, choices)
+        self.equal(picker.handle(KeyEvent("escape")), (True, None))
+
     @staticmethod
     def _picker() -> Picker:
         return Picker(

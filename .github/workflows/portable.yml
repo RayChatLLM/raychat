@@ -96,14 +96,16 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Check local profile installation and Windows paths
+      - name: Check local profiles and portable release paths
         shell: bash
         run: |
           set -o pipefail
           mkdir -p ci-output
           python -B -S -m unittest \
             tests.test_distribution \
-            tests.test_package_system.PackageLocationTests -v 2>&1 | tee ci-output/profile-paths.log
+            tests.test_package_system.PackageLocationTests \
+            tests.test_live_core.ReleaseTests.test_candidate_inventory_uses_portable_paths_on_windows \
+            -v 2>&1 | tee ci-output/profile-paths.log
 
       - name: Build and verify the exact release
         shell: bash

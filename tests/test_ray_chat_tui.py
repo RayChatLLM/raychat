@@ -30,7 +30,15 @@ from raychat.type_support import override
 from raychat.ui import controller as ray_chat_tui
 from raychat.ui.message_queue import MessageQueue
 from raychat.ui.renderer import RayTracer, Surface
-from raychat.ui.state import Phase, Rect, TuiSnapshot, TuiState
+from raychat.ui.selection import cell_slice
+from raychat.ui.state import (
+    LayoutOptions,
+    Phase,
+    Rect,
+    TuiSnapshot,
+    TuiState,
+    calculate_layout,
+)
 from raychat.ui.terminal import (
     FrameMetrics,
     FrameTick,
@@ -48,6 +56,7 @@ from raychat.validation import (
 from raychat.workers import WorkerEvent
 from tests.assertions import TypedTestCase
 from tests.tui_support import arguments, resources_fixture
+from tools.terminal_screen import TerminalScreen
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -102,6 +111,7 @@ class _CompositionOptions(TypedDict, total=False):
     background: Surface | None
     ascii_only: bool
     show_system: bool
+    model: str
 
 
 def compose(width: int, height: int, **options: Unpack[_CompositionOptions]) -> Surface:
@@ -121,7 +131,7 @@ def compose(width: int, height: int, **options: Unpack[_CompositionOptions]) -> 
             width=width,
             height=height,
             moment=0.25,
-            model=MODEL,
+            model=options.get("model", MODEL),
             workspace=WORKSPACE,
             statuses=(
                 StatusRecord(
@@ -389,6 +399,50 @@ class FrameCompositionTests(TypedTestCase):
             (len(resized.lines)) < (len(ray_chat_tui.composer_view(editor, 12).lines)),
         )
 
+    def test_cursor_preserves_wide_draft_glyphs_in_real_terminal_frames(self) -> None:
+        """Keep snow and emoji visible as the cursor moves through restored text."""
+        draft = "ROOT_DRAFT_雪🙂"
+        editor = LineEditor(draft)
+        screen = TerminalScreen(80, 24)
+        previous: Surface | None = None
+        for cursor in (len(draft), draft.index("雪"), draft.index("🙂"), 0):
+            with self.subTest(cursor=cursor):
+                editor.set_text(draft, cursor)
+                surface = compose(
+                    80,
+                    24,
+                    editor=editor,
+                    ascii_only=False,
+                    background=flat_background(80, 24),
+                )
+                screen.feed(surface.to_ansi(previous=previous).encode())
+                self.require(draft in surface.to_plain())
+                self.require(draft in screen.text())
+                self.equal((editor.text, editor.cursor), (draft, cursor))
+                if cursor == draft.index("雪"):
+                    index = surface.chars.index("雪")
+                    self.equal(surface.chars[index + 1], "")
+                    self.equal(
+                        surface.background[index : index + 2],
+                        [ray_chat_tui.CYAN] * 2,
+                    )
+                previous = surface
+
+    def test_wide_cursor_follows_its_glyph_across_wrap_boundaries(self) -> None:
+        """Move the marker with a wrapped wide cluster and use the narrow fallback."""
+        for text, cursor, width, lines, position, glyph in (
+            ("abcd雪", 4, 5, ("abcd", "雪"), (1, 0), "雪"),
+            ("ab c雪", 4, 5, ("ab ", "c雪"), (1, 1), "雪"),
+            ("雪", 0, 1, ("�",), (0, 0), "�"),
+        ):
+            with self.subTest(text=text, width=width):
+                editor = LineEditor(text)
+                editor.set_text(text, cursor)
+                view = ray_chat_tui.composer_view(editor, width)
+                self.equal(view.lines, lines)
+                self.equal((view.cursor_line, view.cursor_column), position)
+                self.equal(view.cursor_char, glyph)
+
     def test_composer_renders_multiple_rows_and_reclaims_them_after_resize(
         self,
     ) -> None:
@@ -451,6 +505,41 @@ class FrameCompositionTests(TypedTestCase):
         self.require(("SKILLS") in (wide_text))
         self.require(("MEMORY") in (wide_text))
         self.require(("RAYS") in (wide_text))
+
+    def test_system_panel_wraps_the_complete_model_identifier(self) -> None:
+        """Recover every model glyph from the actual panel, excluding the header."""
+        models = (
+            "accounts/provider/models/example-lightning-large-30b-a3b",
+            "vendor/" + "long-model-segment-" * 15 + "終端e\u0301",
+        )
+        for width in (120, 160):
+            for model in models:
+                with self.subTest(width=width, model=model):
+                    surface = compose(
+                        width,
+                        40,
+                        model=model,
+                        show_system=True,
+                        ascii_only=False,
+                    )
+                    layout = calculate_layout(
+                        width,
+                        40,
+                        options=LayoutOptions(show_system=True),
+                    )
+                    sidebar = layout.sidebar
+                    if sidebar is None:
+                        self.fail("SYSTEM panel must be visible in this test.")
+                    rows = [
+                        cell_slice(line, sidebar.x + 2, sidebar.right - 2).strip()
+                        for line in surface.to_plain().splitlines()[
+                            sidebar.y + 1 : sidebar.bottom - 1
+                        ]
+                    ]
+                    rendered = rows[rows.index("MODEL") + 1 : rows.index("WORKSPACE")]
+                    self.equal("".join(rendered), model)
+                    self.require(len(rendered) > 1)
+                    self.require("RAYS" in rows)
 
     def test_transcript_suppresses_internal_action_and_result_rows(self) -> None:
         """Check transcript suppresses internal action and result rows."""

@@ -13,6 +13,10 @@ if TYPE_CHECKING:
     from .terminal import LineEditor
 
 UI_COMMANDS = {
+    "update": "Validate and activate a core source update",
+    "resume-queue": "Resume queued work after crash recovery",
+    "recover": "Restore previous or known-good core",
+    "update-log": "Show core update diagnostics",
     "system": "Toggle system details",
     "clear": "Clear this conversation",
     "quit": "Quit RayChat",

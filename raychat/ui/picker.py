@@ -39,10 +39,14 @@ class Picker:
         choices: Iterable[Choice],
         *,
         selected: str | None = None,
+        searchable: bool = False,
     ) -> None:
         """Initialize the menu, selecting an existing identifier when supplied."""
         self.title = title
         self.choices = list(choices)
+        self.all_choices = list(self.choices)
+        self.searchable = searchable
+        self.query = ""
         self.index = next(
             (i for i, c in enumerate(self.choices) if c.id == selected),
             0,
@@ -54,7 +58,10 @@ class Picker:
     def replace(self, choices: Iterable[Choice]) -> None:
         """Replace the entries while preserving the selected identifier if present."""
         selected = self.choices[self.index].id if self.choices else None
-        self.choices = list(choices)
+        self.all_choices = list(choices)
+        self.choices = [
+            c for c in self.all_choices if self.query.casefold() in c.label.casefold()
+        ]
         self.index = next(
             (i for i, c in enumerate(self.choices) if c.id == selected),
             min(self.index, max(0, len(self.choices) - 1)),
@@ -71,6 +78,15 @@ class Picker:
         """
         if event.kind == "escape":
             return True, None
+        if self.searchable and event.kind in {"text", "paste", "backspace"}:
+            self.query = (
+                self.query[:-1]
+                if event.kind == "backspace"
+                else self.query + event.text
+            )
+            self.index = self.offset = 0
+            self.replace(self.all_choices)
+            return False, None
         if event.kind in {"up", "mouse_up"}:
             self.index = max(0, self.index - 1)
         elif event.kind in {"down", "mouse_down"}:
@@ -163,14 +179,24 @@ class Picker:
             surface.text(
                 x + 2,
                 y + 1,
-                "No sessions yet.",
+                "No matches." if self.searchable else "No sessions yet.",
                 max_width=width - 4,
                 style=CellStyle(foreground=colors.muted, background=colors.panel),
+            )
+        if self.searchable:
+            surface.text(
+                x + 2,
+                y + height - 3,
+                f"Filter: {self.query}  ({len(self.choices)}/{len(self.all_choices)})",
+                max_width=width - 4,
+                style=CellStyle(foreground=colors.cyan, background=colors.panel),
             )
         surface.text(
             x + 2,
             y + height - 2,
-            "Up/Down  Enter open  Click open  Esc back",
+            "↑/↓ PgUp/PgDn · Enter/Click select · Esc back"
+            if self.searchable
+            else "Up/Down  Enter open  Click open  Esc back",
             max_width=width - 4,
             style=CellStyle(foreground=colors.muted, background=colors.panel),
         )

@@ -45,6 +45,7 @@ from raychat.validation import (
 
 from .configuration import load as load_settings
 from .configuration import validate
+from .models import ModelMenu
 
 if TYPE_CHECKING:
     import argparse
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
-    from raychat.sdk import ProviderConfiguration
+    from raychat.sdk import Chat, ProviderConfiguration
 
 _namespace: object = globals()
 _PLUGIN_SETTINGS = load_settings(_namespace)
@@ -273,8 +274,8 @@ def _validate_endpoint(url: str) -> SplitResult:
     return parsed
 
 
-def _chat_request(url: str, body: bytes, headers: Mapping[str, str]) -> Request:
-    """Build a POST request from an explicitly permitted HTTP scheme.
+def _chat_request(url: str, body: bytes | None, headers: Mapping[str, str]) -> Request:
+    """Build a request from an explicitly permitted HTTP scheme.
 
     Returns
     -------
@@ -293,13 +294,13 @@ def _chat_request(url: str, body: bytes, headers: Mapping[str, str]) -> Request:
             f"https://{location}",
             data=body,
             headers=dict(headers),
-            method="POST",
+            method="GET" if body is None else "POST",
         )
     return Request(
         f"http://{location}",
         data=body,
         headers=dict(headers),
-        method="POST",
+        method="GET" if body is None else "POST",
     )
 
 
@@ -475,12 +476,54 @@ class ChatAPI:
                 retryable=retryable,
                 retry_after=retry_after,
             ) from None
+
         except (URLError, OSError, http.client.HTTPException) as exc:
             error_message = f"Chat API connection failed ({type(exc).__name__})."
-            raise ChatAPIError(
-                error_message,
-                retryable=True,
-            ) from None
+            raise ChatAPIError(error_message, retryable=True) from None
+
+    def list_models(self) -> list[str]:
+        """GET the configured provider's bounded OpenAI-compatible model catalog.
+
+        Returns
+        -------
+        list[str]
+            All unique model identifiers in stable display order.
+
+        Raises
+        ------
+        ValueError
+            The endpoint cannot identify a models route or the response is invalid.
+
+        """
+        self._check_credentials()
+        endpoint = _validate_endpoint(self.url)
+        suffix = "/chat/completions"
+        path = endpoint.path.rstrip("/")
+        if not path.endswith(suffix):
+            message = (
+                "Model discovery requires an endpoint ending in /chat/completions."
+            )
+            raise ValueError(message)
+        url = endpoint._replace(
+            path=path[: -len(suffix)] + "/models",
+            fragment="",
+        ).geturl()
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": _PLUGIN_SETTINGS.user_agent,
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        raw = self._read(_chat_request(url, None, headers))
+        if len(raw) > MAX_HTTP_BYTES:
+            message = "Model catalog exceeds the response size limit."
+            raise ValueError(message)
+        fields = object_field(json_object(raw), "model catalog")
+        identifiers = {
+            text_field(object_field(item, "model").get("id"), "model.id")
+            for item in array_field(fields.get("data"), "models.data")
+        }
+        return sorted(identifiers, key=str.casefold)
 
     def __call__(self, messages: Messages) -> str:
         """Send one request and return a validated, complete assistant message.
@@ -646,8 +689,15 @@ def _worker_chat(options: object, _ctx: PluginContext) -> ChatAPI:
     )
 
 
+def _models_worker(options: Mapping[str, object], ctx: PluginContext) -> Chat:
+    client = _worker_chat(options, ctx)
+    return lambda _messages: json.dumps(client.list_models())
+
+
 def register(api: PluginAPI) -> None:
     """Register the checked provider service and isolated worker factory."""
+    models = ModelMenu(api)
+    api.register_worker("models", _models_worker)
     api.validate_settings(validate)
     source: object = api.context.plugin_sources([api.plugin_id])
     _SOURCE.bind(object_field(source, "provider source"))
@@ -695,6 +745,7 @@ def register(api: PluginAPI) -> None:
             ),
         )
         chat.require_key = _same_endpoint(url, DEFAULT_API_URL)
+        models.bind(chat)
         return chat
 
     api.register_provider(api.plugin_id, configured_provider)
