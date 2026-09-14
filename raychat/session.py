@@ -37,7 +37,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import Protocol, TypedDict, runtime_checkable
 
 from raychat.configuration import SETTINGS
 from raychat.service_contracts import CONTEXT_FACTORY
@@ -77,6 +77,25 @@ from .validation import (
     object_field,
     text_field,
 )
+
+_CORE_REVIEW_STEPS = 20
+
+
+@runtime_checkable
+class _CoreReview(Protocol):
+    """Use optional supervised feedback without importing the terminal bootstrap."""
+
+    def claim_result(
+        self,
+        identifier: str,
+        cancel_check: CancelCheck | None = None,
+    ) -> None:
+        """Durably claim one result before requesting its model review."""
+        ...
+
+    def finish_result(self, identifier: str) -> None:
+        """Acknowledge that the review's response has committed successfully."""
+        ...
 
 
 class _HistoryRecord(TypedDict):
@@ -294,6 +313,8 @@ class AgentSession:
         self._history: list[SessionMessage] = []
         self._next_prompt_id = 1
         self._sending = self._turn_open = False
+        self._core_review = False
+        self._core_result_id = ""
         self._state_lock = threading.RLock()
         self._rollback_state: dict[str, dict[str, object]] | None = None
         self._checkpoint_owners: set[str] = set()
@@ -319,6 +340,14 @@ class AgentSession:
     def allowed_actions(self) -> frozenset[str]:
         """Configured actions still available in the active host."""
         available = frozenset(self.runtime.tools) | {"done"}
+        if self._core_review:
+            available &= {
+                "core_source",
+                "core_update",
+                "core_recover",
+                "core_status",
+                "done",
+            }
         return (
             available
             if self._allowed_actions is None
@@ -492,7 +521,13 @@ class AgentSession:
             ]
             instructions = (
                 self.protocol
-                + self.runtime.plugin_instructions()
+                + "\n".join(
+                    item.text
+                    for item in self.runtime.instruction_contributions(
+                        self,
+                        self.context_chars,
+                    )
+                )
                 + "\nEnabled tools: "
                 + json.dumps(tools)
             )
@@ -571,6 +606,8 @@ class AgentSession:
         finally:
             with self._state_lock:
                 self._sending = False
+                self._core_review = False
+                self._core_result_id = ""
 
     def checkpoint(self, owner: str) -> None:
         """Save explicit command state without accepting another owner's turn state."""
@@ -675,8 +712,13 @@ class AgentSession:
             cancel_check=cancel_check,
         )
         state.validate(prompt)
+        if prompt.startswith("CORE_UPDATE_RESULT: "):
+            max_steps = min(max_steps or _CORE_REVIEW_STEPS, _CORE_REVIEW_STEPS)
+            state.max_steps = max_steps
         with self.turn(notify=event_callback):
+            self._core_review = prompt.startswith("CORE_UPDATE_RESULT: ")
             request_messages = self._start_prompt(state, prompt)
+            self._claim_core_result(prompt, cancel_check)
             while max_steps is None or state.step < max_steps:
                 state.step += 1
                 action = self._next_action(state, request_messages)
@@ -688,10 +730,33 @@ class AgentSession:
                     )
                     if action_name(action) == "done":
                         return self._complete_prompt(state, action)
-                    self._perform_action(state, action)
+                    completion = self._perform_action(state, action)
+                    if completion is not None:
+                        self._add_history(
+                            "assistant",
+                            json.dumps(completion),
+                            "assistant",
+                            state.prompt_id,
+                        )
+                        return self._complete_prompt(state, completion)
                 request_messages = self._request_messages(state.prompt_id)
             error_message = f"Stopped at {max_steps} model turns without a done action."
             raise RuntimeError(error_message)
+
+    def _claim_core_result(self, prompt: str, cancel_check: CancelCheck | None) -> None:
+        bridge = self.runtime.services.get("core_updates")
+        if not self._core_review or not isinstance(bridge, _CoreReview):
+            return
+        raw: object = json.loads(prompt.removeprefix("CORE_UPDATE_RESULT: "))
+        result = object_field(raw, "core update result")
+        identifier = text_field(result.get("request_id"), "update request id")
+        bridge.claim_result(identifier, cancel_check)
+        self._core_result_id = identifier
+
+    def _finish_core_result(self) -> None:
+        bridge = self.runtime.services.get("core_updates")
+        if self._core_result_id and isinstance(bridge, _CoreReview):
+            bridge.finish_result(self._core_result_id)
 
     def _start_prompt(self, state: _SendState, prompt: str) -> Messages:
         state.prompt_id = self._next_prompt_id
@@ -761,10 +826,21 @@ class AgentSession:
             notify=state.event_callback,
         )
         self.commit_turn()
+        self._finish_core_result()
         self._emit(
             state.event_callback,
             "done",
-            {"step": state.step, "max_steps": state.max_steps, "message": message},
+            {
+                "step": state.step,
+                "max_steps": state.max_steps,
+                "message": message,
+                **(
+                    {"host_generated": True}
+                    if action.get("pending") is True
+                    or action.get("host_generated") is True
+                    else {}
+                ),
+            },
         )
         return message
 
@@ -823,7 +899,7 @@ class AgentSession:
             return True
         return state.approval_callback(_detached_callback_payload(action)) is not True
 
-    def _perform_action(self, state: _SendState, action: Action) -> None:
+    def _perform_action(self, state: _SendState, action: Action) -> Action | None:
         self._check_cancel(state.cancel_check)
         name = action_name(action)
         if name not in self.allowed_actions:
@@ -837,7 +913,7 @@ class AgentSession:
                     "Use an enabled action instead.",
                 },
             )
-            return
+            return None
         result = self._guard_action(state, action)
         if result is None:
             if self._approval_denied(state, action):
@@ -850,6 +926,16 @@ class AgentSession:
                 result = self._execute_action(state, action)
         self._check_cancel(state.cancel_check)
         self._publish_result(state, action, result)
+        if self.runtime.tools[name].finishes_turn and (
+            result.get("ok") is True or result.get("finish_turn") is True
+        ):
+            return {
+                "action": "done",
+                "pending": result.get("status") == "submitted",
+                "host_generated": True,
+                "message": text_field(result.get("message"), "tool completion"),
+            }
+        return None
 
     def _execute_action(self, state: _SendState, action: Action) -> dict[str, object]:
         cancelled = False

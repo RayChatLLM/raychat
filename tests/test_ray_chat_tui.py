@@ -48,6 +48,7 @@ from raychat.validation import (
 from raychat.workers import WorkerEvent
 from tests.assertions import TypedTestCase
 from tests.tui_support import arguments, resources_fixture
+from tools.terminal_screen import TerminalScreen
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -388,6 +389,50 @@ class FrameCompositionTests(TypedTestCase):
         self.require(
             (len(resized.lines)) < (len(ray_chat_tui.composer_view(editor, 12).lines)),
         )
+
+    def test_cursor_preserves_wide_draft_glyphs_in_real_terminal_frames(self) -> None:
+        """Keep snow and emoji visible as the cursor moves through restored text."""
+        draft = "ROOT_DRAFT_雪🙂"
+        editor = LineEditor(draft)
+        screen = TerminalScreen(80, 24)
+        previous: Surface | None = None
+        for cursor in (len(draft), draft.index("雪"), draft.index("🙂"), 0):
+            with self.subTest(cursor=cursor):
+                editor.set_text(draft, cursor)
+                surface = compose(
+                    80,
+                    24,
+                    editor=editor,
+                    ascii_only=False,
+                    background=flat_background(80, 24),
+                )
+                screen.feed(surface.to_ansi(previous=previous).encode())
+                self.require(draft in surface.to_plain())
+                self.require(draft in screen.text())
+                self.equal((editor.text, editor.cursor), (draft, cursor))
+                if cursor == draft.index("雪"):
+                    index = surface.chars.index("雪")
+                    self.equal(surface.chars[index + 1], "")
+                    self.equal(
+                        surface.background[index : index + 2],
+                        [ray_chat_tui.CYAN] * 2,
+                    )
+                previous = surface
+
+    def test_wide_cursor_follows_its_glyph_across_wrap_boundaries(self) -> None:
+        """Move the marker with a wrapped wide cluster and use the narrow fallback."""
+        for text, cursor, width, lines, position, glyph in (
+            ("abcd雪", 4, 5, ("abcd", "雪"), (1, 0), "雪"),
+            ("ab c雪", 4, 5, ("ab ", "c雪"), (1, 1), "雪"),
+            ("雪", 0, 1, ("�",), (0, 0), "�"),
+        ):
+            with self.subTest(text=text, width=width):
+                editor = LineEditor(text)
+                editor.set_text(text, cursor)
+                view = ray_chat_tui.composer_view(editor, width)
+                self.equal(view.lines, lines)
+                self.equal((view.cursor_line, view.cursor_column), position)
+                self.equal(view.cursor_char, glyph)
 
     def test_composer_renders_multiple_rows_and_reclaims_them_after_resize(
         self,

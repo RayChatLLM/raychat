@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -51,6 +51,7 @@ class ModelProfile:
     instruction_role: str | None = None
     context_chars: int | None = None
     keep_recent_turns: int | None = None
+    inherits_primary: bool = False
 
     def __post_init__(self) -> None:
         """Validate routing, provider identity and optional context limits.
@@ -94,6 +95,27 @@ class ModelProfile:
 
         """
         return "*" in self.purposes or purpose in self.purposes
+
+    def current(self) -> ModelProfile:
+        """Capture the selected primary provider for newly prepared child work.
+
+        Returns
+        -------
+        ModelProfile
+            A fixed per-child provider, or this explicitly configured profile.
+
+        """
+        if not self.inherits_primary or self.process_spec is None:
+            return self
+        provider: object = self.chat_factory()
+        if not isinstance(provider, ModelProcessSpec):
+            return self
+        return replace(
+            self,
+            model=provider.model,
+            process_spec=provider,
+            inherits_primary=False,
+        )
 
     def public(self) -> ModelSummary:
         """Return prompt/UI metadata; credentials are never stored here.
@@ -168,7 +190,7 @@ class ModelRouter:
 
         """
         try:
-            return self._profiles[name]
+            return self._profiles[name].current()
         except KeyError:
             error_message = f"Unknown model profile: {name!r}"
             raise ValueError(error_message) from None
@@ -202,11 +224,11 @@ class ModelRouter:
                 raise ValueError(
                     error_message,
                 )
-            return selected
+            return selected.current()
 
         routed = self._routes.get(purpose)
         if routed is not None:
-            return self._profiles[routed]
+            return self._profiles[routed].current()
 
         candidates = [
             profile for profile in self._profiles.values() if profile.supports(purpose)
@@ -215,7 +237,7 @@ class ModelRouter:
             highest = max(profile.priority for profile in candidates)
             winners = [profile for profile in candidates if profile.priority == highest]
             if len(winners) == 1:
-                return winners[0]
+                return winners[0].current()
             names = ", ".join(sorted(profile.name for profile in winners))
             error_message = (
                 f"Ambiguous model profiles for purpose {purpose!r}: {names}. "
@@ -226,7 +248,7 @@ class ModelRouter:
             )
 
         if self.allow_default_fallback and self.default_profile is not None:
-            return self._profiles[self.default_profile]
+            return self._profiles[self.default_profile].current()
         error_message = f"No model profile supports purpose {purpose!r}."
         raise ValueError(error_message)
 
@@ -239,7 +261,9 @@ class ModelRouter:
             The result described above.
 
         """
-        return [self._profiles[name].public() for name in sorted(self._profiles)]
+        return [
+            self._profiles[name].current().public() for name in sorted(self._profiles)
+        ]
 
     def __len__(self) -> int:
         """Count the configured model profiles.

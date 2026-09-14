@@ -14,6 +14,18 @@ export FIREWORK_API_KEY="your-key"
 python3 -B -S raychat.py --workspace ./workspace
 ```
 
+Use `/models` in the TUI to fetch all model IDs from the configured provider's
+OpenAI-compatible `GET /models` endpoint. Type to filter; use arrows, Page Up/Down,
+Home/End, Enter, or click to select. Escape closes the menu. The selection applies
+to subsequent requests and survives session restoration, plugin reloads, and live
+core updates. In-flight requests finish with the model they already started using.
+New child chats using the primary profile inherit the selection; explicitly
+configured model profiles keep their own models.
+
+Self-Harness is disabled by default. The ordinary chat agent still has the core's
+source inspection, live-update, status, and recovery tools. See
+[live core updates](docs/LIVE_CORE.md) for activation and recovery controls.
+
 On Windows, use `py -3` in place of `python3`. The endpoint, model, environment
 variable names, plugin selection, limits, storage, and rendering settings live
 in [raychat.json](raychat.json). `--config PATH` selects another complete JSON
@@ -113,7 +125,7 @@ sessions, `--exec --resume` requires an explicit ID.
 | `optimization` | GEPA, evaluators, reports, demos, benchmarks, `/optimize`, `/incident` |
 | `context` | Instruction assembly and context compaction |
 | `plugin_manager` | `/plugins`, discovery, install, live reload and removal |
-| `self_harness` | Failure evidence, same-model proposals, isolated validation, gated live promotion |
+| `self_harness` | Optional, disabled by default: failure evidence, proposals, isolated validation |
 
 The default release profile installs independent archives from `plugin_catalog/`
 into the user plugin directory. Feature source projects live in `plugins/`;
@@ -137,8 +149,9 @@ and `/plugins catalog` and `/plugins search` to discover external packages. A fa
 replacement retains the working generation and conversation. Existing child
 chats adopt updated profiles at their own next job boundary.
 
-The [Self-Harness plugin](docs/SELF_HARNESS.md) proposes bounded prompt/plugin
-changes and validates them before live promotion. For example:
+When explicitly enabled in `raychat.json`, the [Self-Harness plugin](docs/SELF_HARNESS.md)
+proposes bounded prompt/plugin changes and validates them before live promotion. For
+example:
 
 ```text
 /self-harness --scores -- python3 -B -S evaluator.py
@@ -330,3 +343,8 @@ and the dynamic status footer update as plugins are loaded or removed.
 ## License
 
 RayChat is licensed under the [MIT License](LICENSE). Third-party notices, including the GEPA license, remain with their packages.
+
+Live core updates: `/update SOURCE` validates and activates a new application process
+when active work finishes. `/recover previous`, `/recover known-good`, and the
+supervisor’s **Ctrl+R** recovery screen retain access to saved releases. Self-Harness
+can propose actual core source changes. See [live updates and recovery](docs/LIVE_CORE.md).

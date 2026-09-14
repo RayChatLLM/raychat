@@ -8,7 +8,6 @@
     "chat_completions": "1.0.0",
     "context": "1.0.0",
     "filesystem": "1.0.0",
-    "self_harness": "1.0.0",
     "subagents": "1.0.0",
     "workflows": "1.0.0"
   },
