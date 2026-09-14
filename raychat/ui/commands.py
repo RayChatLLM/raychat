@@ -85,12 +85,15 @@ class CommandCompletion:
         self.choices: tuple[CommandChoice, ...] = ()
         self.selected = 0
         self.dismissed: str | None = None
+        self._text = ""
 
     def update(self, text: str, catalog: tuple[CommandChoice, ...]) -> None:
         """Refresh matching command names while preserving the selected command."""
         if self.dismissed != text:
             self.dismissed = None
         selected_name = self.choices[self.selected].name if self.choices else None
+        changed = text != self._text
+        self._text = text
         if (
             not text.startswith("/")
             or any(char.isspace() for char in text)
@@ -99,6 +102,8 @@ class CommandCompletion:
             self.choices = ()
             return
         self.choices = tuple(item for item in catalog if item.name.startswith(text[1:]))
+        if changed and any(choice.name == text[1:] for choice in self.choices):
+            selected_name = text[1:]
         self.selected = next(
             (
                 i

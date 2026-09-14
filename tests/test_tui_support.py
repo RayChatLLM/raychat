@@ -9,6 +9,10 @@ from pathlib import Path
 from unittest import mock
 
 from raychat.packages import read_manifest
+from raychat.ui.controller import FrameComposition, compose_frame
+from raychat.ui.renderer import RayTracer
+from raychat.ui.state import TuiState
+from raychat.ui.terminal import LineEditor
 from raychat.workers import TaskCancelled
 from tests.assertions import TypedTestCase
 from tests.plugin_support import create_runtime, package
@@ -16,10 +20,43 @@ from tests.tui_support import argument_fields, arguments
 
 if os.name == "posix":
     from tools.adversarial_agents_tui import BACKGROUND_COMMAND_PLUGIN
+    from tools.drive_tui import completed_reply
 
 
 class TuiFixtureTests(TypedTestCase):
     """Exercise TuiFixture behavior."""
+
+    def test_completed_reply_waits_for_worker_cleanup_in_rendered_composer(
+        self,
+    ) -> None:
+        """A visible done response cannot finish acceptance while work remains."""
+        if os.name != "posix":
+            self.skipTest("The terminal acceptance driver requires POSIX.")
+        state = TuiState()
+        state.start("AFTER_RESUME")
+        state.apply_worker_event("done", {"message": "ANSWER_AFTER_RESUME"})
+        screens = [
+            compose_frame(
+                RayTracer(),
+                state,
+                LineEditor(),
+                FrameComposition(
+                    width=110,
+                    height=30,
+                    moment=0,
+                    model="fixture",
+                    workspace=".",
+                    agent_busy=busy,
+                ),
+            ).to_plain()
+            for busy in (True, False)
+        ]
+        working, idle = screens
+        self.require("[DONE]" in working)
+        self.require("WORKING" in working)
+        self.require(not completed_reply(working, "previous", "ANSWER_AFTER_RESUME"))
+        self.require(completed_reply(idle, working, "ANSWER_AFTER_RESUME"))
+        self.require(not completed_reply(idle, idle, "ANSWER_AFTER_RESUME"))
 
     def test_arguments_never_resolves_operator_home(self) -> None:
         """Verify arguments never resolves operator home."""

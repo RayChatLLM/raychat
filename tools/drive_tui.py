@@ -62,6 +62,27 @@ def _reply_contains(body: str, expected: str) -> bool:
     return reply is not None and expected in latest_input[reply.start() :]
 
 
+def completed_reply(screen: str, previous: str, expected: str) -> bool:
+    """Require a new visible response after its worker has finished cleanup.
+
+    Returns
+    -------
+    bool
+        Whether the response, idle composer and completed status are visible.
+
+    """
+    header, _, body = screen.partition("\n")
+    composer = body.partition("─ MESSAGE ")[2]
+    composer_heading = composer.partition("\n")[0]
+    return (
+        screen != previous
+        and _reply_contains(body, expected)
+        and any(state in header for state in ("[DONE]", "[ERROR]", "[IDLE]"))
+        and "WORKING" not in composer_heading
+        and re.search(r"│ \u203a\s*│", composer) is not None
+    )
+
+
 class TerminalChat:
     """Drive a real application through terminal bytes and reconstructed output."""
 
@@ -225,14 +246,7 @@ class TerminalChat:
         while time.monotonic() < deadline:
             self.poll()
             screen = self.screen()
-            header, _, body = screen.partition("\n")
-            composer = body.partition("─ MESSAGE ")[2]
-            if (
-                screen != previous
-                and _reply_contains(body, expected)
-                and any(state in header for state in ("[DONE]", "[ERROR]", "[IDLE]"))
-                and re.search(r"│ \u203a\s*│", composer)
-            ):
+            if completed_reply(screen, previous, expected):
                 return
             if self.process.poll() is not None:
                 break

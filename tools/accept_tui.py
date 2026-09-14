@@ -256,7 +256,7 @@ def _resume_navigation(case: Case) -> None:
         chat.wait("ROOT_BETA")
         chat.send(b"\x1b[B\r")
         chat.wait("ANSWER_AFTER_STOP")
-        chat.command("AFTER_RESUME", "ANSWER_AFTER_RESUME")
+        chat.command_complete("AFTER_RESUME", "ANSWER_AFTER_RESUME")
         case.checks.append("resume picker selects a usable session")
         _resume_command_menu(case, chat)
     finally:

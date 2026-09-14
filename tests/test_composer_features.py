@@ -172,6 +172,41 @@ class CompletionTests(TypedTestCase):
         completion.update("/i", ())
         self.require(not completion.choices)
 
+    def test_exact_disabled_command_does_not_select_enabled_prefix_match(self) -> None:
+        """Typing /resume cannot silently become /resume-queue while work ends."""
+        completion = CommandCompletion()
+        catalog = (
+            CommandChoice("resume", "Resume a session", enabled=False),
+            CommandChoice("resume-queue", "Resume queued work"),
+        )
+        editor = LineEditor()
+        for length in range(1, len("/resume") + 1):
+            editor.set_text("/resume"[:length])
+            completion.update(editor.text, catalog)
+        self.equal(completion.choices[completion.selected].name, "resume")
+        self.require(not completion.accept(editor))
+        self.equal(editor.text, "/resume")
+        completion.update(
+            editor.text,
+            (CommandChoice("resume", "Resume a session"), catalog[1]),
+        )
+        self.require(completion.accept(editor))
+        self.equal(editor.text, "/resume ")
+
+    def test_exact_command_allows_explicit_selection_of_longer_match(self) -> None:
+        """Refreshing the menu preserves a deliberate arrow-key selection."""
+        completion = CommandCompletion()
+        catalog = (
+            CommandChoice("resume", "Resume a session", enabled=False),
+            CommandChoice("resume-queue", "Resume queued work"),
+        )
+        editor = LineEditor("/resume")
+        completion.update(editor.text, catalog)
+        completion.move(1)
+        completion.update(editor.text, catalog)
+        self.require(completion.accept(editor))
+        self.equal(editor.text, "/resume-queue ")
+
     def test_child_catalog_uses_child_session_and_root_application_commands(
         self,
     ) -> None:

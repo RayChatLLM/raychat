@@ -120,11 +120,11 @@ def run(root: Path, output: Path) -> dict[str, object]:
     candidate = output / "source"
     _source(root, candidate)
     controller = candidate / "raychat/ui/controller.py"
+    source = controller.read_text(encoding="utf-8")
+    title = 'title = "CHAT"'
+    require(source.count(title) == 1, "Expected one transcript title to replace")
     controller.write_text(
-        controller.read_text(encoding="utf-8").replace(
-            "Select transcript text to copy.",
-            "LIVE_CORE_V2. Select text to copy.",
-        ),
+        source.replace(title, f'title = "CHAT | {_MARKER}"'),
         encoding="utf-8",
     )
     chat = TerminalChat(root, arguments)
