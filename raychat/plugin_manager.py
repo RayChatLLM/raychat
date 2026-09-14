@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.client import HTTPConnection, HTTPSConnection
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, TypedDict
 from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunparse
 from urllib.request import getproxies, proxy_bypass
@@ -390,6 +390,12 @@ def read_json(path: str | Path, default: object) -> object:
         error_message = "Plugin state exceeds its size limit."
         raise PluginError(error_message)
     return json_object(data)
+
+
+def _has_url_scheme(location: str) -> bool:
+    # URL parsing treats a Windows drive letter (C:) as a scheme. Keep drive
+    # paths local, including drive-relative paths and UNC shares.
+    return not PureWindowsPath(location).drive and bool(urlparse(location).scheme)
 
 
 def _validate_url(url: str) -> ParseResult:
@@ -967,13 +973,16 @@ class PackageManager:
 
     @staticmethod
     def _catalog_url(catalog: str, location: str) -> str:
-        if urlparse(location).scheme:
+        if _has_url_scheme(location):
             return location
-        return (
-            urljoin(catalog, location)
-            if urlparse(catalog).scheme
-            else str(Path(catalog).parent / location)
-        )
+        if _has_url_scheme(catalog):
+            return urljoin(catalog, location)
+        if PureWindowsPath(location).drive:
+            return location
+        windows = PureWindowsPath(catalog)
+        if windows.drive:
+            return str(windows.parent / location)
+        return str(Path(catalog).parent / location)
 
     def _prior_releases(self, catalog: str | None) -> set[tuple[str, str, str, str]]:
         if catalog is None:
@@ -995,14 +1004,18 @@ class PackageManager:
             for item in records
         }
 
-    def _catalog_records(self, url: str) -> list[CatalogRecord]:
-        cache = self._catalog_cache(url)
+    def _catalog_records(self, location: str) -> list[CatalogRecord]:
+        cache = self._catalog_cache(location)
         try:
-            data = download(url) if urlparse(url).scheme else read_bytes(url)
+            data = (
+                download(location)
+                if _has_url_scheme(location)
+                else read_bytes(location)
+            )
             value = json_object(data)
-            self._stale_catalogs.discard(url)
+            self._stale_catalogs.discard(location)
         except OSError:
-            self._stale_catalogs.add(url)
+            self._stale_catalogs.add(location)
             value = read_json(cache, None)
             if value is None:
                 raise
@@ -1118,7 +1131,7 @@ class PackageManager:
     def _stage(self, source: str, target: Path) -> tuple[Manifest, PackageRecord]:
         resolved, expected = self.resolve_source(source)
         path = Path(resolved)
-        if not urlparse(resolved).scheme and path.is_dir():
+        if not _has_url_scheme(resolved) and path.is_dir():
             members = files(path)
             for name, data in members.items():
                 destination = target / name
@@ -1126,7 +1139,7 @@ class PackageManager:
                 destination.write_bytes(data)
             archive_hash = hashlib.sha256(pack(path)).hexdigest()
         else:
-            data = download(resolved) if urlparse(resolved).scheme else read_bytes(path)
+            data = download(resolved) if _has_url_scheme(resolved) else read_bytes(path)
             archive_hash = hashlib.sha256(data).hexdigest()
             if expected and archive_hash != expected["sha256"]:
                 error_message = "Catalog package digest does not match the download."

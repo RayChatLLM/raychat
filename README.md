@@ -205,7 +205,6 @@ Enter these commands in chat; automation can pass the same strings to `--exec`:
 The active GEPA source is adapted from the pinned upstream launch revision.
 Verification reports its current source hash and import audit, upstream
 provenance, unchanged prompt templates, and the deterministic transcript oracle.
-Read [GEPA provenance](docs/GEPA_PORT.md) for the scope of those checks.
 
 ## Repository layout
 
