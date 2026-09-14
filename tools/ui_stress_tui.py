@@ -13,6 +13,7 @@ import re
 import time
 import traceback
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
@@ -31,6 +32,7 @@ from .acceptance_support import (
     verification_paths,
     write_report,
 )
+from .drive_tui import completed_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
     from .drive_tui import TerminalChat
 
 _SMALL_INPUT_LIMIT = 48
+_MIN_INTERIOR_ROWS = 3
 
 PROVIDER = (
     "from __future__ import annotations\nimport argparse\nimport ha"
@@ -137,6 +140,39 @@ class _ObservedTerminal(Protocol):
 
 class _PasteTerminal(_ObservedTerminal, Protocol):
     def wait(self, text: str, seconds: float = 15) -> None: ...
+
+
+class _ClipboardTerminal(_ObservedTerminal, Protocol):
+    output: bytearray
+
+
+def wait_for_screen(
+    chat: _ObservedTerminal,
+    observed: Callable[[str], bool],
+    description: str,
+    seconds: float = 15,
+) -> str:
+    """Observe a rendered state without assuming a fixed frame or input latency.
+
+    Returns
+    -------
+    str
+        The first visible screen satisfying the required state.
+
+    Raises
+    ------
+    AssertionError
+        The required state was not rendered before the deadline.
+
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        chat.poll()
+        screen = chat.screen()
+        if observed(screen):
+            return screen
+    message = f"Missing {description}\n{chat.screen()}"
+    raise AssertionError(message)
 
 
 def close_picker(
@@ -370,7 +406,7 @@ def inputs(case: Case, report: Report) -> None:
         chat.wait("Main chat")
         original = "ASCII_é漢🙂"
         paste(chat, original, submit=False)
-        settle(chat)
+        chat.wait("ASCII_")
         require(
             chat.screen().isascii(),
             "ui_stress_tui: acceptance check at original line 210",
@@ -420,6 +456,7 @@ def busy(case: Case, report: Report) -> None:
         chat.send("QUEUED_FOLLOWUP\r")
         chat.wait("QUEUED")
         chat.send("DRAFT_STAYS")
+        chat.wait("DRAFT_STAYS")
         (case.work / "hold.release").touch()
         chat.wait(expected("QUEUED_FOLLOWUP"))
         require(
@@ -466,62 +503,186 @@ def cell_width(text: str) -> int:
     )
 
 
-def clipboard(case: Case, report: Report) -> None:
-    """Verify Unicode copying after scrolling and invalidation after resize.
+def unicode_row_ids(screen: str) -> tuple[int, ...]:
+    """Read complete fixture rows in their visible order.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Numbered rows whose complete Unicode payload has been painted.
+
+    """
+    return tuple(
+        int(match[1])
+        for match in re.finditer(r"QA_ROW_(\d{3}) 漢🙂é selectable text", screen)
+    )
+
+
+def scroll_unicode_page(chat: _ObservedTerminal, distance: int) -> None:
+    """Observe every scrolled fixture row before deriving selection coordinates."""
+    previous = unicode_row_ids(chat.screen())
+    require(previous and min(previous) >= distance, "Insufficient fixture scrollback")
+    expected_rows = tuple(number - distance for number in previous)
+    chat.send(b"\x1b[5~")
+    wait_for_screen(
+        chat,
+        lambda screen: unicode_row_ids(screen) == expected_rows,
+        f"complete scrolled rows {expected_rows!r}",
+    )
+
+
+@dataclass(frozen=True)
+class CopyTarget:
+    """Identify complete visible text in one interior transcript row."""
+
+    text: str
+    x: int
+    y: int
+
+
+def copy_target(screen: str) -> CopyTarget:
+    """Select an interior Unicode row without triggering edge drag scrolling.
+
+    Returns
+    -------
+    CopyTarget
+        Text and one-based terminal coordinates from the observed viewport.
+
+    """
+    rows = screen.splitlines()
+    candidates = [
+        (index, match)
+        for index, row in enumerate(rows)
+        if (match := re.search(r"QA_ROW_\d{3} 漢🙂é selectable text", row))
+    ]
+    require(
+        len(candidates) >= _MIN_INTERIOR_ROWS,
+        "No interior complete Unicode row: " + screen,
+    )
+    index, match = candidates[len(candidates) // 2]
+    return CopyTarget(
+        match.group(),
+        cell_width(rows[index][: match.start()]) + 1,
+        index + 1,
+    )
+
+
+def rendered_size(screen: str, columns: int, rows: int) -> bool:
+    """Distinguish a rendered composer border from an eagerly resized emulator.
+
+    Returns
+    -------
+    bool
+        Whether the composer has been painted at the requested terminal dimensions.
+
+    """
+    lines = screen.splitlines()
+    return len(lines) == rows and lines[-2] == "╰" + "─" * (columns - 2) + "╯"
+
+
+def clipboard_values(output: bytes) -> list[str]:
+    """Decode complete OSC52 writes while leaving split payloads pending.
+
+    Returns
+    -------
+    list[str]
+        Exact UTF-8 clipboard contents in emission order.
+
+    """
+    return [
+        base64.b64decode(match[1], validate=True).decode()
+        for match in re.finditer(rb"\x1b\]52;c;([^\x07]*)\x07", output)
+    ]
+
+
+def wait_for_copies(chat: _ClipboardTerminal, expected_values: list[str]) -> None:
+    """Require exact clipboard writes, including a later FIFO completion barrier.
 
     Raises
     ------
     AssertionError
-        The transcript has no complete selectable Unicode row.
+        Clipboard output is missing or differs from the expected sequence.
 
     """
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        chat.poll()
+        actual = clipboard_values(bytes(chat.output))
+        if len(actual) >= len(expected_values):
+            require(
+                actual == expected_values,
+                f"Clipboard expected {expected_values!r}; got {actual!r}",
+            )
+            return
+    message = (
+        f"Missing clipboard writes: expected {expected_values!r}; "
+        f"got {clipboard_values(bytes(chat.output))!r}\n{chat.screen()}"
+    )
+    raise AssertionError(message)
+
+
+def _copy_target(chat: TerminalChat, target: CopyTarget) -> None:
+    chat.drag(target.x, target.y, target.x + cell_width(target.text) - 1, target.y)
+
+
+def _resize_selection(chat: TerminalChat, selected: CopyTarget) -> None:
+    chat.send(b"\x1b")
+    wait_for_screen(chat, lambda screen: "SELECTED" not in screen, "cleared selection")
+    chat.send(
+        f"\x1b[<0;{selected.x};{selected.y}M\x1b[<32;{selected.x + 1};{selected.y}M",
+    )
+    chat.wait("SELECTED")
+    chat.resize(76, 20)
+    screen = wait_for_screen(
+        chat,
+        lambda screen: rendered_size(screen, 76, 20),
+        "rendered 76-column resize",
+    )
+    require("SELECTED" not in screen, "Resize retained an invalid selection: " + screen)
+    chat.send(f"\x1b[<0;{selected.x + cell_width(selected.text) - 1};{selected.y}m")
+    # A subsequent valid copy drains the same FIFO worker. Its distinct payload
+    # proves that the invalidated release did not enqueue any clipboard write.
+    visible = copy_target(screen)
+    acknowledgement = CopyTarget(
+        visible.text.removesuffix(" selectable text"),
+        visible.x,
+        visible.y,
+    )
+    _copy_target(chat, acknowledgement)
+    wait_for_copies(chat, [selected.text, acknowledgement.text])
+    chat.resize(110, 30)
+    wait_for_screen(
+        chat,
+        lambda screen: rendered_size(screen, 110, 30),
+        "restored 110-column resize",
+    )
+
+
+def clipboard(case: Case, report: Report) -> None:
+    """Verify Unicode copying after scrolling and invalidation after resize."""
     chat = case.chat()
     try:
         chat.wait("Main chat", 30)
-        chat.command("LONG_OUTPUT", "QA_ROW_054")
-        for _ in range(3):
-            chat.send(b"\x1b[5~")
-            settle(chat, 0.15)
-        rows = chat.screen().splitlines()
-        y = next(i for i, line in enumerate(rows) if "QA_ROW_" in line)
-        match = re.search(r"QA_ROW_\d{3} 漢🙂é selectable text", rows[y])
-        if match is None:
-            message = "No complete selectable Unicode row was rendered: " + rows[y]
-            raise AssertionError(message)
-        selected = match.group()
-        x = cell_width(rows[y][: match.start()])
-        width = cell_width(selected)
-        chat.drag(x + 1, y + 1, x + width, y + 1)
-        chat.wait("Sent to terminal clipboard")
-        encoded = matches(
-            re.compile(rb"\x1b\]52;c;([^\x07]+)\x07"),
-            bytes(chat.output),
-        )[-1]
-        require(
-            base64.b64decode(encoded).decode() == selected,
-            "ui_stress_tui: acceptance check at original line 300",
+        chat.command_complete("LONG_OUTPUT", "QA_ROW_054")
+        distance = integer_field(
+            object_field(read_object(case.config)["tui"], "tui")["keyboard_page_lines"],
+            "keyboard_page_lines",
         )
+        for _ in range(3):
+            scroll_unicode_page(chat, distance)
+        selected = copy_target(chat.screen())
+        _copy_target(chat, selected)
+        wait_for_copies(chat, [selected.text])
+        chat.wait("Sent to terminal clipboard")
         report["checks"].append(
             "Unicode glyph/combining selection copies exactly after scrolling",
         )
-        before = len(matches(re.compile(rb"\x1b\]52;"), bytes(chat.output)))
-        chat.send(f"\x1b[<0;{x + 1};{y + 1}M")
-        settle(chat)
-        chat.resize(76, 20)
-        settle(chat)
-        chat.send(f"\x1b[<0;{x + width};{y + 1}m")
-        settle(chat)
-        require(
-            len(matches(re.compile(rb"\x1b\]52;"), bytes(chat.output))) == before,
-            "ui_stress_tui: acceptance check at original line 309",
-        )
+        _resize_selection(chat, selected)
         report["checks"].append(
             "resize invalidates selection instead of copying replacement cells",
         )
-        chat.resize(110, 30)
-        settle(chat)
         chat.command("/clear", "IDLE")
-        chat.command("POST_CLEAR", expected("POST_CLEAR"))
+        chat.command_complete("POST_CLEAR", expected("POST_CLEAR"))
         require(
             all("LONG_OUTPUT" not in m["content"] for m in requests(case)[-1]),
             "ui_stress_tui: acceptance check at original line 317",
@@ -533,13 +694,53 @@ def clipboard(case: Case, report: Report) -> None:
         chat.close(case.output / "clipboard.ansi")
 
 
+def listed_session_ids(screen: str) -> list[str]:
+    """Read identifiers only from the latest saved-session command response.
+
+    Returns
+    -------
+    list[str]
+        Whole identifier rows following the latest /sessions input and reply label.
+
+    """
+    _, marker, latest = screen.rpartition("\n│ YOU")
+    reply = re.search(r"\n│ (?:AGENT|SYSTEM|ERROR)\b", latest)
+    if (
+        not marker
+        or reply is None
+        or not re.search(r"(?m)^│\s+/sessions\s+│$", latest[: reply.start()])
+    ):
+        return []
+    return matches(
+        re.compile(r"(?m)^│\s+([0-9a-f]{32})\s+│$"),
+        latest[reply.end() :],
+    )
+
+
+def _saved_session_id(chat: TerminalChat) -> str:
+    previous = chat.screen()
+    chat.send("/sessions\t\r")
+
+    def response_ready(screen: str) -> bool:
+        identifiers = listed_session_ids(screen)
+        return bool(identifiers) and completed_reply(screen, previous, identifiers[0])
+
+    screen = wait_for_screen(chat, response_ready, "completed /sessions response")
+    identifiers = listed_session_ids(screen)
+    require(
+        len(identifiers) == 1,
+        f"Expected one saved fixture session: {identifiers!r}",
+    )
+    return identifiers[0]
+
+
 def saved(case: Case, report: Report) -> None:
     """Check completed-turn forks and both in-chat and startup session selection."""
     chat = case.chat(persist=True)
     first_id = ""
     try:
         chat.wait("Main chat", 30)
-        chat.command("BRANCH_ALPHA", expected("BRANCH_ALPHA"))
+        chat.command_complete("BRANCH_ALPHA", expected("BRANCH_ALPHA"))
         chat.send("/tree\t\r")
         deadline = time.monotonic() + 15
         while (
@@ -551,10 +752,10 @@ def saved(case: Case, report: Report) -> None:
         commits = matches(re.compile(r"[0-9a-f]{32}"), chat.screen())
         require(commits, chat.screen())
         first_commit = commits[-1]
-        chat.command("BRANCH_BETA", expected("BRANCH_BETA"))
+        chat.command_complete("BRANCH_BETA", expected("BRANCH_BETA"))
         chat.command("/fork nope", "Fork requires a completed-turn entry ID.")
         chat.command("/fork " + first_commit, "Forked at")
-        chat.command("BRANCH_GAMMA", expected("BRANCH_GAMMA"))
+        chat.command_complete("BRANCH_GAMMA", expected("BRANCH_GAMMA"))
         context = requests(case)[-1]
         require(
             any(m["content"] == "BRANCH_ALPHA" for m in context),
@@ -570,13 +771,9 @@ def saved(case: Case, report: Report) -> None:
                 " selected turn"
             ),
         )
-        chat.command("/sessions", "[DONE")
-        settle(chat)
-        ids = matches(re.compile(r"[0-9a-f]{32}"), chat.screen())
-        require(ids, "ui_stress_tui: acceptance check at original line 355")
-        first_id = ids[-1]
+        first_id = _saved_session_id(chat)
         chat.command("/resume bad-id", "Invalid session ID")
-        chat.command("AFTER_BAD_RESUME", expected("AFTER_BAD_RESUME"))
+        chat.command_complete("AFTER_BAD_RESUME", expected("AFTER_BAD_RESUME"))
         report["checks"].append("invalid resume keeps the current conversation usable")
     finally:
         chat.close(case.output / "fork.ansi")
@@ -587,9 +784,9 @@ def _resume_saved(case: Case, report: Report, first_id: str) -> None:
     chat = case.chat(persist=True)
     try:
         chat.wait("Main chat")
-        chat.command("SECOND_SESSION", expected("SECOND_SESSION"))
+        chat.command_complete("SECOND_SESSION", expected("SECOND_SESSION"))
         chat.command("/resume " + first_id, "Resumed")
-        chat.command("CONTINUED_FIRST", expected("CONTINUED_FIRST"))
+        chat.command_complete("CONTINUED_FIRST", expected("CONTINUED_FIRST"))
         require(
             any(m["content"] == "BRANCH_GAMMA" for m in requests(case)[-1]),
             "ui_stress_tui: acceptance check at original line 368",
