@@ -269,7 +269,7 @@ class PackageLocationTests(PackageSystemFixture):
             return location, None
 
         def read_archive(path: str | Path) -> bytes:
-            self.equal(PureWindowsPath(path), PureWindowsPath(location))
+            self.equal(PureWindowsPath(str(path)), PureWindowsPath(location))
             return data
 
         with (
