@@ -127,14 +127,40 @@ def settle(chat: TerminalChat, seconds: float = 0.35) -> None:
         chat.poll()
 
 
-class _PasteTerminal(Protocol):
+class _ObservedTerminal(Protocol):
     def send(self, text: str | bytes) -> None: ...
 
     def poll(self, seconds: float = 0.04) -> None: ...
 
     def screen(self) -> str: ...
 
+
+class _PasteTerminal(_ObservedTerminal, Protocol):
     def wait(self, text: str, seconds: float = 15) -> None: ...
+
+
+def close_picker(
+    chat: _ObservedTerminal,
+    title: str,
+    seconds: float = 15,
+) -> None:
+    """Send Escape and observe closure after input decoding and presentation.
+
+    Raises
+    ------
+    AssertionError
+        The picker was not open or remained visible through the deadline.
+
+    """
+    require(title in chat.screen(), f"Picker is not open: {title!r}")
+    chat.send(b"\x1b")
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        chat.poll()
+        if title not in chat.screen():
+            return
+    message = f"Picker did not close: {title!r}\n{chat.screen()}"
+    raise AssertionError(message)
 
 
 def paste(
@@ -412,12 +438,7 @@ def busy(case: Case, report: Report) -> None:
             "QA empty picker" in chat.screen(),
             "ui_stress_tui: acceptance check at original line 249",
         )
-        chat.send(b"\x1b")
-        settle(chat)
-        require(
-            "QA empty picker" not in chat.screen(),
-            "ui_stress_tui: acceptance check at original line 252",
-        )
+        close_picker(chat, "QA empty picker")
         chat.command("AFTER_EMPTY_PICKER", expected("AFTER_EMPTY_PICKER"))
         report["checks"].append(
             "empty menu tolerates navigation/Enter and Escape returns to usable chat",
