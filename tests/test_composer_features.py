@@ -22,7 +22,7 @@ from raychat.ui.controller import (
 from raychat.ui.feedback import footer_text
 from raychat.ui.message_queue import MessageQueue
 from raychat.ui.renderer import RayTracer
-from raychat.ui.selection import TextSelection
+from raychat.ui.selection import SelectionViewport, TextSelection
 from raychat.ui.state import TuiState, display_width
 from raychat.ui.terminal import KeyDecoder, LineEditor, TerminalSession
 from tests.assertions import TypedTestCase
@@ -389,6 +389,58 @@ class StatusTests(TypedTestCase):
 
 class ClipboardTests(TypedTestCase):
     """Check clipboard behavior through concrete contracts."""
+
+    def test_stationary_edge_drag_scrolls_both_directions_until_release(self) -> None:
+        """A held edge continues scrolling, but moving inside or releasing stops it."""
+        rows = tuple(f"Row {index:03} 你é🙂" for index in range(100))
+        viewport = SelectionViewport(2, 3, 30, 10, 40, rows)
+        selection = TextSelection()
+        selection.press(2, 7, viewport)
+        selection.point(5, 2, viewport)
+        self.equal(selection.scroll_step(viewport, 1), 0)
+        self.equal(selection.scroll_step(viewport, 1.05), 0)
+        self.equal(selection.scroll_step(viewport, 1.11), 3)
+        self.equal(selection.scroll_step(viewport, 1.12), 0)
+        self.equal(selection.scroll_step(viewport, 1.22), 3)
+        selection.point(5, 8, viewport)
+        self.equal(selection.scroll_step(viewport, 2), 0)
+        selection.point(5, 20, viewport)
+        self.equal(selection.scroll_step(viewport, 3), 0)
+        self.equal(selection.scroll_step(viewport, 3.11), -3)
+        selection.point(5, 20, viewport, released=True)
+        self.equal(selection.scroll_step(viewport, 4), 0)
+        self.require(selection.pointer is None)
+
+    def test_scrolled_pointer_selects_all_intermediate_unicode_rows(self) -> None:
+        """Scrolling remaps the endpoint while preserving the original anchor."""
+        rows = tuple(f"Row {index:03} 你é🙂" for index in range(100))
+        for start, end, first, last in ((10, 70, 14, 79), (80, 20, 20, 84)):
+            with self.subTest(start=start, end=end):
+                selection = TextSelection()
+                viewport = SelectionViewport(2, 3, 30, 10, start, rows)
+                y = 12 if end > start else 3
+                x = 31 if end > start else 2
+                selection.press(2 if end > start else 31, 7, viewport)
+                selection.point(x, y, viewport)
+                scrolled = SelectionViewport(2, 3, 30, 10, end, rows)
+                selection.point(x, y, scrolled, released=True)
+                self.equal(selection.text(), "\n".join(rows[first : last + 1]))
+                self.require(not selection.dragging)
+
+    def test_wheel_projection_and_appended_rows_remain_selectable(self) -> None:
+        """A stationary pointer includes newly revealed and newly appended rows."""
+        rows = tuple(f"Row {index:03} 你é🙂" for index in range(30))
+        selection = TextSelection()
+        viewport = SelectionViewport(2, 3, 30, 10, 10, rows)
+        selection.press(2, 5, viewport)
+        scrolled = SelectionViewport(2, 3, 30, 10, 16, rows)
+        selection.point(31, 5, scrolled)
+        self.equal(selection.text(), "\n".join(rows[12:19]))
+        extended = (*rows, "Appended 雪🙂")
+        selection.reconcile(extended, 30)
+        scrolled = SelectionViewport(2, 3, 30, 10, 21, extended)
+        selection.point(31, 12, scrolled, released=True)
+        self.equal(selection.text(), "\n".join(extended[12:]))
 
     def test_multiline_reverse_scrolled_and_unicode_selection_exact_bytes(self) -> None:
         """Check multiline reverse scrolled and unicode selection exact bytes."""

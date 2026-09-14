@@ -30,7 +30,15 @@ from raychat.type_support import override
 from raychat.ui import controller as ray_chat_tui
 from raychat.ui.message_queue import MessageQueue
 from raychat.ui.renderer import RayTracer, Surface
-from raychat.ui.state import Phase, Rect, TuiSnapshot, TuiState
+from raychat.ui.selection import cell_slice
+from raychat.ui.state import (
+    LayoutOptions,
+    Phase,
+    Rect,
+    TuiSnapshot,
+    TuiState,
+    calculate_layout,
+)
 from raychat.ui.terminal import (
     FrameMetrics,
     FrameTick,
@@ -103,6 +111,7 @@ class _CompositionOptions(TypedDict, total=False):
     background: Surface | None
     ascii_only: bool
     show_system: bool
+    model: str
 
 
 def compose(width: int, height: int, **options: Unpack[_CompositionOptions]) -> Surface:
@@ -122,7 +131,7 @@ def compose(width: int, height: int, **options: Unpack[_CompositionOptions]) -> 
             width=width,
             height=height,
             moment=0.25,
-            model=MODEL,
+            model=options.get("model", MODEL),
             workspace=WORKSPACE,
             statuses=(
                 StatusRecord(
@@ -496,6 +505,41 @@ class FrameCompositionTests(TypedTestCase):
         self.require(("SKILLS") in (wide_text))
         self.require(("MEMORY") in (wide_text))
         self.require(("RAYS") in (wide_text))
+
+    def test_system_panel_wraps_the_complete_model_identifier(self) -> None:
+        """Recover every model glyph from the actual panel, excluding the header."""
+        models = (
+            "accounts/provider/models/example-lightning-large-30b-a3b",
+            "vendor/" + "long-model-segment-" * 15 + "終端e\u0301",
+        )
+        for width in (120, 160):
+            for model in models:
+                with self.subTest(width=width, model=model):
+                    surface = compose(
+                        width,
+                        40,
+                        model=model,
+                        show_system=True,
+                        ascii_only=False,
+                    )
+                    layout = calculate_layout(
+                        width,
+                        40,
+                        options=LayoutOptions(show_system=True),
+                    )
+                    sidebar = layout.sidebar
+                    if sidebar is None:
+                        self.fail("SYSTEM panel must be visible in this test.")
+                    rows = [
+                        cell_slice(line, sidebar.x + 2, sidebar.right - 2).strip()
+                        for line in surface.to_plain().splitlines()[
+                            sidebar.y + 1 : sidebar.bottom - 1
+                        ]
+                    ]
+                    rendered = rows[rows.index("MODEL") + 1 : rows.index("WORKSPACE")]
+                    self.equal("".join(rendered), model)
+                    self.require(len(rendered) > 1)
+                    self.require("RAYS" in rows)
 
     def test_transcript_suppresses_internal_action_and_result_rows(self) -> None:
         """Check transcript suppresses internal action and result rows."""

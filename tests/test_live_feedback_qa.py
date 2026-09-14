@@ -49,6 +49,7 @@ class FeedbackBridge(CoreBridge):
         while not self.messages.empty():
             self.messages.get_nowait()
         self.active = True
+        self.size_received = True
         self.accept_claims = True
         self.controls: list[dict[str, object]] = []
 
@@ -159,6 +160,30 @@ def _completion_history(*, pending: bool) -> list[dict[str, object]]:
 
 class LiveDriverCompletionTests(TypedTestCase):
     """Keep live-model acceptance from mistaking submission for a final answer."""
+
+    def test_host_evidence_completion_matches_the_current_review(self) -> None:
+        """Accept committed factual reports but reject another request's report."""
+        history = _completion_history(pending=False)
+        feedback = {
+            "request": "Restore the field",
+            "status": "activated",
+            "request_id": "current",
+        }
+        history[-2]["content"] = "CORE_UPDATE_RESULT: " + json.dumps(feedback)
+        report = {
+            "action": "done",
+            "message": "Activated. Visual outcome unverified.",
+            "host_generated": True,
+            "pending": False,
+            "review_complete": True,
+            "request_id": "current",
+        }
+        history[-1]["content"] = json.dumps(report)
+        state: dict[str, object] = {"state": {"session": {"history": history}}}
+        self.require(completed_review(state, "Restore the field", 0))
+        report["request_id"] = "previous"
+        history[-1]["content"] = json.dumps(report)
+        self.require(not completed_review(state, "Restore the field", 0))
 
     def test_redundant_recovery_waits_for_final_review_completion(self) -> None:
         """Allow repeated recoveries while refusing each synthetic pending reply."""

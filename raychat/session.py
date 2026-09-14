@@ -97,6 +97,10 @@ class _CoreReview(Protocol):
         """Acknowledge that the review's response has committed successfully."""
         ...
 
+    def review_completion(self, outcome: Mapping[str, object]) -> dict[str, object]:
+        """Report host evidence separately from an unverified model assessment."""
+        ...
+
 
 class _HistoryRecord(TypedDict):
     role: str
@@ -314,6 +318,7 @@ class AgentSession:
         self._next_prompt_id = 1
         self._sending = self._turn_open = False
         self._core_review = False
+        self._core_editing = False
         self._core_result_id = ""
         self._state_lock = threading.RLock()
         self._rollback_state: dict[str, dict[str, object]] | None = None
@@ -340,12 +345,13 @@ class AgentSession:
     def allowed_actions(self) -> frozenset[str]:
         """Configured actions still available in the active host."""
         available = frozenset(self.runtime.tools) | {"done"}
-        if self._core_review:
+        if self._core_review or self._core_editing:
             available &= {
                 "core_source",
                 "core_update",
                 "core_recover",
                 "core_status",
+                "core_verify",
                 "done",
             }
         return (
@@ -607,6 +613,7 @@ class AgentSession:
             with self._state_lock:
                 self._sending = False
                 self._core_review = False
+                self._core_editing = False
                 self._core_result_id = ""
 
     def checkpoint(self, owner: str) -> None:
@@ -698,11 +705,6 @@ class AgentSession:
         str
             The validated completion message from the final done action.
 
-        Raises
-        ------
-        RuntimeError
-            When the model exhausts the configured step limit.
-
         """
         state = _SendState(
             prompt_id=self._next_prompt_id,
@@ -739,9 +741,32 @@ class AgentSession:
                             state.prompt_id,
                         )
                         return self._complete_prompt(state, completion)
-                request_messages = self._request_messages(state.prompt_id)
-            error_message = f"Stopped at {max_steps} model turns without a done action."
-            raise RuntimeError(error_message)
+                if max_steps is None or state.step < max_steps:
+                    request_messages = self._request_messages(state.prompt_id)
+            return self._complete_exhausted_review(state)
+
+    def _complete_exhausted_review(self, state: _SendState) -> str:
+        message = f"Stopped at {state.max_steps} model turns without a done action."
+        unfinished: Action = {"action": "done", "message": message}
+        completion = self._review_completion(unfinished)
+        if completion is unfinished:
+            raise RuntimeError(message)
+        self._check_cancel(state.cancel_check)
+        completion.update(
+            review_exhausted=True,
+            stop_reason="review_turn_limit",
+            model_turns=state.step,
+            message=text_field(completion["message"], "review completion")
+            + f"\nAutomatic review stopped after {state.step} model turns. "
+            "Awaiting your next instruction.",
+        )
+        self._add_history(
+            "assistant",
+            json.dumps(completion),
+            "assistant",
+            state.prompt_id,
+        )
+        return self._complete_prompt(state, completion)
 
     def _claim_core_result(self, prompt: str, cancel_check: CancelCheck | None) -> None:
         bridge = self.runtime.services.get("core_updates")
@@ -800,12 +825,15 @@ class AgentSession:
             maximum_chars=SETTINGS.limits.max_reply_chars,
         )
         self._check_cancel(state.cancel_check)
-        self._add_history("assistant", reply, "assistant", state.prompt_id)
         action = None
         try:
             action = decode_action(reply)
             self._validate_action(action)
+            reviewed = self._review_completion(action)
+            if reviewed is not action:
+                action, reply = reviewed, json.dumps(reviewed)
         except (ValueError, OSError, RuntimeError, TypeError, RecursionError) as exc:
+            self._add_history("assistant", reply, "assistant", state.prompt_id)
             result: dict[str, object] = {
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
@@ -814,7 +842,24 @@ class AgentSession:
                 result["denied"] = True
             self._publish_result(state, None, result)
             return None
+        self._add_history("assistant", reply, "assistant", state.prompt_id)
         return action
+
+    def _review_completion(self, action: Action) -> Action:
+        bridge = self.runtime.services.get("core_updates")
+        if (
+            not self._core_review
+            or action.get("action") != "done"
+            or not isinstance(bridge, _CoreReview)
+        ):
+            return action
+        prompt = next(
+            message.content
+            for message in reversed(self._history)
+            if message.kind == "prompt"
+        )
+        raw: object = json.loads(prompt.removeprefix("CORE_UPDATE_RESULT: "))
+        return bridge.review_completion(object_field(raw, "core update result"))
 
     def _complete_prompt(self, state: _SendState, action: Action) -> str:
         message = text_field(action["message"], "completion message")
@@ -910,7 +955,14 @@ class AgentSession:
                     "ok": False,
                     "denied": True,
                     "error": f"Action {name!r} is disabled for this agent. "
-                    "Use an enabled action instead.",
+                    + (
+                        "This task is inspecting the running application's source. "
+                        "Use core_source to read it and core_update to edit it; "
+                        "workspace tools cannot inspect the active release."
+                        if self._core_editing
+                        else "Use an enabled action instead."
+                    ),
+                    "allowed_actions": sorted(self.allowed_actions),
                 },
             )
             return None
@@ -925,6 +977,14 @@ class AgentSession:
             else:
                 result = self._execute_action(state, action)
         self._check_cancel(state.cancel_check)
+        if (
+            name == "core_source"
+            and isinstance(self.runtime.services.get("core_updates"), _CoreReview)
+            and result.get("ok") is not False
+        ):
+            self._core_editing = True
+            result["source_scope"] = "active_application_release"
+            result["allowed_actions"] = sorted(self.allowed_actions)
         self._publish_result(state, action, result)
         if self.runtime.tools[name].finishes_turn and (
             result.get("ok") is True or result.get("finish_turn") is True

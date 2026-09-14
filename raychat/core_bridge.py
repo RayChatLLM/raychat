@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from raychat_bootstrap.wire import MAX_MESSAGE, decode, encode
 
+from .core_review import completion
 from .validation import configuration_fields, integer_field, text_field
 
 if TYPE_CHECKING:
@@ -39,6 +40,11 @@ class CoreBridge:
         self.update_results: dict[str, dict[str, object]] = {}
         self.last_update: dict[str, object] = {}
         self.screen = ""
+        self.frame: dict[str, object] = {}
+        self.frame_time = 0.0
+        self.size_received = False
+        self.verifications: dict[str, dict[str, object]] = {}
+        self.status_time = time.monotonic()
         self.active = False
         self.recover_history = False
         self.draining = False
@@ -93,6 +99,8 @@ class CoreBridge:
         elif kind == "size":
             self.columns = integer_field(message["columns"], "columns")
             self.rows = integer_field(message["rows"], "rows")
+            self.size_received = True
+            self.frame = {**self.frame, "active": False}
         elif kind in {
             "status",
             "update_result",
@@ -110,6 +118,7 @@ class CoreBridge:
         elif kind in {"activate", "continue"}:
             self.active = True
             self.draining = self.frozen = self.capture = False
+            self.frame = {**self.frame, "active": False}
         elif kind == "disconnected":
             raise KeyboardInterrupt
 
@@ -134,7 +143,10 @@ class CoreBridge:
             self._status(message)
 
     def _status(self, message: Mapping[str, object]) -> None:
-        self.status = text_field(message["text"], "update status", allow_empty=True)
+        status = text_field(message["text"], "update status", allow_empty=True)
+        if status != self.status:
+            self.status_time = time.monotonic()
+        self.status = status
         if self.status.startswith((
             "Update rejected:",
             "Core updated",
@@ -241,6 +253,36 @@ class CoreBridge:
     def finish_result(self, identifier: str) -> None:
         """Clear claimed feedback only after its assistant response has committed."""
         self.send("update_result_finished", request_id=identifier)
+
+    def review_completion(self, outcome: Mapping[str, object]) -> dict[str, object]:
+        """Return scoped, checked facts for an automatic update review.
+
+        Returns
+        -------
+        dict[str, object]
+            A host-authored completion separating activation from visual evidence.
+
+        """
+        return completion(self, outcome)
+
+    def observe_frame(
+        self,
+        screen: str,
+        regions: Mapping[str, str],
+        sequence: int,
+        dimensions: tuple[int, int],
+    ) -> None:
+        """Publish a detached observation after painting the actual terminal frame."""
+        self.screen = screen
+        self.frame_time = time.monotonic()
+        self.frame = {
+            "sequence": sequence,
+            "columns": dimensions[0],
+            "rows": dimensions[1],
+            "source": str(self.source_root),
+            "active": self.active and self.size_received and not self.frozen,
+            "regions": dict(regions),
+        }
 
     def __enter__(self) -> Self:
         """Return the proxy; the supervisor owns native terminal modes.

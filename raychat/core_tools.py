@@ -5,10 +5,12 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .core_review import verify
 from .sdk import InstructionContribution, ToolDefinition
 from .storage import SessionStore
 from .validation import array_field, configuration_fields, integer_field, text_field
@@ -31,7 +33,9 @@ This capability is supplied by the core and does not require Self-Harness.
 For requests to change RayChat itself, use core_source to inspect its active source,
 then core_update to submit exact replacements. Workspace file/process tools operate
 on user projects, not the running application. The 'LIVE RAY FIELD' in /system is
-rendered in raychat/ui/controller.py; removing that UI means editing its renderer.
+rendered in raychat/ui/controller.py. SYSTEM panel values belong to _sidebar_details
+and _paint_sidebar; _paint_header changes only the top title row. composition.model
+is the complete model identifier. Inspect the active renderer with core_source.
 For visual changes inspect the entire painting function and the background beneath
 it. Removing a text label alone does not remove a graphic. Preserve the surrounding
 panel and cover the removed graphic's region with the panel's solid background.
@@ -42,6 +46,8 @@ Never delete .raychat or .raychat/live to change a UI: these are state directori
 Read the relevant source before editing. core_source returns a whole-file SHA-256
 and verbatim source; use that sha256 in core_update. Each old string must match once.
 Use core_source with path and start/end to read source, not workspace read or list.
+After successful core_source, this task permits only core tools and done; ordinary
+workspace tools return on the next user task.
 Update complete affected blocks and their callers; leave no undefined names.
 The fixed gate uses strict mypy, all Ruff rules and isolated preview formatting.
 Fix code rather than adding noqa, type-ignore or other suppression directives.
@@ -54,15 +60,19 @@ you automatically with CORE_UPDATE_RESULT JSON after validation and handoff. Its
 status is activated, rejected, busy or interrupted, with request_id, original request,
 release identities, diagnostics and the rendered terminal screen. Read this result
 before claiming success.
-On activated, check the screen against the original request: a removed label does
-not mean the graphic underneath disappeared. Fix incomplete visual changes if needed.
+Activated means new code is running now; no restart is needed. It does not prove
+the requested behavior. Use core_verify on the requested region, not transcript text
+or another panel; wrapped_contains checks text split across displayed lines.
+Fix failed visual checks before completing. The host reports only checked facts;
+your final free-form assessment cannot substitute for checked evidence.
 On rejected, inspect diagnostics and active source and submit a corrected edit.
 On busy or interrupted, report the status and await the user's next instruction;
 do not automatically resubmit an update or recovery.
 After three unsuccessful repair attempts, report the actual failure and stop.
-Do not poll for activation inside a running task. core_status also returns the last
-structured result, current screen, and detailed diagnostics. Never claim submitted
-means activated. Do not repeat external commands while handling update feedback.
+Read core_status before status or ETA claims, including ordinary follow-up questions.
+It identifies the active source, phase and evidence; ETA is unknown unless
+the host supplies it. Never use workspace files as fallback for core_source. Do not
+poll inside a task or repeat external commands while handling update feedback.
 Use core_recover with target previous (undo the last activation) or known-good
 (launch version) when the user asks to restore the application. Recovery waits for
 active work too. Committed history is retained; external effects are not undone.
@@ -74,6 +84,8 @@ Examples of actions:
 "new":"replacement source"}]}]}
 {"action":"core_recover","target":"previous"}
 {"action":"core_status"}
+{"action":"core_verify","checks":[{"region":"system","kind":"absent",
+"text":"LIVE RAY FIELD"}]}
 """
 
 
@@ -224,6 +236,9 @@ def _instructions(
 def _validate(root: Path, action: dict[str, object]) -> None:
     if action["action"] == "core_status":
         return
+    if action["action"] == "core_verify":
+        array_field(action.get("checks"), "visual checks")
+        return
     if action["action"] == "core_source":
         if "path" in action:
             _path(root, action["path"])
@@ -245,8 +260,15 @@ def _status(bridge: CoreBridge) -> dict[str, object]:
             diagnostics = stream.read(24000).decode("utf-8", errors="replace")
     return {
         "status": bridge.status,
+        "phase": bridge.status,
+        "phase_elapsed_seconds": round(time.monotonic() - bridge.status_time, 1),
+        "eta_seconds": None,
+        "active_source": str(bridge.source_root),
+        "restart_required": False,
         "last_result": bridge.last_update,
         "screen": bridge.screen,
+        "frame": bridge.frame,
+        "task_verified": False,
         "diagnostics": diagnostics,
     }
 
@@ -254,6 +276,22 @@ def _status(bridge: CoreBridge) -> dict[str, object]:
 def _feedback(prompt: str) -> Mapping[str, object]:
     raw: object = json.loads(prompt.removeprefix("CORE_UPDATE_RESULT: "))
     return configuration_fields(raw, "update result")
+
+
+def _verify_action(
+    bridge: CoreBridge,
+    action: Mapping[str, object],
+    context: PluginContext,
+) -> dict[str, object]:
+    prompts = [
+        item["content"]
+        for item in context.session.snapshot()
+        if item["role"] == "user" and not item["content"].startswith("HOST_RESULT:")
+    ]
+    result = bridge.last_update
+    if prompts and prompts[-1].startswith("CORE_UPDATE_RESULT: "):
+        result = dict(_feedback(prompts[-1]))
+    return verify(bridge, action, str(result.get("request_id", "")))
 
 
 def _request_context(context: PluginContext) -> tuple[str, int, str]:
@@ -350,11 +388,23 @@ def install(runtime: Runtime, bridge: CoreBridge) -> None:
             return _status(bridge)
         if action["action"] == "core_source":
             return _source(bridge.source_root, action)
+        if action["action"] == "core_verify":
+            return _verify_action(bridge, action, context)
         return _submit_update(action, context, runtime, bridge)
 
     def register() -> None:
         for name, description, parameters in (
             ("core_status", "Read live-update status and validation diagnostics.", {}),
+            (
+                "core_verify",
+                "Check fresh UI region text; full intent remains unverified.",
+                {
+                    "checks": (
+                        "[{region: system|header|transcript|composer, "
+                        "kind: contains|absent|wrapped_contains, text}]"
+                    ),
+                },
+            ),
             (
                 "core_source",
                 "Read or search the running application's source code.",
@@ -381,7 +431,8 @@ def install(runtime: Runtime, bridge: CoreBridge) -> None:
                 description,
                 validate,
                 execute,
-                requires_approval=name not in {"core_source", "core_status"},
+                requires_approval=name
+                not in {"core_source", "core_status", "core_verify"},
                 parameters=parameters,
                 finishes_turn=name in {"core_update", "core_recover"},
             )

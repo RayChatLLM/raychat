@@ -45,7 +45,7 @@ from raychat.ui.renderer import (
     RayTracer,
     Surface,
 )
-from raychat.ui.selection import TextSelection
+from raychat.ui.selection import SelectionViewport, TextSelection
 from raychat.ui.state import (
     LayoutOptions,
     PendingApproval,
@@ -57,6 +57,7 @@ from raychat.ui.state import (
     display_width,
     sanitize_text,
     truncate_display,
+    wrap_display,
 )
 from raychat.ui.terminal import (
     DoubleEscape,
@@ -897,34 +898,25 @@ def _paint_transcript(
                 surface.background[index] = CYAN
 
 
-def _paint_sidebar(
-    surface: Surface,
-    rect: Rect | None,
+def _sidebar_details(
     composition: FrameComposition,
-) -> None:
-    if (
-        rect is None
-        or rect.width < _MIN_SIDEBAR_COLUMNS
-        or rect.height < _MIN_CONTENT_ROWS
-    ):
-        return
-    # Keep the LIVE RAY FIELD graphic, label and panel background in sync.
-    show_live_ray_field = True
-    info_height = min(rect.height, 19) if show_live_ray_field else rect.height
-    surface.box(
-        Rect(rect.x, rect.y, rect.width, info_height),
-        border=MAGENTA,
-        background=PANEL_ALT,
-        title="SYSTEM",
-        ascii_only=composition.ascii_only,
-    )
+    width: int,
+) -> list[tuple[str, CellStyle]]:
+    """Lay out complete sidebar values within the available display-cell width.
+
+    Returns
+    -------
+    list[tuple[str, CellStyle]]
+        Label and wrapped value rows, with the model identifier first.
+
+    """
     fps_label = (
         f"{composition.measured_fps:4.1f} FPS"
         if math.isfinite(composition.measured_fps) and composition.measured_fps > 0
         else "warming up"
     )
     rows = [
-        ("MODEL", composition.model.rsplit("/", 1)[-1], CYAN),
+        ("MODEL", composition.model, CYAN),
         (
             "WORKSPACE",
             Path(composition.workspace).name or str(composition.workspace),
@@ -940,29 +932,52 @@ def _paint_sidebar(
             MAGENTA,
         ),
     ]
-    y = rect.y + 2
-    available = max(1, rect.width - 4)
+    details: list[tuple[str, CellStyle]] = []
     for label, value, color in rows:
-        if y >= rect.y + info_height - 1:
+        details.append((label, _STYLE_MUTED_PANEL_ALT_BOLD))
+        style = CellStyle(foreground=color, background=PANEL_ALT, bold=False)
+        details.extend((line, style) for line in wrap_display(value, width))
+    return details
+
+
+def _paint_sidebar(
+    surface: Surface,
+    rect: Rect | None,
+    composition: FrameComposition,
+) -> None:
+    if (
+        rect is None
+        or rect.width < _MIN_SIDEBAR_COLUMNS
+        or rect.height < _MIN_CONTENT_ROWS
+    ):
+        return
+    # Keep the LIVE RAY FIELD graphic, label and panel background in sync.
+    show_live_ray_field = True
+    available = max(1, rect.width - 4)
+    details = _sidebar_details(composition, available)
+    info_height = (
+        min(rect.height, max(19, len(details) + 5))
+        if show_live_ray_field
+        else rect.height
+    )
+    surface.box(
+        Rect(rect.x, rect.y, rect.width, info_height),
+        border=MAGENTA,
+        background=PANEL_ALT,
+        title="SYSTEM",
+        ascii_only=composition.ascii_only,
+    )
+    content_bottom = rect.y + info_height - (2 if info_height >= _MIN_INFO_ROWS else 1)
+    for y, (line, style) in enumerate(details, rect.y + 2):
+        if y >= content_bottom:
             break
         surface.text(
             rect.x + 2,
             y,
-            label,
-            style=_STYLE_MUTED_PANEL_ALT_BOLD,
+            line,
+            style=style,
             max_width=available,
         )
-        y += 1
-        if y >= rect.y + info_height - 1:
-            break
-        surface.text(
-            rect.x + 2,
-            y,
-            truncate_display(value, available),
-            style=CellStyle(foreground=color, background=PANEL_ALT, bold=False),
-            max_width=available,
-        )
-        y += 1
     if info_height >= _MIN_INFO_ROWS:
         surface.text(
             rect.x + 2,
@@ -1384,6 +1399,50 @@ def compose_frame(
     if composition.ascii_only:
         surface.chars[:] = [_ascii_cell(char) for char in surface.chars]
     return surface
+
+
+def frame_regions(
+    surface: Surface,
+    composition: FrameComposition,
+    editor: LineEditor,
+) -> dict[str, str]:
+    """Extract named rendered regions without using transcript text as panel evidence.
+
+    Returns
+    -------
+    dict[str, str]
+        Region contents from this exact frame, excluding surrounding borders.
+
+    """
+    if composition.width < MIN_COLUMNS or composition.height < MIN_ROWS:
+        return {}
+    lines = len(composer_view(editor, max(1, composition.width - 6)).lines)
+    layout = calculate_layout(
+        composition.width,
+        composition.height,
+        options=LayoutOptions(
+            show_system=composition.show_system,
+            composer_lines=lines,
+        ),
+    )
+    regions = {"header": "".join(surface.chars[: surface.width])}
+    for name, rect in (
+        ("system", layout.sidebar),
+        ("transcript", layout.transcript),
+        ("composer", layout.composer),
+    ):
+        if rect is None:
+            continue
+        regions[name] = "\n".join(
+            "".join(
+                surface.chars[
+                    y * surface.width + rect.x + 1 : y * surface.width
+                    + min(rect.right - 1, surface.width)
+                ],
+            )
+            for y in range(rect.y + 1, min(rect.bottom - 1, surface.height))
+        )
+    return regions
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1902,7 +1961,7 @@ class _TuiController:
             or self.view.active_job_id is not None
             or self.view.command_job_id is not None
             or not self.view.worker.quiescent
-            or self.displayed_surface is None
+            or live.frame.get("active") is not True
         ):
             return True
         session = self.view.worker.session
@@ -1922,7 +1981,13 @@ class _TuiController:
         if not self._authorize_dispatch(update_result=identifier):
             return True
         live.update_results.pop(identifier, None)
-        payload = {**result, "screen": live.screen[-10000:]}
+        payload = {
+            **result,
+            "screen": live.screen[-10000:],
+            "frame": live.frame,
+            "task_verified": False,
+            "restart_required": False,
+        }
         prompt = "CORE_UPDATE_RESULT: " + json.dumps(payload, ensure_ascii=False)
         self.view.state.start(
             "Reviewing core update result: " + str(result["status"]),
@@ -2558,13 +2623,7 @@ class _TuiController:
         else:
             self._process_approval_text(event)
 
-    def _process_pointer_key(self, event: KeyEvent) -> bool:
-        if (
-            event.kind not in {"click", "drag", "release"}
-            or event.x is None
-            or event.y is None
-        ):
-            return False
+    def _selection_viewport(self) -> SelectionViewport:
         draft = composer_view(self.view.editor, max(1, self.width - 6))
         rect = calculate_layout(
             self.width,
@@ -2582,60 +2641,89 @@ class _TuiController:
         )
         rows = tuple(line.text for line in self.view.state.transcript_rows(inner_width))
         self.view.selection.reconcile(rows, inner_width)
-        inside = (
-            rect.x + 2 <= event.x < rect.x + 2 + inner_width
-            and rect.y + 1 <= event.y < rect.y + 1 + len(viewport.lines)
+        self.view.scroll_offset = viewport.scroll_offset
+        return SelectionViewport(
+            left=rect.x + 2,
+            top=rect.y + 1,
+            width=inner_width,
+            height=len(viewport.lines),
+            start=viewport.start,
+            rows=rows,
         )
-        row = viewport.start + max(
-            0,
-            min(event.y - rect.y - 1, len(viewport.lines) - 1),
-        )
-        column = event.x - rect.x - 2
+
+    def _process_pointer_key(self, event: KeyEvent) -> bool:
+        if (
+            event.kind not in {"click", "drag", "release"}
+            or event.x is None
+            or event.y is None
+        ):
+            return False
+        viewport = self._selection_viewport()
         if event.kind == "click":
-            if inside:
-                self.view.selection.begin(row, column, rows, inner_width)
-            else:
-                self.view.selection.clear()
+            self.view.selection.press(event.x, event.y, viewport)
         else:
             was_dragging = self.view.selection.dragging
-            self.view.selection.move(row, column, released=event.kind == "release")
+            self.view.selection.point(
+                event.x,
+                event.y,
+                viewport,
+                released=event.kind == "release",
+            )
             if event.kind == "release" and was_dragging and self.view.selection.text():
                 self.clipboard_jobs.put((self.view, self.view.selection.text()))
         return True
+
+    def _advance_selection(self) -> None:
+        if self.resources.live is not None and self.resources.live.frozen:
+            return
+        selection = self.view.selection
+        if self.picker is not None or self.view.state.phase is Phase.APPROVAL:
+            selection.finish()
+        if selection.pointer is None:
+            return
+        viewport = self._selection_viewport()
+        distance = selection.scroll_step(viewport, time.monotonic())
+        if distance:
+            self.view.scroll_offset = move_transcript_scroll(
+                self.view.scroll_offset,
+                distance,
+                self.view.state.transcript_scroll_limit,
+            )
+            viewport = self._selection_viewport()
+        selection.project(viewport)
+
+    def _scroll_transcript(self, distance: int) -> None:
+        self.view.scroll_offset = move_transcript_scroll(
+            self.view.scroll_offset,
+            distance,
+            self.view.state.transcript_scroll_limit,
+        )
+        if self.view.selection.pointer is None:
+            return
+        viewport = self._selection_viewport()
+        self.view.selection.project(viewport)
 
     def _process_scroll_key(self, event: KeyEvent) -> bool:
         if event.kind in {"page_up", "mouse_up"}:
             distance = (
                 KEYBOARD_PAGE_LINES if event.kind == "page_up" else MOUSE_SCROLL_LINES
             )
-            self.view.scroll_offset = move_transcript_scroll(
-                self.view.scroll_offset,
-                distance,
-                self.view.state.transcript_scroll_limit,
-            )
+            self._scroll_transcript(distance)
             return True
         if event.kind in {"page_down", "mouse_down"}:
             distance = (
                 KEYBOARD_PAGE_LINES if event.kind == "page_down" else MOUSE_SCROLL_LINES
             )
-            self.view.scroll_offset = move_transcript_scroll(
-                self.view.scroll_offset,
-                -distance,
-                self.view.state.transcript_scroll_limit,
-            )
+            self._scroll_transcript(-distance)
             return True
         if event.kind == "up" and self.view.state.phase in {
             Phase.RUNNING,
             Phase.STOPPING,
         }:
-            self.view.scroll_offset = move_transcript_scroll(
-                self.view.scroll_offset,
-                1,
-                self.view.state.transcript_scroll_limit,
-            )
+            self._scroll_transcript(1)
             return True
         if event.kind == "down" and self.view.scroll_offset:
-            self.view.scroll_offset -= 1
+            self._scroll_transcript(-1)
             return True
         return False
 
@@ -2998,6 +3086,7 @@ class _TuiController:
                 self.static_background = None
 
     def _draw_frame(self, tick: FrameTick) -> None:
+        self._advance_selection()
         composition = self._frame_composition(tick)
         surface = compose_frame(
             self.tracer,
@@ -3025,7 +3114,12 @@ class _TuiController:
             self.terminal.present(frame)
         self.displayed_surface = surface
         if self.resources.live is not None:
-            self.resources.live.screen = surface.to_plain()
+            self.resources.live.observe_frame(
+                surface.to_plain(),
+                frame_regions(surface, composition, self.view.editor),
+                tick.sequence,
+                (surface.width, surface.height),
+            )
         self._update_approval_review(
             confirmation_ready=composition.approval_confirmation_ready,
         )
@@ -3043,6 +3137,11 @@ class _TuiController:
         if self._process_handoff():
             self.scheduler.end_frame(tick)
             return False
+        if live is not None and not live.size_received:
+            # Readiness precedes terminal routing. Default bridge dimensions must
+            # not invalidate a restored selection before the supervisor sends size.
+            self.scheduler.end_frame(tick)
+            return True
         self._update_dimensions()
         self._read_input()
         if (

@@ -21,6 +21,8 @@ to subsequent requests and survives session restoration, plugin reloads, and liv
 core updates. In-flight requests finish with the model they already started using.
 New child chats using the primary profile inherit the selection; explicitly
 configured model profiles keep their own models.
+The `/system` panel wraps the complete model identifier onto multiple lines,
+including its provider path.
 
 Self-Harness is disabled by default. The ordinary chat agent still has the core's
 source inspection, live-update, status, and recovery tools. See
@@ -324,6 +326,9 @@ it does not exercise the Windows TUI. See [release instructions](docs/RELEASE.md
 and [recorded verification results](docs/VERIFICATION.md).
 
 Drag transcript text and release the mouse to copy it automatically.
+Hold the pointer at the top or bottom edge of the chat to keep scrolling while
+extending the selection across screens. Mouse-wheel scrolling also extends a held
+selection.
 Confirmation appears below the composer; Escape clears the selection. This works in
 child chats too. macOS uses its native clipboard when available; other terminals
 receive an OSC 52 clipboard request. `tui.clipboard: "terminal"` always uses OSC 52.

@@ -7,8 +7,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
+from raychat.ui.controller import ChatView
+from raychat.ui.handoff import capture_view, restore_selection
+from raychat.ui.selection import SelectionViewport
 from raychat.ui.state import TuiState
+from raychat.validation import configuration_fields
 from raychat.workers import AgentWorker
+from raychat_bootstrap.wire import decode, encode
 from tests.assertions import TypedTestCase
 from tests.plugin_support import plugin_module
 from tests.provider_support import provider
@@ -21,6 +26,42 @@ else:
 
 class LiveStateQATests(TypedTestCase):
     """Keep host attribution across durable conversation restoration."""
+
+    def test_held_selection_restores_pointer_and_resets_monotonic_pacing(self) -> None:
+        """A replacement resumes the held drag and copies every selected glyph."""
+        owner = ChatView(AgentWorker(lambda _messages: ""))
+        rows = tuple(f"Row {index:03} 雪é🙂" for index in range(100))
+        viewport = SelectionViewport(2, 3, 30, 10, 10, rows)
+        owner.selection.press(2, 7, viewport)
+        owner.selection.point(31, 20, viewport)
+        self.equal(owner.selection.scroll_step(viewport, 1000), 0)
+        saved = decode(encode(capture_view(owner)))
+        restored = restore_selection(saved["selection"])
+        self.equal(restored.pointer, (31, 20))
+        self.equal(restored.scroll_step(viewport, 1), 0)
+        self.equal(restored.scroll_step(viewport, 1.11), -3)
+        scrolled = SelectionViewport(2, 3, 30, 10, 80, rows)
+        restored.project(scrolled)
+        restored.point(31, 20, scrolled, released=True)
+        self.equal(restored.text(), "\n".join(rows[14:90]))
+        self.equal(restored.scroll_step(scrolled, 2), 0)
+        self.require(restored.pointer is None)
+
+    def test_old_selection_snapshot_does_not_invent_a_held_pointer(self) -> None:
+        """Legacy coordinates remain selectable without spuriously scrolling."""
+        owner = ChatView(AgentWorker(lambda _messages: ""))
+        rows = ("first 雪", "second 🙂", "third")
+        viewport = SelectionViewport(2, 3, 20, 3, 0, rows)
+        owner.selection.press(2, 3, viewport)
+        owner.selection.point(10, 4, viewport)
+        saved = decode(encode(capture_view(owner)))
+        selection = dict(configuration_fields(saved["selection"], "selection"))
+        selection.pop("pointer")
+        restored = restore_selection(selection)
+        self.require(restored.pointer is None)
+        self.equal(restored.scroll_step(viewport, 1000), 0)
+        restored.point(21, 4, viewport, released=True)
+        self.equal(restored.text(), "first 雪\nsecond 🙂")
 
     def test_new_primary_children_follow_selection_but_fixed_profiles_do_not(
         self,
