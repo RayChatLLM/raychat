@@ -263,8 +263,7 @@ The four `S311` exceptions are confined to `plugins/optimization/gepa/`:
 `merge.py`. Their `random.Random` calls preserve the original seeded search
 behavior for candidates, minibatches and merges. These draws are not used for
 credentials or security tokens. `S311` remains enabled everywhere else, and all
-other rules remain enabled in these files. See [the sampling contract](GEPA_PORT.md#reproducible-sampling)
-for reproducibility and checkpoint limits.
+other rules remain enabled in these files.
 
 To run the independent Ruff audit directly with the same explicit policy:
 

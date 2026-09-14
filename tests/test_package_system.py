@@ -250,6 +250,51 @@ class PackageOrderingTests(PackageSystemFixture):
         self.equal([path.name for path in packages], ["Beta", "Zebra", "alpha"])
 
 
+class PackageLocationTests(PackageSystemFixture):
+    """Keep filesystem archive sources out of the HTTP transport."""
+
+    def _install_windows_archive(self, location: str, index: int) -> None:
+        source = self.external()
+        data = pack(source)
+        manager = PackageManager(
+            self.root / f"windows-work-{index}",
+            self.root / f"windows-home-{index}",
+        )
+
+        def resolve(
+            _manager: PackageManager,
+            supplied: str,
+        ) -> tuple[str, None]:
+            self.equal(supplied, "local-archive")
+            return location, None
+
+        def read_archive(path: str | Path) -> bytes:
+            self.equal(PureWindowsPath(path), PureWindowsPath(location))
+            return data
+
+        with (
+            mock.patch.object(PackageManager, "resolve_source", new=resolve),
+            mock.patch("raychat.plugin_manager.read_bytes", new=read_archive),
+            mock.patch(
+                "raychat.plugin_manager.download",
+                side_effect=AssertionError("Local archive reached HTTP"),
+            ),
+        ):
+            result = manager.install("local-archive")
+        if not result["applied"]:
+            self.fail("Local archive installation was not applied.")
+        self.equal(files(manager.paths()["example"]), files(source))
+
+    def test_windows_archive_paths_use_local_package_staging(self) -> None:
+        """Install drive-letter archives without invoking the HTTP downloader."""
+        for index, location in enumerate((
+            r"C:\Users\example\My Catalog #100%\example.zip",
+            "C:/Users/example/My Catalog #100%/example.zip",
+        )):
+            with self.subTest(location=location):
+                self._install_windows_archive(location, index)
+
+
 class PackageTransactionTests(PackageSystemFixture):
     """Exercise installation, archive validation and atomic generation updates."""
 
