@@ -105,12 +105,12 @@ def completed_review(
     prompt: str,
     after_messages: int,
 ) -> bool:
-    """Require a committed model completion for the current activation request.
+    """Require a committed review completion for the current activation request.
 
     Returns
     -------
     bool
-        The latest idle checkpoint ends with a genuine model answer to this
+        The latest idle checkpoint ends with a completed review of this
         request's activated feedback, with no pending or claimed update reviews.
 
     """
@@ -139,7 +139,14 @@ def completed_review(
     return (
         action.get("action") == "done"
         and action.get("pending") is not True
-        and action.get("host_generated") is not True
+        and (
+            action.get("host_generated") is not True
+            or (
+                action.get("review_complete") is True
+                and action.get("request_id") == feedback.get("request_id")
+                and isinstance(action.get("request_id"), str)
+            )
+        )
         and isinstance(action.get("message"), str)
         and bool(action["message"])
     )

@@ -34,6 +34,64 @@ def _review(request: str, status: str) -> str:
 class CoreToolsTests(TypedTestCase):
     """Keep source updates isolated, checked, and available after plugin reload."""
 
+    def test_source_inspection_scopes_only_the_current_task_to_core_tools(self) -> None:
+        """Reject checkout fallbacks while allowing later ordinary workspace work."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "raychat").mkdir()
+            (root / "raychat" / "example.py").write_text("VALUE = 1\n")
+            bridge = CoreBridge(io.BytesIO(), io.BytesIO())
+            bridge.source_root = root
+            runtime = Runtime(root)
+            install(runtime, bridge)
+            runtime.services["core_updates"] = bridge
+            calls: list[str] = []
+
+            def execute(_action: Action, _ctx: PluginContext) -> dict[str, object]:
+                calls.append("workspace")
+                return {"ok": True}
+
+            runtime.tools["workspace_read"] = ToolDefinition(
+                "workspace_read",
+                "Read workspace data",
+                lambda _action: None,
+                execute,
+                requires_approval=False,
+            )
+            runtime.owners["tools", "workspace_read"] = "fixture"
+            replies = iter([
+                '{"action":"core_source","path":"raychat/example.py"}',
+                '{"action":"workspace_read"}',
+                '{"action":"core_source","path":"raychat/example.py"}',
+                '{"action":"done","message":"inspected"}',
+                '{"action":"workspace_read"}',
+                '{"action":"done","message":"read project"}',
+                '{"action":"core_source","path":"raychat/missing.py"}',
+                '{"action":"workspace_read"}',
+                '{"action":"done","message":"missing source"}',
+            ])
+            session = AgentSession(
+                lambda _messages: next(replies),
+                root,
+                runtime=runtime,
+            )
+            try:
+                self.equal(session.send("Inspect the application"), "inspected")
+                self.equal(calls, [])
+                self.require(
+                    any(
+                        "workspace tools cannot inspect the active release"
+                        in message.content
+                        for message in session.history_snapshot()
+                    ),
+                )
+                self.equal(session.send("Now read my project"), "read project")
+                self.equal(calls, ["workspace"])
+                self.equal(session.send("Find a missing source file"), "missing source")
+                self.equal(calls, ["workspace", "workspace"])
+            finally:
+                session.close()
+
     def test_automatic_review_cannot_run_workspace_tools(self) -> None:
         """Limit asynchronous repairs without disabling tools for later user work."""
         with tempfile.TemporaryDirectory() as temporary:

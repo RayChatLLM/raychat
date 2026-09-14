@@ -22,28 +22,56 @@ are exchanged. `--exec` remains a single noninteractive job.
 
 The ordinary chat agent can inspect and edit the core through `core_source` and
 `core_update`, restore versions through `core_recover`, and read checker diagnostics with
-`core_status`. These host tools work
+`core_status`. `core_verify` checks exact text in named rendered UI regions. These tools work
 without Self-Harness. Ask for a UI change in chat; source edits are validated before
 automatic activation. Submission yields the requesting task and displays a **system** notice that
 validation is pending. It does not claim activation. Other jobs keep running.
+After successful `core_source` inspection, that task can use only core tools and
+completion. Attempts to fall back to workspace tools receive a redirect to the
+active source tools. Ordinary workspace tools return on the next user task.
 After validation and handoff, the supervisor automatically resumes the agent with
 `CORE_UPDATE_RESULT` JSON: `request_id`, `session_id`, `status` (`activated`,
 `rejected`, `busy`, or `interrupted`), `ok`, original request, active/previous
-release IDs, diagnostics, and the rendered screen.
-The agent can inspect the result, repair a rejected or incomplete change, and report
-the actual outcome. Automatic review permits only the core tools and completion;
+release IDs, diagnostics, and a fresh screen captured after the replacement owns the
+terminal at its actual dimensions. Activation means the new code is running in the
+open terminal; no restart is needed. It does not establish that the requested
+behavior is correct.
+
+The agent can inspect the result and repair a rejected or incomplete change.
+`core_verify` accepts checks such as
+`{"region":"system","kind":"wrapped_contains","text":"accounts/vendor/models/name"}`
+in a `checks` array. Regions are `system`, `header`, `transcript`, and `composer`;
+predicates are `contains`, `absent`, and `wrapped_contains` (text joined across
+displayed lines). Missing, inactive, or stale regions fail even an absence check.
+SYSTEM evidence excludes the top header and conversation. Its source is
+`_sidebar_details` and `_paint_sidebar` in `raychat/ui/controller.py`;
+`_paint_header` only paints the title row. `core_source` always reads the active
+immutable release, including during ordinary follow-up questions. A developer
+checkout can differ from the source currently running.
+
+When the review finishes, the host composes and journals its final report from the
+actual update status and listed checks. An unverified model completion cannot
+become the visible or saved review report. With no checks, the report explicitly
+says the visual outcome is unverified. A passing text check establishes only that
+predicate, not layout quality or complete user intent; `task_verified` stays false.
+Automatic review permits only the core tools and completion;
 workspace commands stay unavailable during that review. The host limits automatic
 repairs to three submissions and each review to twenty model turns. Busy or
 interrupted results are reported without automatic resubmission. A result for a
 different saved session waits until that session is resumed; unrelated queued work
 can continue.
+If the model reaches the review turn limit, the host commits the actual update
+status and available checks with an explicit limit notice, then closes the review.
 
 Results survive handoff and remain pending until the feedback worker durably claims
 them immediately before its first model request. A crash before that claim leaves
 the result available for delivery. After the claim, recovery retains evidence of
 the uncertain provider request and does not replay it. The host clears that evidence
 only after the assistant response is committed to the journal.
-`core_status` exposes the last structured result and screen for later questions. Deleting workspace `.raychat` files does not change the UI.
+`core_status` exposes the last structured result, active source, current phase,
+phase elapsed time, and captured screen for later questions. ETA remains unknown
+(`null`); long-running tasks can postpone activation indefinitely. Deleting
+workspace `.raychat` files does not change the UI.
 
 Every launch retains private recovery files outside the workspace, below
 `~/.raychat/live/LAUNCH_ID/` (or the configured storage home). Changing the bootstrap

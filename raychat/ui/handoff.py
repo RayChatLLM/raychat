@@ -28,15 +28,20 @@ from .selection import TextSelection
 if TYPE_CHECKING:
     from .controller import ChatView, _TuiController
 
+_POINT_DIMENSIONS = 2
 
-def _point(value: object) -> tuple[int, int] | None:
+
+def _point(value: object, *, minimum: int | None = 0) -> tuple[int, int] | None:
     if value is None:
         return None
     data = array_field(value, "selection point")
-    return integer_field(data[0], "row", minimum=0), integer_field(
+    if len(data) != _POINT_DIMENSIONS:
+        message = "A selection point requires two coordinates."
+        raise ValueError(message)
+    return integer_field(data[0], "row", minimum=minimum), integer_field(
         data[1],
         "column",
-        minimum=0,
+        minimum=minimum,
     )
 
 
@@ -65,8 +70,35 @@ def capture_view(owner: ChatView) -> dict[str, object]:
             "rows": selection.rows,
             "width": selection.width,
             "dragging": selection.dragging,
+            "pointer": selection.pointer,
         },
     }
+
+
+def restore_selection(value: object) -> TextSelection:
+    """Restore a held pointer with a fresh clock, accepting older saved selections.
+
+    Returns
+    -------
+    TextSelection
+        The captured display coordinates, with no inherited monotonic deadline.
+
+    """
+    selection = configuration_fields(value, "selection")
+    restored = TextSelection(
+        anchor=_point(selection["anchor"]),
+        focus=_point(selection["focus"]),
+        rows=tuple(
+            text_field(row, "selection row", allow_empty=True)
+            for row in array_field(selection["rows"], "rows")
+        ),
+        width=integer_field(selection["width"], "width", minimum=0),
+        dragging=boolean_field(selection["dragging"], "dragging"),
+        pointer=_point(selection.get("pointer"), minimum=None),
+    )
+    if not restored.dragging:
+        restored.finish()
+    return restored
 
 
 def writer(controller: _TuiController) -> dict[str, object] | None:
@@ -202,17 +234,7 @@ def restore(controller: _TuiController, value: object) -> None:
             "dismissed",
             nullable=True,
         )
-        selection = configuration_fields(saved["selection"], "selection")
-        owner.selection = TextSelection(
-            _point(selection["anchor"]),
-            _point(selection["focus"]),
-            tuple(
-                text_field(row, "selection row", allow_empty=True)
-                for row in array_field(selection["rows"], "rows")
-            ),
-            integer_field(selection["width"], "width", minimum=0),
-            boolean_field(selection["dragging"], "dragging"),
-        )
+        owner.selection = restore_selection(saved["selection"])
     focus = text_field(data["focus"], "focus")
     if focus not in controller.views:
         message = "Missing focused chat."
