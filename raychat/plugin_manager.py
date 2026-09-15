@@ -13,7 +13,6 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, TypedDict
 from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunparse
@@ -22,6 +21,7 @@ from urllib.request import getproxies, proxy_bypass
 from raychat.event_types import CONFIGURE, Lifecycle
 
 from .file_lock import FileLock
+from .http_debug import HTTPConnection, HTTPSConnection
 from .packages import (
     MAX_BYTES,
     NAME,
@@ -51,6 +51,7 @@ from .validation import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
+    from http.client import HTTPConnection as BaseHTTPConnection
 
     from .distribution import Distribution
 
@@ -416,7 +417,7 @@ def _validate_url(url: str) -> ParseResult:
 
 @dataclass(frozen=True)
 class _HTTPRoute:
-    connection: HTTPConnection
+    connection: BaseHTTPConnection
     target: str
     headers: dict[str, str]
 

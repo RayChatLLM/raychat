@@ -71,7 +71,7 @@
       "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Operator launch options include --url, --model, --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to fetch all model IDs from the configured GET /models endpoint, filter the menu, and select the model for subsequent requests.",
       "requires": {},
       "sdk": 4,
-      "sha256": "8a8f64a14b4233987d94e419d6d425c22abbca110fcd7fad94b9acacab382e8d",
+      "sha256": "5a1cd9150264f75192e38cbe75f07f23a7d374254667ea56abca6b427ee5eec0",
       "url": "chat_completions-1.0.0.zip",
       "version": "1.0.0"
     },

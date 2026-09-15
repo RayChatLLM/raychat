@@ -11,9 +11,10 @@ from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request
 
 from raychat.configuration import SETTINGS
+from raychat.http_debug import build_http_opener, drain_debug_response
 from raychat.sdk import (
     HTTP_PROVIDER,
     CancelCheck,
@@ -393,7 +394,7 @@ class ChatAPI:
         self.api_key = api_key
         self.timeout = timeout
         self.request_options = _validated_request_options(request_options)
-        self.opener: RequestOpener = build_opener(NoRedirects())
+        self.opener: RequestOpener = build_http_opener(NoRedirects())
 
     def call_with_cancel(self, messages: Messages, cancel_check: CancelCheck) -> str:
         """Use the shared isolated transport so cancellation stops blocked HTTP.
@@ -462,6 +463,7 @@ class ChatAPI:
         except HTTPError as exc:
             # Never echo arbitrary response bodies; they can contain sensitive data.
             try:
+                drain_debug_response(exc)
                 retryable = exc.code in {408, 429, 500, 502, 503, 504}
                 retry_after = _retry_after_seconds(
                     _retry_header(exc.headers),
