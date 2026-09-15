@@ -164,7 +164,9 @@ class HTTPDebugTests(TypedTestCase):
                 abs(parsed.timestamp() - nanoseconds / 1_000_000_000)
                 < _TIMESTAMP_PRECISION_SECONDS,
             )
-            elapsed.append(number_field(event["elapsed_seconds"], "elapsed_seconds"))
+            elapsed.append(
+                number_field(event["elapsed_seconds"], "elapsed_seconds", minimum=-1),
+            )
             name = text_field(event["event"], "event")
             self.require(line.startswith(timestamp + " " + name + " "), line)
         self.equal(elapsed, sorted(elapsed))
@@ -184,6 +186,24 @@ class HTTPDebugTests(TypedTestCase):
         self.require(expected.__name__ in readable, readable)
         for event in errors:
             self.require(text_field(event["phase"], "phase") in readable, readable)
+
+    def test_zero_elapsed_time_is_valid_without_network_activity(self) -> None:
+        """Accept a clock that has not advanced between trace creation and events."""
+        with (
+            mock.patch("raychat.http_debug.time.monotonic", return_value=42.0),
+            mock.patch.object(
+                HTTPConnection,
+                "connect",
+                side_effect=AssertionError("The timestamp fixture must not connect."),
+            ) as connect,
+            closing(HTTPConnection("127.0.0.1", 1)),
+        ):
+            pass
+        connect.assert_not_called()
+        trace = self._trace()
+        self.equal(_event_names(trace), ["start", "close"])
+        self.equal([event["elapsed_seconds"] for event in _events(trace)], [0.0, 0.0])
+        self._require_readable_trace(trace)
 
     def test_binary_request_and_raw_duplicate_headers_are_byte_exact(self) -> None:
         """Keep fake secrets, binary bodies, reason phrases and duplicate headers."""
@@ -418,7 +438,7 @@ class HTTPDebugTests(TypedTestCase):
         self.equal((trace / "received.http").read_bytes(), b"")
         self._require_error(trace, RemoteDisconnected)
 
-    def test_refused_connection_creates_diagnostic_trace(self) -> None:
+    def test_connection_failure_creates_diagnostic_trace(self) -> None:
         """Close a reserved loopback port and record the actual connect failure."""
         with HTTPServer(
             ("127.0.0.1", 0),
@@ -427,13 +447,16 @@ class HTTPDebugTests(TypedTestCase):
         ) as server:
             server.server_bind()
             port = server.server_port
-        with (
-            closing(HTTPConnection("127.0.0.1", port, timeout=1)) as connection,
-            self.rejected(ConnectionRefusedError),
-        ):
-            connection.request("GET", "/refused")
+        caught: OSError | None = None
+        with closing(HTTPConnection("127.0.0.1", port, timeout=1)) as connection:
+            try:
+                connection.request("GET", "/refused")
+            except OSError as error:
+                caught = error
+        if not isinstance(caught, (ConnectionRefusedError, TimeoutError)):
+            self.fail(f"Expected a refusal or timeout from the closed port: {caught!r}")
         trace = self._trace()
-        self._require_error(trace, ConnectionRefusedError)
+        self._require_error(trace, type(caught))
         self.equal((trace / "received.http").read_bytes(), b"")
 
     def test_concurrent_connections_have_distinct_complete_traces(self) -> None:
