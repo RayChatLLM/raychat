@@ -451,6 +451,17 @@ Those values are redacted from worker errors and never placed on the command
 line. Worker names are scoped to the owning plugin. The worker reconstructs the same package generation and calls the
 registered worker factory. The HTTP implementation uses this path too.
 
+Raw HTTP debugging is explicitly enabled with `--debug`, `chat.debug`, or
+`RAYCHAT_HTTP_DEBUG_DIR`. The resolved directory is inherited by isolated workers,
+including child agents. Per-connection `sent.http` and `received.http` files
+contain HTTP bytes before TLS encryption and after TLS decryption, including
+full headers, payloads, and API keys without redaction; `events.jsonl` records
+timing and connection failures. This
+capture is separate from conversation logging and from the redacted worker
+errors described above. Debugging is off by default and creates no files while
+disabled. See [raw HTTP debugging](../README.md#raw-http-debugging) for CLI and
+configuration options.
+
 A menu opens with `ctx.emit('ui', {'menu': 'registered-name'})`. A selection
 callback can emit `{'session': 'session-id'}` or request a package transaction.
 Commands require an idle session at admission by default. Use `while_running=True`

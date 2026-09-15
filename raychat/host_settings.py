@@ -170,6 +170,8 @@ class ChatSettings:
     protocol_file: str | None
     auto_approve: bool
     log_file: str | None
+    debug: bool
+    debug_dir: str
     instruction_roles: tuple[str, ...]
     protocol: ChatProtocolSettings
     default_provider: str
@@ -233,6 +235,11 @@ class ChatSettings:
                 fields.get("log_file"),
                 f"{path}.log_file",
                 nullable=True,
+            ),
+            debug=boolean_field(fields.get("debug", False), f"{path}.debug"),
+            debug_dir=text_field(
+                fields.get("debug_dir", ".raychat-http-debug"),
+                f"{path}.debug_dir",
             ),
             instruction_roles=tuple(
                 string_list_field(

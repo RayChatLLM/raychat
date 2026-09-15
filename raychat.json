@@ -30,7 +30,9 @@
     "protocol": {
       "result_prefix": "HOST_RESULT: "
     },
-    "default_provider": "chat_completions"
+    "default_provider": "chat_completions",
+    "debug": false,
+    "debug_dir": ".raychat-http-debug"
   },
   "plugins": {
     "disabled": [
@@ -485,6 +487,8 @@
       "raychat/file_lock.py",
       "raychat/handoff.py",
       "raychat/host_settings.py",
+      "raychat/http_debug.py",
+      "raychat/http_replay.py",
       "raychat/navigation.py",
       "raychat/packages.py",
       "raychat/plugin_arguments.py",
@@ -552,6 +556,10 @@
       "tests/test_event_bus.py",
       "tests/test_gepa_engine.py",
       "tests/test_hot_plugins.py",
+      "tests/test_http_debug.py",
+      "tests/test_http_debug_integration.py",
+      "tests/test_http_debug_options.py",
+      "tests/test_http_replay.py",
       "tests/test_live_core.py",
       "tests/test_live_feedback_qa.py",
       "tests/test_live_recovery_qa.py",

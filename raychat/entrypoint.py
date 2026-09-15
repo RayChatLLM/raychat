@@ -21,12 +21,66 @@ from raychat.configuration import SETTINGS
 
 from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
+from .http_debug import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
 from .resources import AgentResources, create_resources, create_worker
 from .storage import SessionStore
 from .ui import controller, picker, terminal_control
 from .ui import terminal as terminal_ui
 from .validation import boolean_field, configuration_fields, integer_field, text_field
+
+
+def _debug_directory(value: str) -> Path:
+    return Path(value).expanduser().resolve()
+
+
+def _add_debug_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    enabled: bool,
+    directory: Path,
+) -> None:
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=enabled,
+        help="Record raw HTTP, including API keys and complete payloads",
+    )
+    parser.add_argument(
+        "--debug-dir",
+        type=_debug_directory,
+        default=directory,
+        metavar="PATH",
+        help="Raw HTTP directory when debug is enabled (default: %(default)s)",
+    )
+
+
+def _configure_debug(
+    environ: Mapping[str, str],
+    argv: Sequence[str] | None,
+) -> tuple[bool, Path]:
+    inherited = environ.get(DEBUG_DIRECTORY_ENV)
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument("--help", "-h", action="store_true")
+    _add_debug_arguments(
+        probe,
+        enabled=SETTINGS.chat.debug or bool(inherited),
+        directory=Path(inherited or SETTINGS.chat.debug_dir),
+    )
+    known, _ = probe.parse_known_args([] if argv is None else argv)
+    raw: object = vars(known)
+    fields = configuration_fields(raw, "HTTP debug arguments")
+    enabled = boolean_field(fields["debug"], "debug")
+    directory = fields["debug_dir"]
+    if not isinstance(directory, Path):
+        message = "The HTTP debug directory must be a path."
+        raise TypeError(message)
+    directory = directory.expanduser().resolve()
+    if enabled and not fields["help"]:
+        os.environ[DEBUG_DIRECTORY_ENV] = str(directory)
+    else:
+        os.environ.pop(DEBUG_DIRECTORY_ENV, None)
+    return enabled, directory
 
 
 def build_parser(
@@ -41,6 +95,7 @@ def build_parser(
         The complete parser for the selected package metadata.
 
     """
+    debug, debug_dir = _configure_debug(environ, argv)
     instruction_roles: list[str] = sorted(SETTINGS.chat.instruction_roles)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.set_defaults(initial_prompt=SETTINGS.tui.initial_prompt)
@@ -118,6 +173,7 @@ def build_parser(
             Path(SETTINGS.chat.log_file) if SETTINGS.chat.log_file is not None else None
         ),
     )
+    _add_debug_arguments(parser, enabled=debug, directory=debug_dir)
     parser.add_argument("--fps", type=float, default=SETTINGS.tui.target_fps)
     parser.add_argument(
         "--quality",

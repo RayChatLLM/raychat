@@ -44,6 +44,53 @@ Custom endpoints use `LLM_API_KEY` by default. A custom URL requires an explicit
 model. Configuration rejects duplicate keys, invalid types and ranges,
 non-finite values, unsupported versions, and oversized files.
 
+## Raw HTTP debugging
+
+Enable raw HTTP capture for a launch with `--debug`:
+
+```bash
+python3 -B -S raychat.py --debug --debug-dir ./build/http-debug --workspace ./workspace
+```
+
+The default directory is `.raychat-http-debug`, resolved relative to the launch
+directory. Set `chat.debug` to `true` and `chat.debug_dir` in your configuration
+to keep these options enabled. `--debug-dir` selects the destination; it does not
+enable capture by itself. `RAYCHAT_HTTP_DEBUG_DIR` also enables capture at the
+specified directory and passes it to isolated workers and child agents.
+
+Each connection gets its own subdirectory. `sent.http` contains the bytes
+submitted before TLS encryption, including Authorization headers, API keys, and
+payloads without redaction. `connection.log` uses readable UTC timestamps for
+request progress, response status, and connection failures. `events.jsonl` keeps
+the same timestamps alongside precise timing and structured details,
+and `send_attempt` / `sent` events so a failed send is distinguishable from a
+completed send. `received.http` retains the exact bytes read after TLS
+decryption, before HTTP parsing, including duplicate headers and chunk framing.
+
+Each `request-0001`, `request-0002`, etc. subdirectory contains a `curl.txt`
+command ready to copy into a POSIX shell and a `curl.ps1` command for PowerShell.
+These commands retain the URL, headers, credentials, and payload. Text payloads
+up to 4 KiB appear directly in the POSIX command when possible; larger or binary
+payloads and the PowerShell command use the adjacent `request-body.bin` file by
+absolute path, preserving the entire body.
+Curl recreates HTTP framing itself. Commands for text and byte payloads are also
+available when the connection fails, so you can retry the same request manually.
+Streamed request bodies get a replay command after sending finishes.
+
+Captures are written incrementally and survive cancellation. A `complete` event
+identifies a completed response; `response_closed` with `complete: false`
+identifies a partial response, including one stopped at the response-size limit.
+Cancelled or interrupted exchanges may have no final event. Existing response
+size, timeout, and cancellation limits remain in effect. In debug mode, HTTP
+error bodies are also drained into the capture without a separate logging size
+cap. Ordinary user-facing errors still redact credentials; the raw files contain
+credentials and conversation content.
+
+Capture begins before startup plugin downloads and also covers provider requests
+and model discovery. Debugging is disabled by default and creates no capture
+files while disabled. `--help` does not enable capture. The separate `--log PATH`
+option writes conversation JSONL rather than HTTP traffic.
+
 ## Chat controls
 
 - **Enter** submits a message. While working, Enter appends a follow-up to the queue.

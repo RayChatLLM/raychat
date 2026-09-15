@@ -19,12 +19,12 @@ import threading
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
-from http.client import HTTPConnection, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 from urllib.parse import urlsplit
 
+from raychat.http_debug import HTTPConnection, HTTPSConnection, drain_debug_response
 from raychat.type_support import override
 from raychat.validation import (
     ConfigurationError,
@@ -43,6 +43,7 @@ from .probe_json import catalog_entries, text_array
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from http.client import HTTPConnection as BaseHTTPConnection
 
     from typing_extensions import NotRequired
 
@@ -457,9 +458,10 @@ class _ModelGateway:
                 self.ledger.results[index] = result
 
 
-def _successful_response(connection: HTTPConnection) -> bytes:
+def _successful_response(connection: BaseHTTPConnection) -> bytes:
     response = connection.getresponse()
     if not HTTPStatus.OK <= response.status < HTTPStatus.MULTIPLE_CHOICES:
+        drain_debug_response(response)
         message = f"Provider returned HTTP {response.status}: {response.reason}"
         raise RuntimeError(message)
     return response.read(1048576)

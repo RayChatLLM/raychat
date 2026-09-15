@@ -107,6 +107,17 @@ jobs:
             tests.test_live_core.ReleaseTests.test_candidate_inventory_uses_portable_paths_on_windows \
             -v 2>&1 | tee ci-output/profile-paths.log
 
+      - name: Verify HTTP capture and curl replay
+        shell: bash
+        run: |
+          set -o pipefail
+          python -B -S -m unittest \
+            tests.test_http_debug \
+            tests.test_http_debug_integration \
+            tests.test_http_debug_options \
+            tests.test_http_replay \
+            -v 2>&1 | tee ci-output/http-debug-tests.log
+
       - name: Build and verify the exact release
         shell: bash
         run: |
