@@ -9,7 +9,7 @@ import socket
 import ssl
 import tempfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -169,7 +169,8 @@ def _server(
             endpoint.headers_sent.set()
             if body_gate is not None:
                 body_gate.wait(15)
-            self.wfile.write(response)
+            with suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(response)
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     if tls is not None:

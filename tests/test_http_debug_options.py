@@ -164,7 +164,7 @@ class HTTPDebugOptionsTests(TypedTestCase):
             source = Path(configuration.__file__).resolve().parents[1]
             result = asyncio.run(_launch_debug(directory, url, source))
             self.equal(result.status, 0, result.stderr)
-            self.equal(result.stdout, b"HTTP_DEBUG_CLI_DONE\n")
+            self.equal(result.stdout, ("HTTP_DEBUG_CLI_DONE" + os.linesep).encode())
             captures = list((directory / "http-debug").glob("*/sent.http"))
             self.equal(len(captures), 1)
             sent = captures[0].read_bytes()
@@ -198,24 +198,24 @@ class HTTPDebugOptionsTests(TypedTestCase):
         """Publish an absolute directory before any plugin may perform HTTP."""
         discovery = _Discovery()
         argv = ["--debug", "--fixture-option", "preserved"]
-        with (
-            tempfile.TemporaryDirectory() as temporary,
-            mock.patch.dict(os.environ, _environment(), clear=True),
-            mock.patch.object(
-                os,
-                "getcwd",
-                return_value=str(Path(temporary).resolve()),
-            ),
-            mock.patch.object(entrypoint, "add_plugin_arguments", discovery),
-        ):
-            parser = entrypoint.build_parser({}, argv)
-            fields = argument_fields(parser.parse_args(argv))
-            expected = str((Path(temporary) / ".raychat-http-debug").resolve())
-            self.equal(discovery.directories, [expected])
-            self.equal(os.environ.get(_DEBUG_ENV), expected)
-            self.require(fields["debug"] is True)
-            self.equal(fields["fixture_option"], "preserved")
-            self.require(not Path(expected).exists())
+        with tempfile.TemporaryDirectory() as temporary:
+            target = (Path(temporary) / ".raychat-http-debug").resolve()
+            settings = replace(
+                configuration.SETTINGS,
+                chat=replace(configuration.SETTINGS.chat, debug_dir=str(target)),
+            )
+            with (
+                mock.patch.dict(os.environ, _environment(), clear=True),
+                mock.patch.object(entrypoint, "SETTINGS", settings),
+                mock.patch.object(entrypoint, "add_plugin_arguments", discovery),
+            ):
+                parser = entrypoint.build_parser({}, argv)
+                fields = argument_fields(parser.parse_args(argv))
+                self.equal(discovery.directories, [str(target)])
+                self.equal(os.environ.get(_DEBUG_ENV), str(target))
+                self.require(fields["debug"] is True)
+                self.equal(fields["fixture_option"], "preserved")
+                self.require(not target.exists())
 
     def test_cli_directory_overrides_environment_and_configuration(self) -> None:
         """Use explicit CLI paths for every worker in this launch."""

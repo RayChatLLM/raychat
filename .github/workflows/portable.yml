@@ -55,8 +55,10 @@ jobs:
           for path in paths:
               if path.is_file():
                   detail = path.read_text(encoding="utf-8", errors="replace")[-16000:]
-                  detail = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-                  print(f"::error title={path.name}::{detail}")
+                  for offset in range(0, len(detail), 3000):
+                      chunk = detail[offset:offset + 3000]
+                      chunk = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                      print(f"::error title={path.name} part {offset // 3000 + 1}::{chunk}")
 
       - name: Retain complete quality diagnostics
         if: always()
@@ -149,8 +151,10 @@ jobs:
           from pathlib import Path
           for path in Path("ci-output").glob("*.log"):
               detail = path.read_text(encoding="utf-8", errors="replace")[-16000:]
-              detail = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-              print(f"::error title={path.name}::{detail}")
+              for offset in range(0, len(detail), 3000):
+                  chunk = detail[offset:offset + 3000]
+                  chunk = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title={path.name} part {offset // 3000 + 1}::{chunk}")
 
       - name: Retain acceptance reports and terminal transcripts
         if: always()
