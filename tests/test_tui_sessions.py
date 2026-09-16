@@ -55,8 +55,7 @@ else:
 
 class _GoalStage(IntEnum):
     CONFIGURE = 0
-    WORK = 1
-    JUDGING = 2
+    JUDGING = 1
 
 
 class Scheduler:
@@ -304,8 +303,8 @@ class TuiSessionTests(TypedTestCase):
         self.equal(calls, [])
         self.require(resources.runtime.session is not None)
 
-    def test_goal_set_before_first_message_is_preserved_and_judged(self) -> None:
-        """Check goal set before first message is preserved and judged."""
+    def test_goal_command_starts_work_without_another_message(self) -> None:
+        """Submitting a goal starts its task and judge without a second user message."""
         calls = []
 
         def chat(messages: Messages) -> str:
@@ -331,23 +330,9 @@ class TuiSessionTests(TypedTestCase):
                 f"last={snapshots[-1] if snapshots else None}",
             )
             if stage == _GoalStage.CONFIGURE:
-                stage = _GoalStage.WORK
-                return b"/goal Finish the task\r"
-            if (
-                stage == _GoalStage.WORK
-                and snapshots
-                and snapshots[-1].phase is Phase.DONE
-            ):
                 stage = _GoalStage.JUDGING
-                self.require(
-                    (require_goal_controller(resources.runtime).status()) is not None,
-                )
-                return b"do work\r"
-            if (
-                stage == _GoalStage.JUDGING
-                and calls == ["task", "judge"]
-                and snapshots[-1].phase is Phase.DONE
-            ):
+                return b"/goal Finish the task\r"
+            if calls == ["task", "judge"] and snapshots[-1].phase is Phase.DONE:
                 return b"\x03"
             time.sleep(0.001)
             return b""

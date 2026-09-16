@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 from raychat.application import dispatch_command, is_registered_tool
 from raychat.composition import create_session_from_options
 from raychat.configuration import SETTINGS
-from raychat.validation import finite_timeout, integer_field
+from raychat.validation import finite_timeout, integer_field, text_field
 
 APPROVAL_POLL_SECONDS = SETTINGS.terminal.approval_poll_seconds
 EVENT_POLL_SECONDS = SETTINGS.terminal.event_poll_seconds
@@ -96,6 +96,38 @@ class _CapturedFailure:
     ) -> bool:
         self.error = error
         return error is not None
+
+
+def _command_task(
+    session: Conversation,
+    text: str,
+    notify: EventCallback,
+    cancel_check: CancelCheck,
+) -> tuple[str, str]:
+    """Capture a plugin command's optional request to start a conversation turn.
+
+    Returns
+    -------
+    tuple[str, str]
+        Command feedback and the requested prompt, or an empty prompt for controls.
+
+    """
+    requested = ""
+
+    def command_event(kind: str, payload: Mapping[str, object]) -> None:
+        nonlocal requested
+        if kind == "command_task":
+            requested = text_field(payload.get("prompt"), "command task")
+        else:
+            notify(kind, payload)
+
+    result = dispatch_command(
+        session,
+        text,
+        notify=command_event,
+        cancel_check=cancel_check,
+    )
+    return result, requested
 
 
 def _callable_or_none(value: object) -> bool:
@@ -677,22 +709,27 @@ class AgentWorker:
             if session is None:
                 message = "The worker did not create its owned conversation."
                 raise RuntimeError(message)
+            prompt = job.task
             if job.task.startswith("/"):
-                result = dispatch_command(
+                result, requested = _command_task(
                     session,
                     job.task,
-                    notify=event,
-                    cancel_check=cancel_check,
+                    event,
+                    cancel_check,
                 )
-                event("done", {"message": result})
-            else:
-                result = session.run(
-                    job.task,
-                    max_steps=step_limit,
-                    event_callback=event,
-                    approval_callback=approval,
-                    cancel_check=cancel_check,
-                )
+                if not requested:
+                    event("done", {"message": result})
+                    cancel_check()
+                    return result
+                event("notification", {"message": result})
+                prompt = requested
+            result = session.run(
+                prompt,
+                max_steps=step_limit,
+                event_callback=event,
+                approval_callback=approval,
+                cancel_check=cancel_check,
+            )
         cancel_check()
         return result
 

@@ -119,11 +119,15 @@ enforced during that stream, and overflow terminates the child.
 
 ## `/goal` mode
 
-Set a goal in chat:
+Start a goal in chat:
 
 ```text
 /goal Finish the implementation and verify the full test suite
 ```
+
+Submitting an objective starts the agent immediately; no second message is needed.
+If a job is already running, the command changes its goal without starting a
+competing job.
 
 After every apparent completion, a fresh judge receives the objective and the
 entire semantic session transcript. It must return a strict `continue` or

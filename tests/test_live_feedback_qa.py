@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -88,7 +89,7 @@ class ClipboardSupervisor(RecoveryHarness):
 
     def copy(self, core: RecordingCore, message: dict[str, object]) -> None:
         """Process one detached core message while preserving active-core checks."""
-        self._event(core, message)
+        asyncio.run(self._event(core, message))
 
 
 class ClipboardFeedbackTests(TypedTestCase):

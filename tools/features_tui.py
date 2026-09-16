@@ -71,9 +71,9 @@ def _requests(case: Case) -> list[list[dict[str, str]]]:
 def _goal(case: Case, chat: TerminalChat) -> None:
     chat.command(
         "/goal Verify the feature goal after independent review",
-        "Goal set",
+        "GOAL_VERIFIED_AFTER_REVIEW",
+        30,
     )
-    chat.command("FEATURE_GOAL", "GOAL_VERIFIED_AFTER_REVIEW", 30)
     require(
         (case.work / ("goal-proof.txt")).read_text(encoding=("utf-8"))
         == ("verified after review\n"),
@@ -108,8 +108,13 @@ def _goal(case: Case, chat: TerminalChat) -> None:
         b"GOAL_DRAFT_SHOULD_BE_HIDDEN" not in chat.output,
         "features_tui: acceptance check at original line 161",
     )
+    request_count = len(_requests(case))
     chat.command("/goal", "No active goal.")
+    chat.command("/goal clear", "Goal cleared.")
+    require(len(_requests(case)) == request_count, "Goal controls started model work")
     case.checks += [
+        "one /goal command starts work without a follow-up message",
+        "goal status and clear do not start agent or judge requests",
         "goal judge rejects an unverified draft and requests continuation",
         "continuation writes and reads an artifact before a second judgment",
         "rejected draft is suppressed; accepted result clears the active goal",

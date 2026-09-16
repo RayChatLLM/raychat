@@ -82,6 +82,13 @@ while the terminal is open. Keep this directory if recovery may be needed later.
 Each successfully activated release also retains its initial compatible state
 snapshot independently of later checkpoints.
 
+Recovery writes are serialized within the supervisor. Temporary files are flushed,
+synced, and closed before atomic replacement. Windows permission errors during
+replacement are retried for up to half a second. If saving still fails, the last
+saved file remains intact and the footer reports the failure; the supervisor stays
+open. New work is not acknowledged and planned activation is deferred until its
+recovery state can be saved. A later successful manifest write clears the warning.
+
 After closing the terminal, recover before importing the checkout's core code:
 
 ```sh
