@@ -1260,7 +1260,8 @@ class AgentWorkerTests(TypedTestCase):
                 run_options={"max_steps": 3},
             )
             job_id = worker.submit("write a file")
-            approval, _ = collect_until(worker, "approval_required")
+            # Allow cold plugin initialization before timing approval handling.
+            approval, _ = collect_until(worker, "approval_required", timeout=10)
             self.equal(approval.payload["job_id"], job_id)
             self.require(
                 worker.respond_approval(

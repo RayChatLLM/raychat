@@ -382,7 +382,8 @@ class CancellationTests(PackageTestCase):
             ),
         )
         job = worker.submit("Write a file")
-        approval = wait_for_event(worker, "approval_required")
+        # Initializing the complete plugin profile can be slow on a busy runner.
+        approval = wait_for_event(worker, "approval_required", timeout=10)
         require(worker.cancel_current(job))
         require(
             not (

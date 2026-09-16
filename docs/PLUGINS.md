@@ -480,6 +480,14 @@ selected session's context. A chat admits one such command at a time; submitting
 another command cannot bypass the active command or run its callback on the UI
 thread. Normal messages wait for the active work to finish.
 
+An idle session command can request an agent turn by emitting
+`ctx.emit("command_task", {"prompt": objective})`. After the command succeeds, its
+conversation worker runs that prompt in the same job, with ordinary middleware,
+approvals, cancellation, and continuation. The command's returned text becomes
+progress feedback; the agent's accepted answer completes the job. Concurrent
+commands do not start a second conversation turn. The goals plugin uses this event
+for `/goal OBJECTIVE`; status and clear commands do not emit it.
+
 See [the SDK definitions](../raychat/sdk.py) for complete callable signatures.
 Registration names share a namespace except package-scoped worker names; use a
 plugin prefix for public names to avoid collisions.

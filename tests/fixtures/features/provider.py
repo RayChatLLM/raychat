@@ -284,7 +284,7 @@ def _skills(prompt: str, results: list[Action], instructions: str) -> Action:
 
 
 def _goal(prompt: str, results: list[Action]) -> Action:
-    if prompt == "FEATURE_GOAL":
+    if prompt == "Verify the feature goal after independent review":
         _require(not results)
         return _done(_GOAL_DRAFT)
     _require(
@@ -363,7 +363,11 @@ class FeatureChat:
             index
             for index, message in enumerate(messages)
             if message["role"] == "user"
-            and message["content"].startswith(("FEATURE_", "HOST_GOAL_REVIEW:"))
+            and (
+                message["content"].startswith(("FEATURE_", "HOST_GOAL_REVIEW:"))
+                or message["content"]
+                == "Verify the feature goal after independent review"
+            )
         )
         prompt = messages[marker]["content"]
         results: list[Action] = [

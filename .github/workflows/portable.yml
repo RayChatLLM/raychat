@@ -122,6 +122,15 @@ jobs:
             tests.test_http_replay \
             -v 2>&1 | tee ci-output/http-debug-tests.log
 
+      - name: Verify supervisor recovery persistence
+        shell: bash
+        run: |
+          set -o pipefail
+          python -B -S -m unittest \
+            tests.test_supervisor_persistence \
+            tests.test_live_recovery_qa \
+            -v 2>&1 | tee ci-output/supervisor-recovery.log
+
       - name: Build and verify the exact release
         shell: bash
         run: |

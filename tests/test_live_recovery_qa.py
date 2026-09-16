@@ -104,11 +104,11 @@ class RecoveryHarness(Supervisor):
         )
 
     @override
-    def _record(self) -> None:
+    async def _write_record(self) -> None:
         """Inject a persistence failure or write the real manifest."""
         if self.record_failure is not None:
             raise self.record_failure
-        super()._record()
+        await super()._write_record()
 
     @override
     async def _restore_state(
@@ -185,15 +185,15 @@ class RecoveryHarness(Supervisor):
 
     def dispatch(self, message: Mapping[str, object]) -> None:
         """Apply one core dequeue request through supervisor validation."""
-        self._dispatch(message)
+        asyncio.run(self._dispatch(message))
 
     def claim_result(self, message: Mapping[str, object]) -> None:
         """Apply one provider-start claim through supervisor validation."""
-        self._claim_update_result(message)
+        asyncio.run(self._claim_update_result(message))
 
     def finish_result(self, message: Mapping[str, object]) -> None:
         """Apply one durable feedback completion through supervisor validation."""
-        self._finish_update_result(message)
+        asyncio.run(self._finish_update_result(message))
 
     async def restore(self, target: Release) -> None:
         """Run the complete recovery fallback sequence."""
@@ -210,9 +210,9 @@ class RecoveryHarness(Supervisor):
         """
         return await self._restore_state(target, None)
 
-    def request_update(self, message: Mapping[str, object]) -> None:
+    async def request_update(self, message: Mapping[str, object]) -> None:
         """Route one update request through busy-state handling."""
-        self._request_update(message)
+        await self._request_update(message)
 
     async def agent_update(self, message: Mapping[str, object]) -> None:
         """Run one agent-requested update through cancellation handling."""
@@ -356,14 +356,14 @@ class ResultDurabilityTests(TypedTestCase):
             result = _result("request-one")
             supervisor.update_results["request-one"] = result
             supervisor.record_failure = OSError("disk full")
-            with self.rejected(OSError, "disk full"):
-                supervisor.claim_result({
-                    "id": "claim-one",
-                    "request_id": "request-one",
-                })
+            supervisor.claim_result({
+                "id": "claim-one",
+                "request_id": "request-one",
+            })
             self.equal(supervisor.update_results, {"request-one": result})
             self.equal(supervisor.claimed_results, {})
-            self.equal(core.messages, [])
+            self.require("disk full" in supervisor.persistence_error)
+            self.require(core.messages[-1]["accepted"] is False)
 
     def test_unknown_claim_is_declined_without_consuming_another_result(self) -> None:
         """A stale or forged request id cannot claim a pending outcome."""
@@ -495,7 +495,7 @@ class RecoveryFailureTests(TypedTestCase):
         _active(supervisor)
         blocker = asyncio.create_task(_never())
         supervisor.transition = blocker
-        supervisor.request_update({
+        await supervisor.request_update({
             "kind": "update",
             "request_id": "busy",
             "session_id": "one",

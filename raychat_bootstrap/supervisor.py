@@ -92,6 +92,8 @@ class Supervisor:
         self.recovery_menu = False
         self.last_size: tuple[int, int] | None = None
         self.last_checkpoint = 0.0
+        self.persistence_lock = asyncio.Lock()
+        self.persistence_error = ""
         self.config = directory / "configuration.json"
         selected = Path(os.environ.get("RAYCHAT_CONFIG", source / "raychat.json"))
         configuration = decode(selected.read_bytes().rstrip() + b"\n")
@@ -117,7 +119,6 @@ class Supervisor:
         })
         self.safe_config.write_bytes(encode(configuration))
         self.safe_config.chmod(0o400)
-        self._record()
 
     def restore_recovery(self, manifest: Path, version: str) -> None:
         """Restore retained release choices and state after a supervisor restart."""
@@ -152,10 +153,27 @@ class Supervisor:
                 "retained checkpoints",
             ).items()
         }
-        self._record()
 
-    def _record(self) -> None:
+    async def _record(self) -> bool:
+        async with self.persistence_lock:
+            return await self._record_locked()
+
+    async def _record_locked(self) -> bool:
+        try:
+            await self._write_record()
+        except OSError as error:
+            self._persistence_failure(error)
+            return False
+        if self.persistence_error:
+            self.persistence_error = ""
+            self._status(self.status)
+        return True
+
+    async def _write_record(self) -> None:
+        """Write one consistent checkpoint/manifest pair under persistence_lock."""
         active = self.initial if self.current is None else self.current.release
+        checkpoint = None
+        checkpoints = dict(self.checkpoints)
         if (
             self.current is not None
             and self.last_state is not None
@@ -164,8 +182,7 @@ class Supervisor:
             checkpoint = self.releases.directory / (
                 "state-" + active.identity + ".json"
             )
-            self._save(checkpoint, self.last_state)
-            self.checkpoints[active.identity] = str(checkpoint)
+            checkpoints[active.identity] = str(checkpoint)
         data = {
             "version": 1,
             "pid": None if self.current is None else self.current.process.pid,
@@ -180,27 +197,60 @@ class Supervisor:
             "active": {"path": str(active.path), "identity": active.identity},
             "state": self.last_state,
             "argv": self.argv,
-            "checkpoints": self.checkpoints,
+            "checkpoints": checkpoints,
             "update_results": self.update_results,
             "claimed_results": self.claimed_results,
         }
-        self._save(self.releases.directory / "recovery.json", data)
+        # Freeze both documents before a replacement retry yields to another task.
+        manifest = encode(data)
+        state = encode(self.last_state)
+        if checkpoint is not None:
+            await self._replace(checkpoint, state)
+        await self._replace(self.releases.directory / "recovery.json", manifest)
+        self.checkpoints = checkpoints
+
+    async def _save(self, path: Path, data: object) -> bool:
+        async with self.persistence_lock:
+            try:
+                await self._replace(path, encode(data))
+            except OSError as error:
+                self._persistence_failure(error)
+                return False
+            return True
 
     @staticmethod
-    def _save(path: Path, data: object) -> None:
-        temporary = path.with_suffix(".tmp")
-        with temporary.open("wb") as stream:
-            stream.write(encode(data))
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(path)
+    async def _replace(path: Path, data: bytes) -> None:
+        """Flush and close before replacing; tolerate short Windows sharing locks."""
+        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temporary.open("wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Eleven attempts over at most half a second of retry sleeps.
+            for _attempt in range(10):
+                if _replace_if_available(temporary, path):
+                    return
+                await asyncio.sleep(0.05)
+            temporary.replace(path)
+        finally:
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
+
+    def _persistence_failure(self, error: OSError) -> None:
+        self.persistence_error = f"Recovery state could not be saved: {error}"
+        self._status(self.status)
 
     def _status(self, text: str) -> None:
         self.status = text
-        with self.log.open("ab") as stream:
-            stream.write(encode({"time": time.time(), "status": text}))
+        displayed = text
+        if self.persistence_error:
+            displayed += (" | " if text else "") + self.persistence_error
+        with contextlib.suppress(OSError), self.log.open("ab") as stream:
+            stream.write(encode({"time": time.time(), "status": displayed}))
         if self.current is not None and self.current.process.returncode is None:
-            self.current.send("status", text=text)
+            with contextlib.suppress(OSError, RuntimeError):
+                self.current.send("status", text=displayed)
 
     @staticmethod
     async def _reader(core: Core) -> None:
@@ -466,7 +516,9 @@ class Supervisor:
             raise RuntimeError(message)
         state = current.state
         self.last_state = state
-        self._record()
+        if not await self._record():
+            message = "Recovery state could not be saved; activation deferred."
+            raise RuntimeError(message)
         self._status("Update: checking state restoration")
         probe = await self._launch(release, state, probe=True)
         try:
@@ -486,7 +538,7 @@ class Supervisor:
         self.previous = current.release
         self.current = replacement
         self.last_state = replacement.state
-        self._record()
+        await self._record()
         self._status("Core updated | /recover previous | Ctrl+R recovery")
         self._resume()
 
@@ -550,7 +602,7 @@ class Supervisor:
                 exc_info=True,
             )
             backup = self.releases.directory / "recovery-before-safe.json"
-            await asyncio.to_thread(backup.write_bytes, encode(self.last_state))
+            backup_saved = await self._save(backup, self.last_state)
             try:
                 saved = retained_state(Path(self.checkpoints[target.identity]))
                 replacement = await self._restore_state(target, saved, retained=True)
@@ -561,7 +613,11 @@ class Supervisor:
                     exc_info=True,
                 )
                 replacement = await self._restore_state(target, None, safe=True)
-                status = "Safe core recovered. Prior state: recovery-before-safe.json"
+                status = (
+                    "Safe core recovered. Prior state: recovery-before-safe.json"
+                    if backup_saved
+                    else "Safe core recovered; prior state backup could not be saved"
+                )
         if self.claimed_results:
             calls = len(self.claimed_results)
             status += (
@@ -576,7 +632,7 @@ class Supervisor:
         replacement.send("drain")
         self.routing = True
         self.last_size = None
-        self._record()
+        await self._record()
 
     def _begin(self, task: asyncio.Task[None]) -> None:
         self.transition = task
@@ -630,7 +686,7 @@ class Supervisor:
             self.last_size = dimensions
             current.send("size", columns=size.columns, rows=size.lines)
 
-    def _event(self, core: Core, message: dict[str, object]) -> None:
+    async def _event(self, core: Core, message: dict[str, object]) -> None:
         kind = message.get("kind")
         if kind == "ready":
             core.state = dict(configuration_fields(message["state"], "ready state"))
@@ -649,12 +705,12 @@ class Supervisor:
             core.captured.set() if kind == "handoff" else None
             if core is self.current:
                 self.last_state = core.state
-                self._record()
+                await self._record()
         elif kind == "capture_failed":
             core.error = text_field(message["error"], "capture error")
             core.captured.set()
         elif core is self.current:
-            self._request_event(message)
+            await self._request_event(message)
 
     def _copy(self, core: Core, message: Mapping[str, object]) -> None:
         try:
@@ -666,59 +722,65 @@ class Supervisor:
         if message.get("id"):
             core.send("copy_result", id=message["id"], text=text, ok=ok)
 
-    def _dispatch(self, message: Mapping[str, object]) -> None:
-        if self.last_state is not None:
-            self.last_state["pending_input"] = ""
-            self.last_state["store"] = message["store"]
-            views = configuration_fields(self.last_state["views"], "saved views")
-            identifier = text_field(message["chat"], "dispatch chat")
-            if identifier in views:
-                view = dict(configuration_fields(views[identifier], "saved view"))
-                updated = configuration_fields(message["view"], "dispatch view")
-                view.update({
-                    key: value for key, value in updated.items() if key != "state"
-                })
-                self.last_state["views"] = {**views, identifier: view}
-        self._record()
-        if self.current is not None:
-            self.current.send("dispatch_ack", id=message["id"])
+    async def _dispatch(self, message: Mapping[str, object]) -> None:
+        async with self.persistence_lock:
+            if self.last_state is not None:
+                self.last_state["pending_input"] = ""
+                self.last_state["store"] = message["store"]
+                views = configuration_fields(self.last_state["views"], "saved views")
+                identifier = text_field(message["chat"], "dispatch chat")
+                if identifier in views:
+                    view = dict(configuration_fields(views[identifier], "saved view"))
+                    updated = configuration_fields(message["view"], "dispatch view")
+                    view.update({
+                        key: value for key, value in updated.items() if key != "state"
+                    })
+                    self.last_state["views"] = {**views, identifier: view}
+            if await self._record_locked() and self.current is not None:
+                self.current.send("dispatch_ack", id=message["id"])
 
-    def _claim_update_result(self, message: Mapping[str, object]) -> None:
+    async def _claim_update_result(self, message: Mapping[str, object]) -> None:
         """Durably stop replay immediately before feedback reaches a provider."""
-        token = text_field(message.get("id"), "update result claim")
-        identifier = text_field(message.get("request_id"), "update request id")
-        accepted = identifier in self.claimed_results
-        result = self.update_results.pop(identifier, None)
-        if result is not None:
-            self.claimed_results[identifier] = result
-            try:
-                self._record()
-            except BaseException:
-                self.claimed_results.pop(identifier, None)
-                self.update_results[identifier] = result
-                raise
-            accepted = True
-        if self.current is not None:
-            self.current.send(
-                "update_result_started_ack",
-                id=token,
-                request_id=identifier,
-                accepted=accepted,
-            )
+        async with self.persistence_lock:
+            token = text_field(message.get("id"), "update result claim")
+            identifier = text_field(message.get("request_id"), "update request id")
+            accepted = identifier in self.claimed_results
+            result = self.update_results.pop(identifier, None)
+            if result is not None:
+                self.claimed_results[identifier] = result
+                try:
+                    accepted = await self._record_locked()
+                except BaseException:
+                    self.claimed_results.pop(identifier, None)
+                    self.update_results[identifier] = result
+                    raise
+                if not accepted:
+                    self.claimed_results.pop(identifier, None)
+                    self.update_results[identifier] = result
+            if self.current is not None:
+                self.current.send(
+                    "update_result_started_ack",
+                    id=token,
+                    request_id=identifier,
+                    accepted=accepted,
+                )
 
-    def _finish_update_result(self, message: Mapping[str, object]) -> None:
+    async def _finish_update_result(self, message: Mapping[str, object]) -> None:
         """Remove uncertainty evidence after the feedback reply is durable."""
-        identifier = text_field(message.get("request_id"), "update request id")
-        result = self.claimed_results.pop(identifier, None)
-        if result is None:
-            return
-        try:
-            self._record()
-        except BaseException:
-            self.claimed_results[identifier] = result
-            raise
+        async with self.persistence_lock:
+            identifier = text_field(message.get("request_id"), "update request id")
+            result = self.claimed_results.pop(identifier, None)
+            if result is None:
+                return
+            try:
+                saved = await self._record_locked()
+            except BaseException:
+                self.claimed_results[identifier] = result
+                raise
+            if not saved:
+                self.claimed_results[identifier] = result
 
-    def _update_result(self, message: Mapping[str, object], status: str) -> None:
+    async def _update_result(self, message: Mapping[str, object], status: str) -> None:
         identifier = message.get("request_id")
         if not isinstance(identifier, str) or not identifier:
             return
@@ -744,7 +806,7 @@ class Supervisor:
             "previous_release": self.previous.identity,
         }
         self.update_results[identifier] = result
-        self._record()
+        await self._record()
         if self.current is not None:
             self.current.send("update_result", result=result)
 
@@ -759,9 +821,9 @@ class Supervisor:
                     else self.initial,
                 )
         except asyncio.CancelledError:
-            self._update_result(message, "interrupted")
+            await self._update_result(message, "interrupted")
             raise
-        self._update_result(
+        await self._update_result(
             message,
             "activated" if self.status.startswith("Core updated") else "rejected",
         )
@@ -773,11 +835,11 @@ class Supervisor:
             self._resume()
             self._status("Queued work resumed")
 
-    def _request_update(self, message: Mapping[str, object]) -> None:
+    async def _request_update(self, message: Mapping[str, object]) -> None:
         kind = message.get("kind")
         if self.transition is not None and not self.transition.done():
             self._status("An update is already pending; Ctrl+R opens recovery")
-            self._update_result(message, "busy")
+            await self._update_result(message, "busy")
         elif message.get("request_id") and (
             kind == "update" or message.get("target") in {"previous", "known-good"}
         ):
@@ -797,35 +859,36 @@ class Supervisor:
             else:
                 self._status("Use /recover previous or /recover known-good")
 
-    def _request_event(self, message: Mapping[str, object]) -> None:
+    async def _request_event(self, message: Mapping[str, object]) -> None:
         kind = message.get("kind")
         if kind == "resume_queue":
             self._resume_queue()
         elif kind in {"update", "recover"}:
-            self._request_update(message)
+            await self._request_update(message)
         elif kind == "startup":
             self.routing = True
         elif kind == "diagnostics":
             self._status(f"Update diagnostics: {self.log}")
         elif kind == "dispatch":
-            self._dispatch(message)
+            await self._dispatch(message)
         elif kind == "update_result_started":
-            self._claim_update_result(message)
+            await self._claim_update_result(message)
         elif kind == "update_result_finished":
-            self._finish_update_result(message)
+            await self._finish_update_result(message)
         elif kind == "finished":
             if self.current is not None:
                 self.current.expected_exit = True
             self.exit_code = 0
 
     async def _loop(self) -> int:
+        await self._record()
         startup = asyncio.create_task(self._start())
         try:
             while self.exit_code is None:
                 await self._input()
                 for core in tuple(self.children):
                     while not core.events.empty():
-                        self._event(core, core.events.get_nowait())
+                        await self._event(core, core.events.get_nowait())
                 current = self.current
                 if (
                     current is not None
@@ -865,7 +928,7 @@ class Supervisor:
         # EOF can wake readiness before the main loop consumes a clean
         # startup-picker cancellation. Apply the ordered frames first.
         while not core.events.empty():
-            self._event(core, core.events.get_nowait())
+            await self._event(core, core.events.get_nowait())
         if core.expected_exit and self.exit_code == 0:
             return False
         await self._await_ready(core)
@@ -891,7 +954,7 @@ class Supervisor:
             self.exit_code = 1
         else:
             self.last_state = self.current.state
-            self._record()
+            await self._record()
             self._status("/update SOURCE | /recover previous | Ctrl+R recovery")
             self._resume()
 
@@ -909,6 +972,22 @@ class Supervisor:
         if self.start_error:
             sys.stderr.write("Error: " + self.start_error + "\n")
         return result
+
+
+def _replace_if_available(temporary: Path, destination: Path) -> bool:
+    """Attempt atomic replacement without waiting on transient sharing locks.
+
+    Returns
+    -------
+    bool
+        Whether replacement succeeded rather than encountering a permission error.
+
+    """
+    try:
+        temporary.replace(destination)
+    except PermissionError:
+        return False
+    return True
 
 
 def _workspace(argv: Sequence[str]) -> Path:

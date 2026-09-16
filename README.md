@@ -266,8 +266,9 @@ their owning plugins; there is no compatibility API or separate linear chat UI.
 
 ## Goals and workflows
 
-Use `/goal Implement the change and verify the tests` to continue until a judge
-accepts completion. `/goal clear` disables it. Profiles and routing live in the
+Use `/goal Implement the change and verify the tests` to start work immediately
+and continue until a judge accepts completion. No follow-up message is required.
+`/goal` shows status; `/goal clear` disables it. Profiles and routing live in the
 `plugins.settings.subagents` section of the configuration. The model can request serial
 `delegate` actions or bounded parallel `delegate_many` batches.
 See [subagents, workflows, and goals](docs/SUBAGENTS.md).

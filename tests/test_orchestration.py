@@ -1202,8 +1202,8 @@ class GoalModeTests(PackageTestCase):
         equal(len(retries), 1)
         equal(retries[0]["stage"], "judge")
 
-    def test_worker_keeps_job_active_until_goal_judge_accepts(self) -> None:
-        """Verify worker keeps job active until goal judge accepts."""
+    def test_worker_goal_command_runs_until_judge_accepts(self) -> None:
+        """One goal command keeps working after the judge rejects completion."""
         main = ScriptedChat(
             [
                 '{"action":"done","message":"not final"}',
@@ -1228,13 +1228,12 @@ class GoalModeTests(PackageTestCase):
             default_profile="primary",
         )
         controller = goal_module.GoalController(goal_module.GoalJudge(router))
-        controller.configure("Finish every check")
         run_options: dict[str, object] = {"goal_controller": controller}
         worker = AgentWorker(main, self.root, run_options=run_options)
         kinds = []
         result = None
         try:
-            worker.submit("Work on the goal")
+            worker.submit("/goal --judge primary Finish every check")
             while "completed" not in kinds:
                 event = worker.get_event(timeout=3)
                 if event is None:
@@ -1246,6 +1245,8 @@ class GoalModeTests(PackageTestCase):
             worker.stop()
             require(worker.join(3))
 
+        equal(main.calls[0][-1]["content"], "Finish every check")
+        require(controller.status() is None)
         equal(result, "actually final")
         equal(kinds.count("done"), 1)
         equal(kinds.count("goal_judge_decision"), 2)

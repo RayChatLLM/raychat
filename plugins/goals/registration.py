@@ -63,7 +63,7 @@ def register(api: PluginAPI) -> None:
             "goal",
             hooks.command,
             while_running=True,
-            description="Set, inspect, or clear the goal",
+            description="Start work toward a goal, inspect it, or clear it",
             usage="/goal [objective|clear]",
         ),
     )
@@ -108,11 +108,12 @@ class _GoalHooks:
         if controller is None:
             message = "Goal judging is not configured."
             raise ValueError(message)
-        result = controller.apply_command(
-            parse_goal_command("/goal" + (" " + arguments if arguments else "")),
-        )
+        command = parse_goal_command("/goal" + (" " + arguments if arguments else ""))
+        result = controller.apply_command(command)
         self.save(ctx)
         ctx.checkpoint()
+        if command.mode == "set" and command.objective is not None:
+            ctx.emit("command_task", {"prompt": command.objective})
         return result
 
     @staticmethod
