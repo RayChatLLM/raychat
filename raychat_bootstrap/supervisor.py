@@ -376,14 +376,14 @@ class Supervisor:
                         core.process.kill()
                 try:
                     await asyncio.wait_for(core.process.wait(), timeout=10)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     with contextlib.suppress(ProcessLookupError):
                         core.process.kill()
                     await asyncio.wait_for(core.process.wait(), timeout=10)
             if core.reader is not None:
                 try:
                     await asyncio.wait_for(core.reader, timeout=2)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     core.reader.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await core.reader
