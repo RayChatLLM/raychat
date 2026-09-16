@@ -18,18 +18,22 @@ cancelled result for that child and still waits for its other children. Follow-u
 messages retain the child's completed history and its read-only capabilities.
 Child chats remain available in the window for the lifetime of the application.
 
-## Model profiles
+## Role profiles
 
 The main model is always available as the `primary` profile and is the explicit
 default fallback. With no additional profile in the `plugins.settings.subagents` section of
 [`raychat.json`](../raychat.json), every delegated task and default goal
-judgment uses a fresh client of that same model class. Setting
+judgment uses the same provider endpoint, model, and authentication as the main
+chat. These come only from `RAYCHAT_BASE_URL`, `RAYCHAT_MODEL`, and
+`RAYCHAT_AUTH_TOKEN`. Setting
 `allow_default_fallback` to `false` makes an unsupported delegation fail instead;
 the primary profile remains directly available for goal judging.
 
 Add profiles and routes to the same `raychat.json` file used by the rest of the
-application. A profile names the environment variable containing its credential;
-literal keys are rejected as unknown fields. For example, merge the relevant profile and route settings into the existing
+application. Profiles customize routing, instruction roles, context limits,
+timeouts, and request options. They cannot override the provider identity:
+`url`, `model`, `key_env`, and literal credential fields are rejected as unknown
+settings. For example, merge the relevant profile and route settings into the existing
 `plugins.settings.subagents` object; this is a partial excerpt:
 
 ```json
@@ -45,9 +49,6 @@ literal keys are rejected as unknown fields. For example, merge the relevant pro
   },
   "profiles": {
     "reviewer": {
-      "url": "https://provider.example/v1/chat/completions",
-      "model": "vendor/review-model",
-      "key_env": "REVIEW_API_KEY",
       "purposes": ["review"],
       "priority": 20,
       "instruction_role": "developer",
@@ -57,9 +58,6 @@ literal keys are rejected as unknown fields. For example, merge the relevant pro
       "request_options": {"temperature": 0}
     },
     "judge-two": {
-      "url": "https://provider.example/v1/chat/completions",
-      "model": "vendor/judge-model",
-      "key_env": "JUDGE_API_KEY",
       "purposes": ["judge"],
       "priority": 20
     }
@@ -77,6 +75,12 @@ then the unique highest-priority compatible profile. Ties and missing
 capabilities fail closed. Only an explicitly configured default may be used as a
 fallback. Profile catalogs given to the model contain names, model IDs,
 purposes, and priorities—never endpoints or credentials.
+
+Each newly prepared child snapshots the current primary provider, including its
+captured implementation and authentication. A profile's request options override
+matching primary request options; other options and the primary timeout are
+inherited unless the profile specifies a timeout. Prepared and running children
+retain their snapshot while later children use the current primary configuration.
 
 ## Delegated workflows
 

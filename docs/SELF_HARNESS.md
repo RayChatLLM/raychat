@@ -125,8 +125,13 @@ From the running terminal chat:
 /benchmark-harness --output self-harness-report.json --repetitions 2
 ```
 
-This optional experiment makes real requests using the configured model and
-credential. It reuses the optimization plugin's fixed file-task cases and exact
+This optional experiment uses `RAYCHAT_AUTH_TOKEN`, `RAYCHAT_MODEL`, and
+`RAYCHAT_BASE_URL`, shared with the main chat. The live optimization and incident
+commands use this same configuration for both task and reflection requests;
+their request options and timeouts can differ. Offline demonstrations and
+benchmarks use local fixtures without provider credentials.
+
+The experiment reuses the optimization plugin's fixed file-task cases and exact
 action/artifact verifier: three training cases, two validation cases, and two
 test cases evaluated only after candidate selection. One candidate is proposed (with at most one format repair by default);
 baseline and candidate use the same model and sampling settings. A local gateway
@@ -140,46 +145,17 @@ counts and wall time. Broader efficacy needs representative repository tasks,
 independent tests, repeated trials and a comparison that accounts for the added
 model calls and evaluation cost.
 
-The [current terminal experiment](verification/artifacts/self_harness_tui_report.json)
-used `accounts/fireworks/models/glm-5p3-flash`, temperature 0, low reasoning effort,
-one candidate and two repetitions. The installed plugin generated and promoted a
-self-contained deployment-policy overlay. Across the repetitions:
-
-| Split | Baseline | Deployed candidate |
-| --- | ---: | ---: |
-| Held-in training | 0/6 | 6/6 |
-| Held-out validation | 2/4 | 4/4 |
-| Post-selection tests | 2/4 | 4/4 |
-
-The run made 83 provider calls in 83 seconds. Its TUI driver verified acceptance
-and a strictly better post-selection score. Exact artifact checks substantiate
-file creation. The sample is small, repetitions reuse cases, and development
-explorations also used this public task set; these are not independent general
-coding measurements. Test outcomes never entered the model's proposal prompt.
-The [preceding rejected run](verification/artifacts/self_harness_tui_rejected_report.json)
-is retained: its candidate evaluator encountered a configuration migration in
-progress and promotion was correctly rejected. Evaluators now receive captured
-plugin sources; the current comparison was run after configuration changes ended.
-
-A [later interrupted repeat](verification/artifacts/self_harness_tui_provider_failure_report.json)
-received an unsuccessful provider completion during baseline evaluation. It
-promoted no candidate and is not counted as evidence of improvement. The TUI
-driver accepts `--request-options` to record explicit provider options for every
-paired evaluation; the benchmark fixes temperature at 0 and output at 8,192 tokens.
+The TUI driver records acceptance or rejection and the post-selection score.
+It accepts `--request-options` for explicit options applied to every paired
+evaluation; the benchmark fixes temperature at 0 and output at 8,192 tokens.
+Test outcomes never enter the model's proposal prompt. An interrupted or failed
+provider run promotes no candidate and is not evidence of improvement.
 
 To reproduce the terminal acceptance with retained evidence (paid provider calls):
 
 ```bash
-python3 -B -S -m tools.self_harness_tui --output /tmp/raychat-harness-proof --model accounts/fireworks/models/glm-5p3-flash --request-options '{"reasoning_effort":"low"}'
+python3 -B -S -m tools.self_harness_tui --output /tmp/raychat-harness-proof --request-options '{"reasoning_effort":"low"}'
 ```
-
-Earlier [Nemotron](verification/artifacts/self_harness_sdk_v2_report.json) and
-[GLM](verification/artifacts/self_harness_glm_report.json) explorations were
-rejected. They exposed malformed proposals and overlays referring to evidence
-that future task sessions could not see. The final implementation provides
-bounded format repair and explicitly requires self-contained rules. The
-[original provider-failure report](verification/artifacts/self_harness_live_report.json)
-is also retained. No failed provider run is presented as an improvement.
 
 Evaluator JSON has its own bounded `max_evaluator_bytes` allowance (256 KiB by
 default), separate from the short output retained for ordinary command tools.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import builtins
-import hashlib
 import io
 import os
 import re
@@ -19,15 +18,11 @@ from unittest import mock
 from raychat.configuration import SETTINGS
 from raychat.plugin_sources import SourceTree
 from raychat.plugins import import_plugin
+from raychat.provider_settings import provider_settings
 from raychat.sdk import Chat, Messages, ProviderError
 from raychat.validation import (
-    array_field,
-    boolean_field,
-    integer_field,
     json_object,
-    number_field,
     object_field,
-    text_field,
 )
 from tests.module_origins import external_module_origins
 from tests.plugin_support import package, plugin_module
@@ -44,6 +39,13 @@ else:
     _rc_chat_completions = plugin_module("chat_completions.client")
     optimize_chat_prompt = plugin_module("optimization.optimize_chat_prompt")
     InstructionProposalSignature = optimize_chat_prompt.InstructionProposalSignature
+
+
+_PROVIDER_ENVIRONMENT = {
+    "RAYCHAT_AUTH_TOKEN": "fixture-optimization-token",
+    "RAYCHAT_MODEL": "fixture-model",
+    "RAYCHAT_BASE_URL": "https://provider.example/v1",
+}
 
 
 def _zero_evaluator(
@@ -101,7 +103,7 @@ class _OptimizationTestCase(unittest.TestCase):
 
     def reject_untyped(
         self,
-        expected: type[Exception],
+        expected: type[BaseException],
         pattern: str,
         operation: object,
         /,
@@ -519,86 +521,29 @@ class ChatPromptOptimizationTests(_OptimizationTestCase):
                 self.equal(sleeps, [])
                 self.equal(chat.retry_count, 0)
 
-    def test_provider_presets_and_auto_selection_are_exact(self) -> None:
-        """Provider presets and auto selection are exact."""
-        both_keys = {
-            "OPENROUTER_API_KEY": "openrouter-secret",
-            "FIREWORK_API_KEY": "fireworks-secret",
-            "FIREWORKS_API_KEY": "fireworks-alias",
-        }
-        automatic = optimize_chat_prompt.resolve_provider(
-            "auto",
-            url=None,
-            model=None,
-            key_env=None,
-            role="task",
-            request_options_text=None,
-            environ=both_keys,
+    def test_configured_roles_share_identity_and_keep_separate_request_options(
+        self,
+    ) -> None:
+        """Use one canonical identity while validating independent role options."""
+        settings = provider_settings(_PROVIDER_ENVIRONMENT)
+        task = optimize_chat_prompt.configured_provider(
+            settings,
+            '{"temperature":0,"max_tokens":1024}',
         )
-        self.equal(
-            automatic,
-            optimize_chat_prompt.ProviderSelection(
-                name="fireworks",
-                url="https://api.fireworks.ai/inference/v1/chat/completions",
-                model="accounts/fireworks/models/gpt-oss-120b",
-                key_env="FIREWORK_API_KEY",
-                request_options={
-                    "temperature": 0,
-                    "max_tokens": 1024,
-                    "reasoning_effort": "low",
-                    "response_format": {"type": "json_object"},
-                },
-            ),
+        reflection = optimize_chat_prompt.configured_provider(
+            settings,
+            '{"temperature":0.6,"max_tokens":4096}',
         )
-
-        openrouter = optimize_chat_prompt.resolve_provider(
-            "openrouter",
-            url=None,
-            model=None,
-            key_env=None,
-            role="task",
-            request_options_text=None,
-            environ={"OPENROUTER_API_KEY": "openrouter-secret"},
-        )
-        self.equal(
-            openrouter,
-            optimize_chat_prompt.ProviderSelection(
-                name="openrouter",
-                url="https://openrouter.ai/api/v1/chat/completions",
-                model="nvidia/nemotron-3.5-lightning:free",
-                key_env="OPENROUTER_API_KEY",
-                request_options={
-                    "temperature": 0,
-                    "max_tokens": 4096,
-                    "seed": 0,
-                    "reasoning": {"effort": "none"},
-                },
-            ),
-        )
-
-        fireworks_reflection = optimize_chat_prompt.resolve_provider(
-            "fireworks",
-            url=None,
-            model=None,
-            key_env=None,
-            role="reflection",
-            request_options_text=None,
-            environ={"FIREWORKS_API_KEY": "fireworks-alias"},
-        )
-        self.equal(
-            fireworks_reflection,
-            optimize_chat_prompt.ProviderSelection(
-                name="fireworks",
-                url="https://api.fireworks.ai/inference/v1/chat/completions",
-                model="accounts/fireworks/models/gpt-oss-120b",
-                key_env="FIREWORKS_API_KEY",
-                request_options={
-                    "temperature": 0.6,
-                    "max_tokens": 4096,
-                    "reasoning_effort": "medium",
-                },
-            ),
-        )
+        for role in (task, reflection):
+            client = role.client(1)
+            self.equal(client.url, settings.chat_url)
+            self.equal(client.model, settings.model)
+            self.equal(client.api_key, settings.auth_token)
+            self.equal(dict(client.request_options), role.request_options)
+            self.check(condition=settings.auth_token not in str(role.public_summary()))
+        self.equal(task.request_options, {"temperature": 0, "max_tokens": 1024})
+        self.equal(reflection.request_options, {"temperature": 0.6, "max_tokens": 4096})
+        self.check(condition=task.public_summary() != reflection.public_summary())
 
     def test_optimize_protocol_rejects_unbounded_or_noninteger_workers(self) -> None:
         """Optimize protocol rejects unbounded or noninteger workers."""
@@ -785,14 +730,6 @@ class ChatPromptOptimizationTests(_OptimizationTestCase):
 
     def test_require_improvement_does_not_write_candidate_on_no_test_gain(self) -> None:
         """Require improvement does not write candidate on no test gain."""
-        selection = optimize_chat_prompt.ProviderSelection(
-            name="custom",
-            url="https://provider.example/v1/chat/completions",
-            model="model",
-            key_env=None,
-            request_options={},
-        )
-        selections = [selection, selection]
         fake_run = _ScriptedRun({
             "held_out_test": {"improved": False},
             "improved": False,
@@ -801,16 +738,7 @@ class ChatPromptOptimizationTests(_OptimizationTestCase):
             output = Path(temporary) / "candidate.txt"
             report_path = Path(temporary) / "report.json"
             with (
-                mock.patch.object(
-                    optimize_chat_prompt,
-                    "resolve_provider",
-                    side_effect=selections,
-                ),
-                mock.patch.object(
-                    optimize_chat_prompt,
-                    "api_from_args",
-                    return_value=object(),
-                ),
+                mock.patch.dict(os.environ, _PROVIDER_ENVIRONMENT, clear=True),
                 mock.patch.object(
                     optimize_chat_prompt,
                     "run_live",
@@ -821,12 +749,6 @@ class ChatPromptOptimizationTests(_OptimizationTestCase):
                 code = optimize_chat_prompt.main(
                     [
                         "live",
-                        "--provider",
-                        "custom",
-                        "--url",
-                        selection.url,
-                        "--model",
-                        selection.model,
                         "--require-improvement",
                         "--output",
                         str(output),
@@ -1078,71 +1000,78 @@ class ProtocolSafetyTests(_OptimizationTestCase):
         self.equal(evaluation.score, 0.0)
         self.equal(evaluation.side_info["Failure"], "OversizedProtocolCandidate")
 
-    def test_separate_endpoint_does_not_receive_implicit_task_key(self) -> None:
-        """Separate endpoint does not receive implicit task key."""
-        environment = {
-            "LLM_API_KEY": "task-secret",
-            "REFLECTION_KEY": "reflection-secret",
-        }
-        with mock.patch.dict(os.environ, environment, clear=True):
-            without_key = optimize_chat_prompt.api_from_args(
-                url="https://reflection.example/v1/chat/completions",
-                model="reflection-model",
-                key_env=None,
-                timeout=1,
-                use_default_key=False,
-            )
-            explicit_key = optimize_chat_prompt.api_from_args(
-                url="https://reflection.example/v1/chat/completions",
-                model="reflection-model",
-                key_env="REFLECTION_KEY",
-                timeout=1,
-                use_default_key=False,
-            )
+    def test_live_requires_every_canonical_provider_variable(self) -> None:
+        """Reject incomplete identity before constructing or calling either role."""
+        for missing in _PROVIDER_ENVIRONMENT:
+            environment = dict(_PROVIDER_ENVIRONMENT)
+            del environment[missing]
+            errors = io.StringIO()
+            with (
+                self.subTest(missing=missing),
+                mock.patch.dict(os.environ, environment, clear=True),
+                mock.patch.object(optimize_chat_prompt, "run_live") as run,
+                mock.patch("sys.stderr", errors),
+            ):
+                result = optimize_chat_prompt.main(
+                    ["live", "--output", "unused.txt"],
+                )
+            self.equal(result, 1)
+            self.check(condition=missing in errors.getvalue())
+            self.check(condition=not run.called)
 
-        self.equal(without_key.api_key, "")
-        self.equal(explicit_key.api_key, "reflection-secret")
-
-    def test_live_cli_does_not_forward_task_key_env_cross_endpoint(self) -> None:
-        """Live cli does not forward task key env cross endpoint."""
+    def test_live_cli_uses_one_snapshot_for_both_roles(self) -> None:
+        """Construct both task and reflection clients from the canonical identity."""
         fake_run = _ScriptedRun({"ok": True})
-        api_arguments: list[dict[str, object]] = []
+        clients: list[Chat] = []
 
-        def record_api(**kwargs: object) -> object:
-            api_arguments.append(kwargs)
-            return object()
+        def record_run(
+            task: Chat,
+            reflection: Chat,
+            **_options: object,
+        ) -> _ScriptedRun:
+            clients.extend((task, reflection))
+            return fake_run
 
         with (
-            mock.patch.object(
-                optimize_chat_prompt,
-                "api_from_args",
-                side_effect=record_api,
-            ),
-            mock.patch.object(optimize_chat_prompt, "run_live", return_value=fake_run),
+            mock.patch.dict(os.environ, _PROVIDER_ENVIRONMENT, clear=True),
+            mock.patch.object(optimize_chat_prompt, "run_live", side_effect=record_run),
             mock.patch.object(optimize_chat_prompt, "write_protocol"),
             mock.patch("sys.stdout", new=io.StringIO()),
         ):
             result = optimize_chat_prompt.main(
-                [
-                    "live",
-                    "--url",
-                    "https://task.example/v1/chat/completions",
-                    "--model",
-                    "task-model",
-                    "--key-env",
-                    "TASK_KEY",
-                    "--reflection-url",
-                    "https://reflection.example/v1/chat/completions",
-                    "--reflection-model",
-                    "reflection-model",
-                    "--output",
-                    "optimized.txt",
-                ],
+                ["live", "--output", "optimized.txt"],
             )
-
         self.equal(result, 0)
-        self.equal(api_arguments[1]["key_env"], None)
-        self.check(condition=not (api_arguments[1]["use_default_key"]))
+        self.equal(len(clients), 2)
+        for client in clients:
+            if not isinstance(client, _rc_chat_completions.ChatAPI):
+                self.fail("Live optimization did not construct the provider client.")
+            self.equal(client.url, "https://provider.example/v1/chat/completions")
+            self.equal(client.model, "fixture-model")
+            self.equal(client.api_key, "fixture-optimization-token")
+
+    def test_live_cli_rejects_retired_provider_selectors(self) -> None:
+        """Reject endpoint, model and credential overrides for either role."""
+        for flag in (
+            "--provider",
+            "--url",
+            "--model",
+            "--key-env",
+            "--reflection-provider",
+            "--reflection-url",
+            "--reflection-model",
+            "--reflection-key-env",
+        ):
+            with (
+                self.subTest(flag=flag),
+                mock.patch("sys.stderr", new=io.StringIO()),
+            ):
+                self.reject_untyped(
+                    SystemExit,
+                    "2",
+                    optimize_chat_prompt.main,
+                    ["live", "--output", "unused.txt", flag, "unused"],
+                )
 
     def test_fixture_paths_cannot_escape_temporary_workspace(self) -> None:
         """Fixture paths cannot escape temporary workspace."""
@@ -1156,121 +1085,6 @@ class ProtocolSafetyTests(_OptimizationTestCase):
             optimize_chat_prompt.base_protocol(),
             case,
             optimize_chat_prompt.DeterministicTaskModel,
-        )
-
-    def test_recorded_hosted_proof_is_self_consistent_and_held_out(self) -> None:
-        """Recorded hosted proof is self consistent and held out."""
-        artifacts = (
-            Path(__file__).resolve().parents[1] / "docs" / "verification" / "artifacts"
-        )
-        protocol_bytes = (artifacts / "live_optimized_protocol.txt").read_bytes()
-        report = object_field(
-            json_object(
-                (artifacts / "live_optimization_report.json").read_text(
-                    encoding="utf-8",
-                ),
-            ),
-            "report",
-        )
-        baseline = object_field(report["baseline"], "baseline")
-        optimized = object_field(report["optimized"], "optimized")
-        evaluations = [
-            object_field(item, "evaluation")
-            for item in array_field(report["evaluations"], "evaluations")
-        ]
-        configuration = object_field(report["configuration"], "configuration")
-        # This archived hosted run predates later protocol revisions. Verify its
-        # recorded baseline prefix rather than substituting today's instructions.
-        base_bytes = protocol_bytes[
-            : integer_field(baseline["bytes"], "baseline.bytes")
-        ]
-
-        self.check(condition=bool(protocol_bytes.startswith(base_bytes + b"\n")))
-        self.check(condition=b"\r" not in protocol_bytes)
-        self.equal(len(base_bytes), baseline["bytes"])
-        self.equal(hashlib.sha256(base_bytes).hexdigest(), baseline["sha256"])
-        self.equal(len(protocol_bytes), optimized["bytes"])
-        self.equal(hashlib.sha256(protocol_bytes).hexdigest(), optimized["sha256"])
-        self.check(condition=bool(report["improved"]))
-        self.check(condition=bool(report["output_written"]))
-        self.check(
-            condition=bool(
-                object_field(report["safety"], "safety")["append_only_base_preserved"],
-            ),
-        )
-        self.equal(
-            number_field(baseline["validation_score"], "baseline.validation_score"),
-            0.5,
-        )
-        self.equal(
-            number_field(optimized["validation_score"], "optimized.validation_score"),
-            1.0,
-        )
-        self.equal(report["total_metric_calls"], 10)
-        candidate_validation_cases = {
-            record["case"]
-            for record in evaluations
-            if record["evaluated_candidate_sha256"] == optimized["sha256"]
-            and text_field(record["case"], "evaluation.case").startswith("validation_")
-        }
-        self.equal(
-            candidate_validation_cases,
-            {"validation_deployment_key_policy", "validation_failure_rollup"},
-        )
-
-        held_out = object_field(report["held_out_test"], "held_out_test")
-        records = [
-            object_field(item, "record")
-            for item in array_field(held_out["records"], "records")
-        ]
-        self.check(
-            condition=not "not passed to GEPA"
-            not in text_field(held_out["selection_isolation"], "selection_isolation"),
-        )
-        self.check(condition=bool(held_out["improved"]))
-        self.equal(number_field(held_out["mean_score_delta"], "mean_score_delta"), 0.5)
-        self.equal(
-            held_out["baseline"],
-            {"exact_json_rate": 1.0, "mean_score": 0.5, "passed": 2, "trials": 4},
-        )
-        self.equal(
-            held_out["optimized"],
-            {"exact_json_rate": 1.0, "mean_score": 1.0, "passed": 4, "trials": 4},
-        )
-        self.check(
-            condition=object_field(configuration["task"], "task")["model"]
-            != object_field(configuration["reflection"], "reflection")["model"],
-        )
-        appendix = object_field(
-            array_field(report["reflection_appendices"], "reflection_appendices")[0],
-            "appendix",
-        )
-        appendix_bytes = text_field(appendix["text"], "appendix.text").encode("utf-8")
-        self.equal(len(appendix_bytes), appendix["bytes"])
-        self.equal(hashlib.sha256(appendix_bytes).hexdigest(), appendix["sha256"])
-        self.check(condition=not appendix_bytes not in protocol_bytes)
-
-        policy_records = [
-            record
-            for record in records
-            if record["case"] == "test_deployment_key_policy"
-        ]
-        self.equal([record["score"] for record in policy_records], [0.0, 1.0, 0.0, 1.0])
-        self.check(
-            condition=bool(
-                all(
-                    boolean_field(
-                        object_field(artifact, "artifact")["byte_exact"],
-                        "byte_exact",
-                    )
-                    for record in records
-                    if record["variant"] == "optimized"
-                    for artifact in array_field(
-                        record["verified_artifacts"],
-                        "verified_artifacts",
-                    )
-                ),
-            ),
         )
 
 

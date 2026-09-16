@@ -31,8 +31,6 @@ DEFAULT_WORKSPACE = SETTINGS.chat.workspace
 
 _ENVIRONMENT = SETTINGS.chat.environment
 
-_MODEL_ENV = _ENVIRONMENT.model
-
 _CONTEXT_ENV = _ENVIRONMENT.context_chars
 
 _INSTRUCTION_ROLE_ENV = _ENVIRONMENT.instruction_role

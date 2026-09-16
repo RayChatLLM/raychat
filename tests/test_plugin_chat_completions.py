@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import http.client
 import io
@@ -16,18 +17,29 @@ from unittest import mock
 from urllib.error import HTTPError, URLError
 
 from raychat.configuration import SETTINGS
-from raychat.event_types import SESSION_RESTORE, Lifecycle
+from raychat.event_types import SESSION_RESET, SESSION_RESTORE, Lifecycle
 from raychat.resources import create_resources, create_worker
 from raychat.sdk import HTTP_PROVIDER, ProviderError
 from raychat.service_contracts import CHAT, ExportedProvider
-from raychat.validation import json_object
+from raychat.validation import json_object, text_field
 from tests.assertions import TypedTestCase
-from tests.plugin_support import registered_service, registered_session
-from tests.provider_support import api_response, make_api, provider, registered_provider
-from tests.tui_support import arguments
+from tests.plugin_support import (
+    provider_factory,
+    registered_service,
+    registered_session,
+)
+from tests.provider_support import (
+    FIXTURE_PROVIDER_MODEL,
+    FIXTURE_PROVIDER_URL,
+    api_response,
+    make_api,
+    provider,
+    registered_provider,
+)
+from tests.tui_support import argument_fields, arguments
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 _Error = TypeVar("_Error", bound=Exception)
 _Arguments = ParamSpec("_Arguments")
@@ -71,8 +83,33 @@ class ProviderTestCase(TypedTestCase):
 class ChatAPITests(ProviderTestCase):
     """Check endpoint validation, request bytes and bounded completion responses."""
 
-    def test_model_selection_survives_plugin_reload_and_session_restore(self) -> None:
-        """Use the chosen identifier across replacement clients and restored state."""
+    def test_configured_provider_uses_only_canonical_environment_identity(self) -> None:
+        """Ignore stale dynamic identity fields in favor of the required environment."""
+        args = argparse.Namespace(
+            api_timeout=7,
+            request_options="{}",
+            model="obsolete-model",
+            url="https://obsolete.invalid/chat/completions",
+        )
+        client = provider_factory("chat_completions")(
+            args,
+            {
+                "RAYCHAT_AUTH_TOKEN": "synthetic-canonical-token",
+                "RAYCHAT_MODEL": "canonical-model",
+                "RAYCHAT_BASE_URL": "https://canonical.invalid/v1",
+            },
+        )
+        if not isinstance(client, provider.ChatAPI):
+            self.fail("The provider registry did not return the captured HTTP client.")
+        self.equal(client.url, "https://canonical.invalid/v1/chat/completions")
+        self.equal(client.model, "canonical-model")
+        self.equal(client.api_key, "synthetic-canonical-token")
+        self.equal(argument_fields(args)["model"], "canonical-model")
+
+    def test_model_discovery_cannot_override_environment_or_restored_identity(
+        self,
+    ) -> None:
+        """Keep the configured model after selection, reload, restore and reset."""
         with (
             tempfile.TemporaryDirectory() as directory,
             mock.patch.object(Path, "home", return_value=Path(directory)),
@@ -81,10 +118,15 @@ class ChatAPITests(ProviderTestCase):
                 "--workspace",
                 directory,
                 "--no-memory",
-                "--model",
-                "original",
             ])
-            resources = create_resources(args, {})
+            resources = create_resources(
+                args,
+                {
+                    "RAYCHAT_AUTH_TOKEN": "synthetic-discovery-token",
+                    "RAYCHAT_MODEL": "original",
+                    "RAYCHAT_BASE_URL": "https://fixture-provider.invalid/v1",
+                },
+            )
             self.addCleanup(resources.close)
             runtime = resources.runtime
             primary: object = CHAT.validate(runtime.services[CHAT.name]).chat
@@ -93,26 +135,39 @@ class ChatAPITests(ProviderTestCase):
                 "original",
                 "nemotron",
             ]
-            runtime.select_menu("models", "nemotron")
+            notices: list[str] = []
+
+            def notify(kind: str, payload: Mapping[str, object]) -> None:
+                if kind == "notification":
+                    notices.append(text_field(payload["message"], "notification"))
+
+            runtime.select_menu("models", "nemotron", notify=notify)
             if not isinstance(primary, ExportedProvider) or not isinstance(
                 clone,
                 ExportedProvider,
             ):
                 self.fail("Expected HTTP provider clients.")
-            self.equal(primary.private_payload()["options"]["model"], "nemotron")
+            self.equal(primary.private_payload()["options"]["model"], "original")
             self.equal(clone.private_payload()["options"]["model"], "original")
+            self.require("model" not in runtime.state["chat_completions"])
+            self.equal(
+                notices,
+                ["Set RAYCHAT_MODEL to nemotron and restart RayChat to use it."],
+            )
             if resources.store is None:
                 self.fail("The fixture requires a session journal.")
             worker = create_worker(args, resources)
             self.addCleanup(worker.join)
             self.addCleanup(worker.stop)
             worker.restore_conversation(resources.store.snapshot())
-            self.equal(runtime.menu("models").selected, "nemotron")
+            self.equal(runtime.menu("models").selected, "original")
             runtime.reload()
-            self.equal(runtime.menu("models").selected, "nemotron")
+            self.equal(runtime.menu("models").selected, "original")
             runtime.state["chat_completions"]["model"] = "restored-model"
             runtime.emit(SESSION_RESTORE, Lifecycle(), strict=True)
-            self.equal(runtime.menu("models").selected, "restored-model")
+            self.equal(runtime.menu("models").selected, "original")
+            runtime.emit(SESSION_RESET, Lifecycle(), strict=True)
+            self.equal(runtime.menu("models").selected, "original")
 
     def test_models_uses_get_and_configured_credentials(self) -> None:
         """Discover all identifiers without posting a completion or changing model."""
@@ -216,7 +271,7 @@ class ChatAPITests(ProviderTestCase):
             )
 
         request = opener.single_request()
-        if request.full_url != provider.DEFAULT_API_URL:
+        if request.full_url != FIXTURE_PROVIDER_URL:
             self.fail(
                 "The HTTP request used the wrong endpoint.",
             )
@@ -233,7 +288,7 @@ class ChatAPITests(ProviderTestCase):
                 "The response reader used the wrong byte limit.",
             )
         if json_object(request.data if isinstance(request.data, bytes) else b"") != {
-            "model": provider.DEFAULT_MODEL,
+            "model": FIXTURE_PROVIDER_MODEL,
             "messages": messages,
         }:
             self.fail(
@@ -319,7 +374,7 @@ class ChatAPITests(ProviderTestCase):
                     ValueError,
                     registered_provider,
                     "reserved chat fields",
-                    provider.DEFAULT_API_URL,
+                    FIXTURE_PROVIDER_URL,
                     "any-model",
                     request_options={field: False},
                 )
@@ -355,7 +410,7 @@ class ChatAPITests(ProviderTestCase):
             ValueError,
             registered_provider,
             "UTF-8 bytes",
-            provider.DEFAULT_API_URL,
+            FIXTURE_PROVIDER_URL,
             "any-model",
             request_options={
                 "response_format": {"schema": "é" * provider.MAX_REQUEST_OPTIONS_BYTES},
@@ -368,7 +423,7 @@ class ChatAPITests(ProviderTestCase):
             ValueError,
             registered_provider,
             "finite JSON values",
-            provider.DEFAULT_API_URL,
+            FIXTURE_PROVIDER_URL,
             "any-model",
             request_options={"value": "\ud800"},
         )

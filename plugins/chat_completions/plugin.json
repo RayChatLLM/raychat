@@ -6,14 +6,6 @@
   "description": "chat completions capabilities",
   "requires": {},
   "defaults": {
-    "url": "https://api.fireworks.ai/inference/v1/chat/completions",
-    "model": "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
-    "api_key_envs": [
-      "FIREWORK_API_KEY",
-      "FIREWORKS_API_KEY",
-      "LLM_API_KEY"
-    ],
-    "custom_api_key_env": "LLM_API_KEY",
     "user_agent": "stdlib-chat-agent/1",
     "request_options": {},
     "api_timeout_seconds": 120,
@@ -47,14 +39,6 @@
   "cli": [
     {
       "flags": [
-        "--url"
-      ],
-      "setting": "url",
-      "environment": "LLM_API_URL",
-      "help": "HTTP chat-completions endpoint"
-    },
-    {
-      "flags": [
         "--api-timeout"
       ],
       "type": "float",
@@ -69,5 +53,5 @@
       "environment": "LLM_REQUEST_OPTIONS"
     }
   ],
-  "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Operator launch options include --url, --model, --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to fetch all model IDs from the configured GET /models endpoint, filter the menu, and select the model for subsequent requests."
+  "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Provider identity and authentication come only from RAYCHAT_AUTH_TOKEN, RAYCHAT_MODEL and RAYCHAT_BASE_URL. Operator launch options include --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to discover model IDs; selecting one explains how to set RAYCHAT_MODEL and restart. Discovery never changes the active model."
 }

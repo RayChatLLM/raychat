@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from raychat.composition import create_runtime
+from raychat.provider_settings import ProviderSettings, provider_settings
 from raychat.sdk import (
     HTTP_PROVIDER,
     SUBAGENT_FACTORY,
@@ -174,13 +175,13 @@ def _ledger_row(value: object) -> LedgerRow:
 
 def _new_report(
     settings: _Settings,
-    provider: ProviderService,
+    model: str,
     options: dict[str, object],
 ) -> WorkflowReport:
     return {
         "agents": settings.agents,
         "live": settings.live,
-        "model": provider.default_model if settings.live else "deterministic-http",
+        "model": model,
         "context_chars": settings.context_chars,
         "max_parallel": settings.parallel,
         "padding_pages": settings.padding_pages,
@@ -218,7 +219,7 @@ class _Benchmark:
     settings: _Settings
     provider: ProviderService
     options: dict[str, object]
-    credential: str
+    upstream: ProviderSettings | None
     report: WorkflowReport
     started: float = field(default_factory=time.monotonic)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -282,11 +283,11 @@ class _Benchmark:
         return messages, index
 
     def reply(self, messages: Messages, index: int) -> str:
-        if self.settings.live:
+        if self.upstream is not None:
             client = self.provider.ChatAPI(
-                self.provider.default_url,
-                self.provider.default_model,
-                self.credential,
+                self.upstream.chat_url,
+                self.upstream.model,
+                self.upstream.auth_token,
                 60,
                 request_options=self.options,
             )
@@ -646,11 +647,6 @@ def run(
     WorkflowReport
         All measurements, child failures and names of failed stress conditions.
 
-    Raises
-    ------
-    ValueError
-        If live mode has no configured provider credential.
-
     """
     settings = _Settings(
         agents=agents,
@@ -666,16 +662,17 @@ def run(
         "temperature": 0,
         "max_tokens": 8192,
     }
-    credential = provider.credential(provider.default_url, os.environ) if live else ""
-    if live and not credential:
-        message = "The live benchmark requires a configured provider credential."
-        raise ValueError(message)
+    upstream = provider_settings(os.environ) if live else None
     benchmark = _Benchmark(
         settings,
         provider,
         options,
-        credential,
-        _new_report(settings, provider, options),
+        upstream,
+        _new_report(
+            settings,
+            upstream.model if upstream is not None else "deterministic-http",
+            options,
+        ),
     )
     with tempfile.TemporaryDirectory(prefix="raychat-workflow-benchmark-") as temporary:
         root = Path(temporary)

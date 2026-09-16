@@ -21,7 +21,7 @@ python3 -B -S -m unittest discover -s tests -v
 
 The explicit `release.source_files` allowlist in `raychat.json` includes the host,
 SDK, plugin projects, catalog and archives, acceptance drivers, fixtures,
-documentation, and selected proof artifacts. New files must be added to this
+documentation, and environment templates. New files must be added to this
 sorted allowlist. GEPA and its license belong to the optimization package at
 `plugins/optimization/gepa/` and `plugins/optimization/GEPA_LICENSE`.
 
@@ -36,9 +36,8 @@ the checked-in sources even when rebuilt on Windows.
 
 The complete unit suite must pass in addition to strict typing, lint/format checks
 and real terminal acceptance. Retain its full output, including failures, errors
-and skips. A static-only run is not full verification. Recorded
-post-reorganization results, source hashes and the reviewed static-only fixture
-correction are in [the evidence index](verification/README.md).
+and skips. A static-only run is not full verification. Keep generated evidence
+with its source hash in the selected build directory or CI artifacts.
 
 ## Drive behavioral acceptance
 
@@ -132,14 +131,18 @@ root directory:
 
 ```bash
 cd raychat
-export FIREWORK_API_KEY="your-key"
+export RAYCHAT_AUTH_TOKEN="your-api-token"
+export RAYCHAT_MODEL="your-model-id"
+export RAYCHAT_BASE_URL="https://provider.example/v1"
 python3 -B -S raychat.py --workspace ./workspace
 ```
 
 The configured release profile installs its feature packages on first launch.
-Package defaults, including endpoints, models, profiles, and feature limits, live
-in each `plugin.json`; operator overrides live in `raychat.json` under
-`plugins.settings.ID`. Core defaults remain in `raychat.json`; `--help` lists
+Provider identity comes only from those three environment variables. Platform
+templates and loading instructions are included in `environment/` and `README.md`.
+Package defaults for role profiles and feature limits live in each `plugin.json`;
+operator overrides live in `raychat.json` under `plugins.settings.ID`.
+Core defaults remain in `raychat.json`; `--help` lists
 launch overrides. Only live model calls need a provider key and external network
 access.
 

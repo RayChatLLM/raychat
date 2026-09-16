@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Protocol, TypedDict
 
 import raychat.protocol as _rc_protocol
 from raychat import configuration
+from raychat.provider_settings import provider_settings
 from raychat.sdk import ProviderService, ServiceSlot
 from raychat.service_contracts import OptimizationComponent
 from raychat.validation import (
@@ -43,7 +44,7 @@ from raychat.validation import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from raychat.sdk import Chat, Messages, ProviderClient
+    from raychat.sdk import Chat, Messages
     from raychat.service_contracts import OptimizationBindings
 
     from .gepa.result import GEPAResult
@@ -1334,7 +1335,7 @@ def run_hosted(
     reflection_chat: Chat,
     settings: HostedSettings | None = None,
 ) -> IncidentOptimizationRun:
-    """Optimize with independent hosted task and reflection models.
+    """Optimize with separate task and reflection requests to the shared model.
 
     Returns
     -------
@@ -1344,7 +1345,7 @@ def run_hosted(
     Raises
     ------
     ValueError
-        If model roles overlap or a callable cannot run concurrently.
+        If a callable cannot run concurrently.
 
     """
     settings = HostedSettings() if settings is None else settings
@@ -1357,14 +1358,6 @@ def run_hosted(
         test_repeats=settings.test_repeats,
     )
     boolean_field(settings.cache_evaluation, "cache_evaluation")
-    if (
-        isinstance(task_chat, _provider.get().ChatAPI)
-        and isinstance(reflection_chat, _provider.get().ChatAPI)
-        and _provider.get().same_endpoint(task_chat.url, reflection_chat.url)
-        and task_chat.model == reflection_chat.model
-    ):
-        error_message = "Task and reflection roles must use distinct hosted models."
-        raise ValueError(error_message)
     if settings.workers > 1 and not isinstance(
         task_chat,
         (_provider.get().ChatAPI, port.ThreadLocalChatAPI),
@@ -1419,7 +1412,7 @@ def run_hosted(
     run_configuration = dict(run_options)
     run_configuration.update(
         {
-            "kind": "hosted-two-model",
+            "kind": "hosted-task-reflection",
             "workers": settings.workers,
             "cache_evaluations": settings.cache_evaluation,
             "test_repeats": settings.test_repeats,
@@ -1482,19 +1475,6 @@ class HostedSettings(SelectionSettings):
     configuration: Mapping[str, object] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, kw_only=True)
-class ProviderRequest:
-    """Keep one provider role's credential, endpoint and request options together."""
-
-    provider: str
-    role: str
-    url: str | None = None
-    model: str | None = None
-    key_env: str | None = None
-    request_options: str | None = None
-    timeout: float = _PLUGIN_SETTINGS.defaults.api_timeout_seconds
-
-
 class CLIArguments(argparse.Namespace):
     """Bind parser destinations to their concrete CLI value types."""
 
@@ -1505,15 +1485,7 @@ class CLIArguments(argparse.Namespace):
     output: Path | None = None
     report: Path | None = None
     show_prompt: bool = False
-    provider: str = _PLUGIN_SETTINGS.opaque_demo.live_provider
-    url: str | None = None
-    model: str | None = None
-    key_env: str | None = None
     task_request_options: str | None = None
-    reflection_provider: str = _PLUGIN_SETTINGS.opaque_demo.live_reflection_provider
-    reflection_url: str | None = None
-    reflection_model: str | None = None
-    reflection_key_env: str | None = None
     reflection_request_options: str | None = None
     api_timeout: float = _PLUGIN_SETTINGS.defaults.api_timeout_seconds
     test_repeats: int = _PLUGIN_SETTINGS.opaque_demo.live_test_repeats
@@ -1538,24 +1510,8 @@ def _parser() -> argparse.ArgumentParser:
     demo.add_argument("--report", type=Path)
     demo.add_argument("--show-prompt", action="store_true")
 
-    live = subparsers.add_parser("live", help="run Task A with two hosted models")
-    live.add_argument(
-        "--provider",
-        choices=port.PROVIDER_CHOICES,
-        default=_PLUGIN_SETTINGS.opaque_demo.live_provider,
-    )
-    live.add_argument("--url")
-    live.add_argument("--model")
-    live.add_argument("--key-env")
+    live = subparsers.add_parser("live", help="run Task A with the shared model")
     live.add_argument("--task-request-options")
-    live.add_argument(
-        "--reflection-provider",
-        choices=port.PROVIDER_CHOICES,
-        default=_PLUGIN_SETTINGS.opaque_demo.live_reflection_provider,
-    )
-    live.add_argument("--reflection-url")
-    live.add_argument("--reflection-model")
-    live.add_argument("--reflection-key-env")
     live.add_argument("--reflection-request-options")
     live.add_argument(
         "--api-timeout",
@@ -1600,61 +1556,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def provider_api(
-    request: ProviderRequest,
-) -> tuple[port.ProviderSelection, ProviderClient]:
-    """Resolve one provider role without leaking preset credentials.
-
-    Returns
-    -------
-    tuple
-        The public provider selection and its configured client.
-
-    Raises
-    ------
-    ValueError
-        If a named preset is combined with an unrelated endpoint.
-
-    """
-    provider = request.provider
-    url = request.url
-    model = request.model
-    key_env = request.key_env
-    role = request.role
-    request_options = request.request_options
-    timeout = request.timeout
-    if provider in port.PROVIDER_NAMES and url is not None:
-        detected = port.provider_for_url(url)
-        if detected != provider:
-            error_message = (
-                f"Refusing to send the {provider} preset credential to a "
-                "non-matching endpoint; use --provider custom and an explicit "
-                "--key-env instead."
-            )
-            raise ValueError(
-                error_message,
-            )
-    selection = port.resolve_provider(
-        provider,
-        url=url,
-        model=model,
-        key_env=key_env,
-        role=role,
-        request_options_text=request_options,
-        environ=os.environ,
-        allow_implicit_custom_key=False,
-    )
-    api = port.api_from_args(
-        url=selection.url,
-        model=selection.model,
-        key_env=selection.key_env,
-        timeout=timeout,
-        use_default_key=False,
-        request_options=selection.request_options,
-    )
-    return selection, api
-
-
 def _execute_cli(args: CLIArguments) -> int:
     if args.output is not None and args.report is not None:
         output_key = os.path.normcase(str(args.output.resolve()))
@@ -1669,28 +1570,14 @@ def _execute_cli(args: CLIArguments) -> int:
             workers=args.workers,
         )
     else:
-        task_selection, task_api = provider_api(
-            ProviderRequest(
-                provider=args.provider,
-                url=args.url,
-                model=args.model,
-                key_env=args.key_env,
-                role="task",
-                request_options=args.task_request_options,
-                timeout=args.api_timeout,
-            ),
+        settings = provider_settings(os.environ)
+        task_selection = port.configured_provider(settings, args.task_request_options)
+        reflection_selection = port.configured_provider(
+            settings,
+            args.reflection_request_options,
         )
-        reflection_selection, reflection_api = provider_api(
-            ProviderRequest(
-                provider=args.reflection_provider,
-                url=args.reflection_url,
-                model=args.reflection_model,
-                key_env=args.reflection_key_env,
-                role="reflection",
-                request_options=args.reflection_request_options,
-                timeout=args.api_timeout,
-            ),
-        )
+        task_api = task_selection.client(args.api_timeout)
+        reflection_api = reflection_selection.client(args.api_timeout)
         run = run_hosted(
             task_api,
             reflection_api,

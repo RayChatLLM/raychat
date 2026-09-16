@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict
 
@@ -14,7 +12,7 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
 from raychat.configuration import SETTINGS, captured_settings
-from raychat.sdk import ProviderClient, ProviderService, ServiceSlot
+from raychat.sdk import ProviderService, ServiceSlot
 from raychat.validation import configuration_fields, plain
 
 from .configuration import ProfileSettings, SubagentsSettings
@@ -27,8 +25,6 @@ _provider_slot = ServiceSlot[ProviderService]("http_provider")
 
 _namespace: object = globals()
 _PLUGIN_SETTINGS = load_settings(_namespace)
-
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _exact_keys(
@@ -62,7 +58,6 @@ class CoordinatorOptions(_RequiredCoordinatorOptions, total=False):
     primary_request_options: Mapping[str, object] | None
     primary_source: Mapping[str, object] | None
     configuration: object
-    environ: Mapping[str, str] | None
     timeout: float
     context_chars: int
     keep_recent_turns: int
@@ -81,7 +76,6 @@ class _CoordinatorOptions:
     primary_source: Mapping[str, object] | None = None
     workspace: str | Path
     configuration: object = None
-    environ: Mapping[str, str] | None = None
     timeout: float = SETTINGS.chat.command_timeout_seconds
     context_chars: int = SETTINGS.chat.context_chars
     keep_recent_turns: int = SETTINGS.chat.keep_recent_turns
@@ -110,7 +104,6 @@ class _CoordinatorBuilder:
     def __init__(self, options: _CoordinatorOptions) -> None:
         self.options = options
         self.provider = _provider_slot.get()
-        self.environ = options.environ if options.environ is not None else os.environ
         self.api_timeout = (
             options.primary_api_timeout
             if options.primary_api_timeout is not None
@@ -166,15 +159,11 @@ class _CoordinatorBuilder:
             )
             raise ValueError(message)
         profiles = [primary]
-        secrets: list[str] = []
         for name, profile in data.profiles.items():
             if name == primary.name:
                 message = "The primary profile is reserved."
                 raise ValueError(message)
-            selected, secret = self.additional_profile(name, profile, data)
-            profiles.append(selected)
-            if secret:
-                secrets.append(secret)
+            profiles.append(self.additional_profile(name, profile, primary))
 
         router = ModelRouter(
             profiles,
@@ -191,28 +180,15 @@ class _CoordinatorBuilder:
             keep_recent_turns=self.options.keep_recent_turns,
             instruction_role=self.options.instruction_role,
             protocol=self.options.protocol,
-            redact_values=secrets,
+            redact_values=(self.options.primary_api_key,),
         )
 
     def additional_profile(
         self,
         name: str,
         profile: ProfileSettings,
-        data: SubagentsSettings,
-    ) -> tuple[ModelProfile, str]:
-        key_env = profile.key_env
-        if key_env is not None and _ENV_NAME.fullmatch(key_env) is None:
-            message = f"Profile {name!r} key_env is invalid."
-            raise ValueError(message)
-        key = self.environ.get(key_env, "") if key_env is not None else ""
-        if key_env is not None and not key:
-            message = f"Profile {name!r} requires environment variable {key_env}."
-            raise ValueError(message)
-        api_timeout = (
-            profile.api_timeout
-            if profile.api_timeout is not None
-            else self.provider.default_timeout
-        )
+        primary: ModelProfile,
+    ) -> ModelProfile:
         options = self.provider.validate_options(plain(profile.request_options))
         selected_role = (
             profile.instruction_role
@@ -230,50 +206,19 @@ class _CoordinatorBuilder:
             else self.options.keep_recent_turns
         )
         priority = (
-            profile.priority
-            if profile.priority is not None
-            else data.default_profile_priority
+            profile.priority if profile.priority is not None else primary.priority
         )
-        validated = self.provider.ChatAPI(
-            profile.url,
-            profile.model,
-            key,
-            api_timeout,
-            request_options=options,
-        )
-
-        def factory(
-            *,
-            endpoint: str = profile.url,
-            selected_model: str = profile.model,
-            api_key: str = key,
-            selected_timeout: float = api_timeout,
-            request_options: dict[str, object] = options,
-        ) -> ProviderClient:
-            return self.provider.ChatAPI(
-                endpoint,
-                selected_model,
-                api_key,
-                selected_timeout,
-                request_options=request_options,
-            )
-
-        result = ModelProfile(
+        return ModelProfile(
             name=name,
-            model=profile.model,
-            chat_factory=factory,
+            model=primary.model,
+            chat_factory=primary.chat_factory,
             purposes=profile.purposes,
             priority=priority,
-            process_spec=self.provider.ProviderSpec(
-                profile.url,
-                profile.model,
-                key,
-                api_timeout,
-                options,
-                source=validated.private_payload().get("source"),
-            ),
+            process_spec=primary.process_spec,
             instruction_role=selected_role,
             context_chars=selected_context,
             keep_recent_turns=selected_keep_recent,
+            inherits_primary=True,
+            api_timeout=profile.api_timeout,
+            request_options=options,
         )
-        return result, key

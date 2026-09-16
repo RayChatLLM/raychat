@@ -95,7 +95,6 @@ def summarize_report(report: Mapping[str, object]) -> dict[str, object]:
 def run(
     case: Case,
     *,
-    model: str | None,
     repetitions: int,
     request_options: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -112,7 +111,7 @@ def run(
         The observed result violates a retained scenario requirement.
 
     """
-    if model is not None or request_options is not None:
+    if request_options is not None:
         config = read_object(case.config)
         provider = object_field(
             object_field(
@@ -121,10 +120,7 @@ def run(
             ).setdefault("chat_completions", {}),
             "chat provider",
         )
-        if model is not None:
-            provider["model"] = model
-        if request_options is not None:
-            provider["request_options"] = request_options
+        provider["request_options"] = request_options
         case.config.write_text(json_text(config))
     path = case.output / "report.json"
     chat = TerminalChat(
@@ -167,7 +163,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=SOURCE)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--model")
     parser.add_argument(
         "--request-options",
         help="JSON provider options used for every paired evaluation",
@@ -176,7 +171,6 @@ def main() -> None:
     args = parser.parse_args()
     paths = verification_paths(args)
     request_options: object = args.request_options
-    model: object = args.model
     repetitions: object = args.repetitions
     try:
         options = (
@@ -192,7 +186,6 @@ def main() -> None:
     case = Case(paths.root, paths.output)
     result = run(
         case,
-        model=text_field(model, "model", nullable=True),
         repetitions=integer_field(repetitions, "repetitions"),
         request_options=options,
     )

@@ -832,9 +832,8 @@ def _child_checkpoint(case: Case, path: Path, url: str, *, complete: bool) -> No
         str(path),
         "--provider",
         "chat_completions",
-        "--url",
-        url,
         persist=True,
+        provider_url=url,
     )
     try:
         chat.wait("Main chat", 30)

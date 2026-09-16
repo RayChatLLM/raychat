@@ -582,7 +582,7 @@ class ProcessExecutionTests(_WorkspaceFixture):
         """Run command filters credentials from child environment."""
         code = (
             "import json,os; print(json.dumps({"
-            "'fireworks': os.getenv('FIREWORK_API_KEY'),"
+            "'auth_token': os.getenv('RAYCHAT_AUTH_TOKEN'),"
             "'other': os.getenv('CHAT_AGENT_TEST_SECRET'),"
             "'home': os.getenv('HOME'),"
             "'profile': os.getenv('USERPROFILE'),"
@@ -593,7 +593,7 @@ class ProcessExecutionTests(_WorkspaceFixture):
             "'cargo_home': os.getenv('CARGO_HOME')}))"
         )
         environment = {
-            "FIREWORK_API_KEY": "super-secret",
+            "RAYCHAT_AUTH_TOKEN": "super-secret",
             "CHAT_AGENT_TEST_SECRET": "hidden",
             "HOME": "portable-home",
             "USERPROFILE": "portable-profile",
@@ -609,7 +609,7 @@ class ProcessExecutionTests(_WorkspaceFixture):
         self.equal(
             json_object(result["stdout"]),
             {
-                "fireworks": None,
+                "auth_token": None,
                 "other": None,
                 "home": "portable-home",
                 "profile": "portable-profile",

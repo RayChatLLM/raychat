@@ -53,7 +53,7 @@ if TYPE_CHECKING:
         """Keep provider factory results and validated option values precise."""
         api.register_typed_service(HTTP_PROVIDER, service)
         assert_type(ctx.require_service(HTTP_PROVIDER), ProviderService)
-        assert_type(ctx.require_service(HTTP_PROVIDER).default_model, str)
+        assert_type(ctx.require_service(HTTP_PROVIDER).default_timeout, float)
         client = service.ChatAPI("https://example.test/chat", "model", timeout=5)
         assert_type(client.private_payload(), WorkerPayload)
         assert_type(client.private_payload()["source"], dict[str, object])
@@ -87,7 +87,7 @@ if TYPE_CHECKING:
     ) -> None:
         """Preserve plugin settings and provider defaults across the SDK."""
         assert_type(provider.api_timeout_seconds, float)
-        assert_type(provider.api_key_envs, tuple[str, ...])
+        assert_type(provider.reserved_request_options, tuple[str, ...])
         assert_type(provider.request_options["custom"], object)
         assert_type(process.command_read_bytes, int)
         assert_type(profile.api_timeout, float | None)

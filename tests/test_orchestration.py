@@ -21,6 +21,7 @@ from unittest import mock
 
 from raychat import transport as process_runtime
 from raychat.configuration import SETTINGS
+from raychat.provider_settings import provider_settings
 from raychat.sdk import ProviderError
 from raychat.type_support import override
 from raychat.validation import (
@@ -32,6 +33,7 @@ from raychat.validation import (
     text_field,
 )
 from raychat.workers import AgentWorker, WorkerEvent
+from tests.environment_support import provider_environment
 from tests.plugin_support import (
     ScriptedChat,
     create_runtime,
@@ -564,59 +566,89 @@ class SubagentCoordinatorTests(PackageTestCase):
             ("report exceeds") in (text_field(_agents(result)[0]["error"], "error")),
         )
 
-    def test_config_uses_environment_key_and_rejects_literal_credentials(self) -> None:
-        """Verify config uses environment key and rejects literal credentials."""
+    def test_role_profile_inherits_primary_provider_and_preserves_options(self) -> None:
+        """Route a role through the primary identity with its own request policy."""
+        primary = provider.ChatAPI(
+            "https://provider.example/v1/chat/completions",
+            "vendor/main",
+            "do-not-expose",
+            41,
+            request_options={"temperature": 0.5, "max_tokens": 123},
+        )
         config = {
             "profiles": {
                 "judge-two": {
-                    "url": "https://provider.example/v1/chat/completions",
-                    "model": "vendor/judge",
-                    "key_env": "JUDGE_API_KEY",
                     "purposes": ["judge"],
                     "priority": 10,
                     "instruction_role": "user",
                     "context_chars": 50_000,
                     "keep_recent_turns": 2,
+                    "api_timeout": 19,
+                    "request_options": {"temperature": 0},
                 },
             },
             "purpose_routes": {"judge": "judge-two"},
         }
         coordinator = subagent_config.build_coordinator(
-            primary_model="vendor/main",
-            primary_factory=lambda: ScriptedChat[str]([]),
+            primary_model=primary.model,
+            primary_url=primary.url,
+            primary_api_key=primary.api_key,
+            primary_factory=lambda: primary,
             workspace=self.root,
             configuration=config,
-            environ={"JUDGE_API_KEY": "do-not-expose"},
         )
         selected = coordinator.router.resolve("judge")
         equal(selected.name, "judge-two")
         equal(selected.instruction_role, "user")
         equal(selected.context_chars, 50_000)
         equal(selected.keep_recent_turns, 2)
-        process_spec: object = selected.process_spec
-        require(process_spec is not None)
+        process_spec = selected.process_spec
+        if process_spec is None:
+            self.fail("A role profile lost its primary provider descriptor.")
+        payload = process_spec.private_payload()
+        equal(payload["options"]["url"], primary.url)
+        equal(payload["options"]["model"], primary.model)
+        equal(payload["options"]["api_key"], primary.api_key)
+        equal(payload["options"]["timeout"], 19)
+        equal(
+            payload["options"]["request_options"],
+            {"temperature": 0, "max_tokens": 123},
+        )
+        equal(payload["source"], primary.private_payload()["source"])
+        equal(payload["secrets"], primary.private_payload()["secrets"])
+        equal(primary.timeout, 41)
+        equal(primary.request_options, {"temperature": 0.5, "max_tokens": 123})
         require(("do-not-expose") not in (_json(_catalog(coordinator))))
 
-        data = _json_fields(_json(config))
-        profiles = object_field(data["profiles"], "profiles")
-        selected_data = object_field(profiles["judge-two"], "judge-two")
-        selected_data["key"] = "literal-not-allowed"
-        profiles["judge-two"] = selected_data
-        data["profiles"] = profiles
-        with self.rejected(RuntimeError, "extra.*key"):
-            subagent_config.build_coordinator(
-                primary_model="vendor/main",
-                primary_factory=lambda: ScriptedChat[str]([]),
-                workspace=self.root,
-                configuration=data,
-                environ={"JUDGE_API_KEY": "do-not-expose"},
-            )
+    def test_role_profiles_reject_provider_identity_and_credentials(self) -> None:
+        """Reject obsolete identity settings instead of silently ignoring them."""
+        for name in (
+            "url",
+            "model",
+            "key_env",
+            "key",
+            "api_key",
+            "auth_token",
+            "base_url",
+        ):
+            with self.subTest(name=name), self.rejected(RuntimeError, "extra.*" + name):
+                subagent_config.build_coordinator(
+                    primary_model="vendor/main",
+                    primary_factory=lambda: ScriptedChat[str]([]),
+                    workspace=self.root,
+                    configuration={
+                        "profiles": {
+                            "judge": {"purposes": ["judge"], name: "obsolete"},
+                        },
+                    },
+                )
 
     def test_production_profile_runs_in_killable_process_with_selected_model(
         self,
     ) -> None:
-        """Verify production profile runs in killable process with selected model."""
+        """Run a real child with the environment provider and role request options."""
         requests: list[dict[str, object]] = []
+        authorization: list[str | None] = []
 
         class Handler(BaseHTTPRequestHandler):
             @override
@@ -627,6 +659,7 @@ class SubagentCoordinatorTests(PackageTestCase):
                 size = int(self.headers["Content-Length"])
                 payload = _json_fields(self.rfile.read(size))
                 requests.append(payload)
+                authorization.append(self.headers.get("Authorization"))
                 content = '{"action":"done","message":"process review"}'
                 body = _json(
                     {
@@ -653,20 +686,31 @@ class SubagentCoordinatorTests(PackageTestCase):
         try:
             url = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
             api_secret = secrets.token_hex(16)
-            spec = provider.ProviderSpec(url, "model/process-review", api_secret, 5, {})
-            profile = models.ModelProfile(
-                "process-reviewer",
-                spec.model,
-                _unused_factory,
-                ("review",),
-                process_spec=spec,
-                instruction_role="developer",
-                context_chars=40_000,
-                keep_recent_turns=2,
-            )
-            coordinator = coordination.SubagentCoordinator(
-                models.ModelRouter([profile]),
-                self.root,
+            environment = provider_environment(url=url, model="model/process-review")
+            environment["RAYCHAT_AUTH_TOKEN"] = api_secret
+            identity = provider_settings(environment)
+            coordinator = subagent_config.build_coordinator(
+                primary_model=identity.model,
+                primary_url=identity.chat_url,
+                primary_api_key=identity.auth_token,
+                primary_factory=lambda: provider.ChatAPI(
+                    identity.chat_url,
+                    identity.model,
+                    identity.auth_token,
+                    5,
+                ),
+                workspace=self.root,
+                configuration={
+                    "profiles": {
+                        "process-reviewer": {
+                            "purposes": ["review"],
+                            "instruction_role": "developer",
+                            "context_chars": 40_000,
+                            "keep_recent_turns": 2,
+                            "request_options": {"temperature": 0},
+                        },
+                    },
+                },
             )
             coordinator.plugin_source = self.plugin_sources
 
@@ -687,6 +731,8 @@ class SubagentCoordinatorTests(PackageTestCase):
         require((result["ok"]), result)
         equal(_agents(result)[0]["message"], "process review")
         equal(requests[0]["model"], "model/process-review")
+        equal(requests[0]["temperature"], 0)
+        equal(authorization, ["Bearer " + api_secret])
         equal(
             object_field(
                 array_field(requests[0]["messages"], "messages")[0],
@@ -882,7 +928,6 @@ raise SystemExit(1)
             primary_factory=lambda: ScriptedChat[str]([]),
             workspace=self.root,
             configuration=config,
-            environ={},
         )
         equal(coordinator.router.resolve("judge").name, "primary")
         with self.rejected(ValueError, "No model profile"):

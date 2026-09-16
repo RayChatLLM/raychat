@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
+from raychat.provider_settings import provider_settings
 from raychat.ui.terminal import TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
 from raychat.validation import configuration_fields, text_field
@@ -932,6 +933,11 @@ def main() -> int:
         The supervisor's terminal exit status.
 
     """
+    try:
+        provider_settings(os.environ)
+    except ValueError as error:
+        sys.stderr.write("Error: " + str(error) + "\n")
+        return 1
     operator_home = Path.home() / SETTINGS.storage.home_directory
     directory = operator_home / "live" / uuid.uuid4().hex
     manifest = os.environ.get("RAYCHAT_RECOVERY")

@@ -30,6 +30,7 @@ from raychat.ui.terminal import (
 from raychat.validation import object_field
 from raychat.workers import AgentWorker, WorkerEvent
 from tests.assertions import TypedTestCase
+from tests.environment_support import provider_environment
 from tests.plugin_support import (
     plugin_module,
     require_agent_sessions,
@@ -206,8 +207,6 @@ class TuiSessionTests(TypedTestCase):
                 "--session-dir",
                 str(self.root / "sessions"),
                 "--no-memory",
-                "--model",
-                "test",
                 "--quality",
                 "8",
             ],
@@ -264,7 +263,7 @@ class TuiSessionTests(TypedTestCase):
             return '{"action":"done","message":"unexpected model call"}'
 
         with provider_fixture(chat):
-            resources = create_resources(self.args, {})
+            resources = create_resources(self.args, provider_environment())
         self.addCleanup(resources.close)
         choices: list[str] = []
         original_paint = Picker.paint
@@ -319,7 +318,7 @@ class TuiSessionTests(TypedTestCase):
             )
 
         with provider_fixture(chat):
-            resources = create_resources(self.args, {})
+            resources = create_resources(self.args, provider_environment())
         self.addCleanup(resources.close)
         stage = _GoalStage.CONFIGURE
         deadline = time.monotonic() + 3
@@ -372,7 +371,7 @@ class TuiSessionTests(TypedTestCase):
             def feed(self, raw: bytes | bytearray | memoryview[int]) -> list[KeyEvent]:
                 return [KeyEvent("escape")] if raw == b"\x1b" else super().feed(raw)
 
-        resources = create_resources(self.args, {})
+        resources = create_resources(self.args, provider_environment())
         self.addCleanup(resources.close)
         require_goal_controller(resources.runtime).configure("Parent goal")
         registry = require_agent_sessions(resources.runtime)

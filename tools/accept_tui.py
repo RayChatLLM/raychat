@@ -33,6 +33,7 @@ from raychat.validation import (
 )
 
 from .acceptance_support import (
+    fixture_provider_environment,
     ignore_bytecode,
     json_text,
     matches,
@@ -87,7 +88,12 @@ class Case:
         ] = str(self.work)
         manifest_path.write_text(json_text(manifest))
 
-    def chat(self, *extra: str, persist: bool = False) -> TerminalChat:
+    def chat(
+        self,
+        *extra: str,
+        persist: bool = False,
+        provider_url: str = "http://127.0.0.1:1/v1",
+    ) -> TerminalChat:
         """Launch a real terminal with this scenario's provider and storage flags.
 
         Returns
@@ -105,8 +111,6 @@ class Case:
             str(self.probe),
             "--provider",
             "probe",
-            "--model",
-            "probe",
             "--no-memory",
         ]
         flags += (
@@ -114,7 +118,11 @@ class Case:
             if persist
             else ["--no-session"]
         )
-        return TerminalChat(self.root, flags + list(extra))
+        return TerminalChat(
+            self.root,
+            flags + list(extra),
+            environ=fixture_provider_environment(url=provider_url, model="probe"),
+        )
 
     def result(self) -> dict[str, object]:
         """Persist the completed scenario's checks and terminal restoration result.

@@ -1,13 +1,12 @@
-"""Discover provider models off the UI thread and persist the operator's choice."""
+"""Discover provider models without changing the environment-configured identity."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from raychat.event_types import SESSION_RESET, SESSION_RESTORE
 from raychat.sdk import CommandDefinition, Menu, WorkerDescriptor
 from raychat.transport import run_chat_profile
-from raychat.validation import json_object, string_list_field, text_field
+from raychat.validation import json_object, string_list_field
 
 if TYPE_CHECKING:
     from raychat.sdk import PluginAPI, PluginContext
@@ -20,9 +19,7 @@ class ModelMenu:
 
     def __init__(self, api: PluginAPI) -> None:
         """Register discovery as a cancellable application command."""
-        self.context = api.context
         self.client: ChatAPI | None = None
-        self.default_model = ""
         api.register_menu("models", self.menu)
         api.register_command(
             CommandDefinition(
@@ -30,30 +27,15 @@ class ModelMenu:
                 self.command,
                 while_running=True,
                 scope="application",
-                description="List provider models and select one",
+                description="Discover provider models and view configuration guidance",
                 usage="/models [filter]",
             ),
         )
-        api.on(SESSION_RESTORE, lambda _event, ctx: self.restore(ctx))
-        api.on(SESSION_RESET, lambda _event, ctx: self.restore(ctx))
 
     def bind(self, client: ChatAPI) -> None:
-        """Apply a restored selection to the newly configured provider."""
+        """Retain the configured primary client for model discovery."""
         if self.client is None:
-            self.default_model = client.model
             self.client = client
-        client.model = text_field(
-            self.context.state.get("model", client.model),
-            "selected model",
-        )
-
-    def restore(self, ctx: PluginContext) -> None:
-        """Restore the selection when switching sessions or replacing the core."""
-        if self.client is not None:
-            self.client.model = text_field(
-                ctx.state.get("model", self.default_model),
-                "selected model",
-            )
 
     def command(self, arguments: str, ctx: PluginContext) -> str:
         """Fetch the catalog in an isolated worker, then open the cached menu.
@@ -96,7 +78,10 @@ class ModelMenu:
         ctx.state["models"] = models
         ctx.checkpoint()
         ctx.emit("ui", {"menu": "models", "filter": arguments.strip()})
-        return f"Loaded {len(models)} models. Type to filter; Enter or click to select."
+        return (
+            f"Loaded {len(models)} models. Type to filter; "
+            "Enter or click for RAYCHAT_MODEL configuration guidance."
+        )
 
     def menu(self, ctx: PluginContext) -> Menu:
         """Build the menu without performing network requests during rendering.
@@ -124,12 +109,9 @@ class ModelMenu:
             searchable=True,
         )
 
-    def select(self, identifier: str, ctx: PluginContext) -> None:
-        """Persist the selected model and use it for subsequent provider requests."""
-        if self.client is not None:
-            ctx.state["model"] = identifier
-            ctx.checkpoint()
-            self.client.model = identifier
-            ctx.notify(
-                "Model selected: " + identifier + ". Applies to the next request.",
-            )
+    @staticmethod
+    def select(identifier: str, ctx: PluginContext) -> None:
+        """Explain how to configure the model for the next application launch."""
+        ctx.notify(
+            "Set RAYCHAT_MODEL to " + identifier + " and restart RayChat to use it.",
+        )

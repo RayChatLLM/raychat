@@ -6,9 +6,7 @@ import argparse
 import json
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-from raychat.configuration import SETTINGS
 from raychat.sdk import HTTP_PROVIDER
-from raychat.validation import plain, string_list_field
 from tests.plugin_support import plugin_module, provider_factory, registered_service
 
 if TYPE_CHECKING:
@@ -23,6 +21,8 @@ else:
     provider = plugin_module("chat_completions.client")
 
 __all__ = [
+    "FIXTURE_PROVIDER_MODEL",
+    "FIXTURE_PROVIDER_URL",
     "FakeResponse",
     "ProviderOptions",
     "RecordingOpener",
@@ -31,6 +31,9 @@ __all__ = [
     "provider",
     "registered_provider",
 ]
+
+FIXTURE_PROVIDER_URL = "https://fixture-provider.invalid/v1/chat/completions"
+FIXTURE_PROVIDER_MODEL = "fixture-model"
 
 
 class FakeResponse:
@@ -151,7 +154,7 @@ def api_response(
 def registered_provider(
     url: str,
     model: str,
-    api_key: str = "",
+    api_key: str = "fixture-credential",
     timeout: float | None = None,
     request_options: Mapping[str, object] | None = None,
 ) -> provider.ChatAPI:
@@ -171,19 +174,14 @@ def registered_provider(
     service = registered_service("chat_completions", HTTP_PROVIDER)
     options = service.validate_options(request_options)
     args = argparse.Namespace(
-        url=url,
-        model=model,
         api_timeout=service.default_timeout if timeout is None else timeout,
         request_options=json.dumps(options),
     )
-    env = dict.fromkeys(
-        string_list_field(
-            plain(SETTINGS.plugins.settings["chat_completions"]["api_key_envs"]),
-            "chat_completions.api_key_envs",
-        ),
-        api_key,
-    )
-    env[service.custom_key_env] = api_key
+    env = {
+        "RAYCHAT_AUTH_TOKEN": api_key,
+        "RAYCHAT_MODEL": model,
+        "RAYCHAT_BASE_URL": url,
+    }
     client = provider_factory("chat_completions")(args, env)
     if not isinstance(client, provider.ChatAPI):
         message = "The registered provider did not return its captured ChatAPI."
@@ -205,7 +203,7 @@ def make_api(
     body: bytes = api_response(),
     **options: Unpack[ProviderOptions],
 ) -> tuple[provider.ChatAPI, RecordingOpener, FakeResponse]:
-    """Attach a recording transport to a provider created through registration.
+    """Attach a recorder to an explicit captured client without normalizing its URL.
 
     Returns
     -------
@@ -213,9 +211,9 @@ def make_api(
         The concrete client, its recorder and the supplied response stream.
 
     """
-    client = registered_provider(
-        options.get("url", provider.DEFAULT_API_URL),
-        options.get("model", provider.DEFAULT_MODEL),
+    client = provider.ChatAPI(
+        options.get("url", FIXTURE_PROVIDER_URL),
+        options.get("model", FIXTURE_PROVIDER_MODEL),
         options.get("api_key", "fixture-credential"),
         options.get("timeout", 7),
         options.get("request_options"),

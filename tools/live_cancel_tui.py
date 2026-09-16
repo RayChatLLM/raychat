@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from .acceptance_support import (
+    fixture_provider_environment,
     json_text,
     read_object,
     require,
@@ -128,7 +129,7 @@ def run(root: Path, output: Path) -> dict[str, object]:
     """
     workspace, arguments, source = _setup(root, output)
     checks: list[str] = []
-    chat = TerminalChat(root, arguments)
+    chat = TerminalChat(root, arguments, environ=fixture_provider_environment())
     try:
         chat.wait("Start a conversation below")
         supervisor_pid = chat.process.pid

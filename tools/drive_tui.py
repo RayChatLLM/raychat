@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 from .terminal_process import TerminalProcess
@@ -92,6 +93,7 @@ class TerminalChat:
         arguments: list[str],
         *,
         options: TerminalOptions = _DEFAULT_OPTIONS,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         """Open a PTY and launch the configured application through it."""
         self.master, self.slave = pty.openpty()
@@ -105,6 +107,8 @@ class TerminalChat:
         self._read_rate = options.read_bytes_per_second
         self._next_read = 0.0
         env = dict(os.environ, TERM="xterm-256color")
+        if environ is not None:
+            env.update(environ)
         env.pop("RAYCHAT_CONFIG", None)
         try:
             self.process = TerminalProcess(

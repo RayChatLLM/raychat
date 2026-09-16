@@ -24,12 +24,9 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, kw_only=True)
 class ProfileSettings:
-    """A model profile whose optional values inherit from its caller."""
+    """A role profile whose provider identity always inherits from its caller."""
 
-    url: str
-    model: str
     purposes: tuple[str, ...]
-    key_env: str | None
     priority: int | None
     request_options: Mapping[str, object]
     api_timeout: float | None
@@ -50,9 +47,8 @@ class ProfileSettings:
         fields = settings_fields(
             raw,
             path,
-            required=("url", "model", "purposes"),
+            required=("purposes",),
             optional=(
-                "key_env",
                 "priority",
                 "request_options",
                 "api_timeout",
@@ -62,10 +58,7 @@ class ProfileSettings:
             ),
         )
         return cls(
-            url=text_field(fields["url"], path + ".url"),
-            model=text_field(fields["model"], path + ".model"),
             purposes=tuple(string_list_field(fields["purposes"], path + ".purposes")),
-            key_env=text_field(fields.get("key_env"), path + ".key_env", nullable=True),
             priority=integer_field(fields["priority"], path + ".priority", minimum=None)
             if "priority" in fields
             else None,

@@ -61,13 +61,6 @@ def _namespace_field(namespace: object, name: str) -> object:
     return value
 
 
-def _environment(value: object) -> Mapping[str, str]:
-    return {
-        key: _text(item, "environment value")
-        for key, item in configuration_fields(value, "environment").items()
-    }
-
-
 def _optional_mapping(value: object, label: str) -> Mapping[str, object] | None:
     return None if value is None else configuration_fields(value, label)
 
@@ -110,7 +103,6 @@ def _configured_options(ctx: PluginContext, args: object) -> CoordinatorOptions:
         ),
         "workspace": _workspace(_namespace_field(args, "workspace")),
         "configuration": ctx.settings,
-        "environ": _environment(ctx.options["environ"]),
         "timeout": number_field(_namespace_field(args, "timeout"), "command timeout"),
         "context_chars": integer_field(
             _namespace_field(args, "context_chars"),
@@ -268,6 +260,9 @@ class _Registration:
                 primary_model=provider.model,
                 primary_factory=lambda: provider,
                 primary_url=provider.url,
+                primary_api_key=provider.api_key,
+                primary_api_timeout=provider.timeout,
+                primary_request_options=provider.request_options,
                 primary_source=provider.private_payload()["source"],
                 workspace=self.api.context.workspace,
                 context_chars=setup.context_chars,

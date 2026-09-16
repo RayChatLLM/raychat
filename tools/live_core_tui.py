@@ -11,6 +11,7 @@ from pathlib import Path
 from raychat.validation import object_field
 
 from .acceptance_support import (
+    fixture_provider_environment,
     ignore_bytecode,
     json_text,
     read_object,
@@ -127,7 +128,7 @@ def run(root: Path, output: Path) -> dict[str, object]:
         source.replace(title, f'title = "CHAT | {_MARKER}"'),
         encoding="utf-8",
     )
-    chat = TerminalChat(root, arguments)
+    chat = TerminalChat(root, arguments, environ=fixture_provider_environment())
     checks: list[str] = []
     try:
         chat.wait("Start a conversation below")

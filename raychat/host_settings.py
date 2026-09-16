@@ -15,6 +15,7 @@ from raychat.validation import (
     freeze_settings,
     integer_field,
     number_field,
+    settings_fields,
     string_list_field,
     text_field,
 )
@@ -97,7 +98,6 @@ def _plugin_settings(value: object, path: str) -> Mapping[str, Mapping[str, obje
 class ChatEnvironmentSettings:
     """Validated chat.environment configuration."""
 
-    model: str
     context_chars: str
     instruction_role: str
 
@@ -115,9 +115,12 @@ class ChatEnvironmentSettings:
             Checked values with no unchecked settings lookups.
 
         """
-        fields = configuration_fields(value, path)
+        fields = settings_fields(
+            value,
+            path,
+            required=("context_chars", "instruction_role"),
+        )
         return cls(
-            model=text_field(fields.get("model"), f"{path}.model"),
             context_chars=text_field(
                 fields.get("context_chars"),
                 f"{path}.context_chars",

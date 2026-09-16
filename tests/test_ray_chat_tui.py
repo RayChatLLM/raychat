@@ -55,6 +55,7 @@ from raychat.validation import (
 )
 from raychat.workers import WorkerEvent
 from tests.assertions import TypedTestCase
+from tests.environment_support import provider_environment
 from tests.tui_support import arguments, resources_fixture
 from tools.terminal_screen import TerminalScreen
 
@@ -971,14 +972,13 @@ def _pty_configuration(root: Path, workspace: Path) -> tuple[Path, dict[str, str
     environment = dict(os.environ)
     for key in (
         "RAYCHAT_CONFIG",
-        "LLM_API_URL",
-        "LLM_MODEL",
         "LLM_INSTRUCTION_ROLE",
         "LLM_REQUEST_OPTIONS",
         "NO_COLOR",
     ):
         environment.pop(key, None)
-    environment.update(FIREWORK_API_KEY="test-only", TERM="xterm-256color")
+    environment.update(provider_environment())
+    environment["TERM"] = "xterm-256color"
     return path, environment
 
 
@@ -1162,8 +1162,8 @@ class TerminalConfigurationTests(TypedTestCase):
     def test_run_tui_automatically_uses_ascii_for_an_ascii_terminal(self) -> None:
         """Check run tui automatically uses ascii for an ascii terminal."""
         args = arguments(
-            ["--url", "https://provider.example/v1/chat/completions", "--model", MODEL],
             initial_prompt="task",
+            environ=provider_environment(model=MODEL),
         )
         resources = resources_fixture()
         terminal = _ControllerTerminal(encoding="ascii")
@@ -1349,7 +1349,7 @@ class TuiControllerTests(TypedTestCase):
             return Surface(4, 2)
 
         args = arguments(
-            ["--model", MODEL, "--quality", "8"],
+            ["--quality", "8"],
             initial_prompt="active task",
         )
         resources = resources_fixture()
@@ -1381,7 +1381,7 @@ class TuiControllerTests(TypedTestCase):
         """Check unexpected render error restores terminal before worker join."""
         order: list[str] = []
 
-        args = arguments(["--model", MODEL, "--quality", "8"], initial_prompt="wait")
+        args = arguments(["--quality", "8"], initial_prompt="wait")
         resources = resources_fixture()
         with (
             mock.patch.object(
@@ -1419,7 +1419,7 @@ class TuiControllerTests(TypedTestCase):
         """Check worker start interruption still restores and joins."""
         order: list[str] = []
 
-        args = arguments(["--model", MODEL, "--quality", "8"], initial_prompt="wait")
+        args = arguments(["--quality", "8"], initial_prompt="wait")
         resources = resources_fixture()
         with (
             mock.patch.object(
@@ -1510,7 +1510,7 @@ class TuiControllerTests(TypedTestCase):
             return Surface(4, 2)
 
         args = arguments(
-            ["--model", MODEL, "--max-steps", "4", "--quality", "8"],
+            ["--max-steps", "4", "--quality", "8"],
             initial_prompt="verify Python",
         )
         resources = resources_fixture()
@@ -1658,7 +1658,7 @@ class TuiControllerTests(TypedTestCase):
             return Surface(4, 2)
 
         args = arguments(
-            ["--model", MODEL, "--max-steps", "4", "--quality", "8"],
+            ["--max-steps", "4", "--quality", "8"],
             initial_prompt="first prompt",
         )
         resources = resources_fixture()
@@ -1731,7 +1731,7 @@ class TuiControllerTests(TypedTestCase):
         """Check keyboard interrupt keeps loop alive until worker stops."""
         worker = _ControllerWorker(stop_drains=3)
         terminal = _ControllerTerminal([KeyboardInterrupt()], default_read=b"")
-        args = arguments(["--model", MODEL, "--quality", "8"], initial_prompt="wait")
+        args = arguments(["--quality", "8"], initial_prompt="wait")
         resources = resources_fixture()
 
         with (
@@ -1765,7 +1765,7 @@ class TuiControllerTests(TypedTestCase):
                 "EOF shutdown should not render another frame",
             ),
         )
-        args = arguments(["--model", MODEL, "--quality", "8"], initial_prompt="wait")
+        args = arguments(["--quality", "8"], initial_prompt="wait")
         resources = resources_fixture()
         with (
             mock.patch.object(ray_chat_tui, "create_worker", return_value=worker),

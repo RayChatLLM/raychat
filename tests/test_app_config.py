@@ -13,7 +13,7 @@ import raychat.ui.renderer as ray_renderer
 import raychat.ui.terminal as terminal_runtime
 from raychat import configuration, sdk
 from raychat.ui import controller as ray_chat_tui
-from raychat.validation import array_field, json_object, object_field, text_field
+from raychat.validation import array_field, json_object, object_field
 from tests.assertions import TypedTestCase
 from tests.plugin_support import (
     ScriptedChat,
@@ -53,9 +53,10 @@ class AppConfigurationTests(TypedTestCase):
         config = configuration.load_config()
 
         self.equal(config.schema_version, 1)
-        self.equal(
-            config.plugins.settings["chat_completions"]["model"],
-            "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+        self.require(
+            {"url", "model", "api_key_envs", "custom_api_key_env"}.isdisjoint(
+                config.plugins.settings["chat_completions"],
+            ),
         )
         self.equal(config.chat.instruction_role, "system")
         self.require(("raychat/configuration.py") in (config.release.source_files))
@@ -63,7 +64,7 @@ class AppConfigurationTests(TypedTestCase):
         self.require(("raychat/session.py") in (config.release.source_files))
         self.require(
             isinstance(
-                config.plugins.settings["chat_completions"]["api_key_envs"],
+                config.plugins.settings["chat_completions"]["reserved_request_options"],
                 tuple,
             ),
         )
@@ -89,10 +90,11 @@ class AppConfigurationTests(TypedTestCase):
         config = configuration.SETTINGS
 
         provider = plugin_module("chat_completions")
-        default_url: object = provider.DEFAULT_API_URL
-        default_model: object = provider.DEFAULT_MODEL
-        self.equal(default_url, config.plugins.settings["chat_completions"]["url"])
-        self.equal(default_model, config.plugins.settings["chat_completions"]["model"])
+        max_http_bytes: object = provider.MAX_HTTP_BYTES
+        self.equal(
+            max_http_bytes,
+            config.plugins.settings["chat_completions"]["max_http_bytes"],
+        )
         with tempfile.TemporaryDirectory() as directory:
             session = registered_session(ScriptedChat[str]([]), Path(directory))
             try:
@@ -108,25 +110,37 @@ class AppConfigurationTests(TypedTestCase):
         self.equal(sdk.API_VERSION, 4)
         self.equal(build_portable.SOURCE_FILES, config.release.source_files)
 
-    def test_provider_identity_is_not_duplicated_in_python_sources(self) -> None:
-        """Check provider identity is not duplicated in python sources."""
-        config = configuration.SETTINGS
+    def test_provider_has_no_identity_defaults_or_legacy_credential_lookup(
+        self,
+    ) -> None:
+        """Keep provider defaults and old environment aliases out of the plugin."""
         forbidden = (
-            config.plugins.settings["chat_completions"]["url"],
-            config.plugins.settings["chat_completions"]["model"],
-            config.plugins.settings["chat_completions"]["user_agent"],
+            "DEFAULT_API_URL",
+            "DEFAULT_MODEL",
+            "FIREWORK_API_KEY",
+            "FIREWORKS_API_KEY",
+            "LLM_API_KEY",
+            "LLM_API_URL",
         )
-        root = Path(configuration.__file__).resolve().parents[1]
-        sources = [
-            path
-            for path in root.rglob("*.py")
-            if not ({"tests", "gepa", "dist", "workspace"} & set(path.parts))
-        ]
-        for source in sources:
+        root = (
+            Path(configuration.__file__).resolve().parents[1]
+            / "plugins"
+            / "chat_completions"
+        )
+        for source in root.rglob("*.py"):
             text = source.read_text(encoding="utf-8")
             for value in forbidden:
                 with self.subTest(source=source, value=value):
-                    self.require(text_field(value, "provider identity") not in text)
+                    self.require(value not in text)
+
+    def test_provider_rejects_legacy_identity_settings(self) -> None:
+        """Reject old settings instead of keeping alternate identity sources."""
+        for field in ("url", "model", "api_key_envs", "custom_api_key_env"):
+            with self.subTest(field=field), self.rejected(RuntimeError, field):
+                create_runtime(
+                    plugins=["chat_completions"],
+                    plugin_settings={"chat_completions": {field: "obsolete"}},
+                )
 
     def test_loader_rejects_duplicate_keys_nonobjects_and_nonfinite_numbers(
         self,

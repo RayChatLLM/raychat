@@ -23,10 +23,6 @@ if TYPE_CHECKING:
 class ChatCompletionsSettings:
     """Checked chat_completions settings for one plugin generation."""
 
-    url: str
-    model: str
-    api_key_envs: tuple[str, ...]
-    custom_api_key_env: str
     user_agent: str
     request_options: Mapping[str, object]
     api_timeout_seconds: float
@@ -55,10 +51,6 @@ class ChatCompletionsSettings:
             raw,
             path,
             required=(
-                "url",
-                "model",
-                "api_key_envs",
-                "custom_api_key_env",
                 "user_agent",
                 "request_options",
                 "api_timeout_seconds",
@@ -71,15 +63,6 @@ class ChatCompletionsSettings:
             ),
         )
         return cls(
-            url=text_field(fields.get("url"), f"{path}.url"),
-            model=text_field(fields.get("model"), f"{path}.model"),
-            api_key_envs=tuple(
-                string_list_field(fields.get("api_key_envs"), f"{path}.api_key_envs"),
-            ),
-            custom_api_key_env=text_field(
-                fields.get("custom_api_key_env"),
-                f"{path}.custom_api_key_env",
-            ),
             user_agent=text_field(fields.get("user_agent"), f"{path}.user_agent"),
             request_options=frozen_fields(
                 fields.get("request_options"),

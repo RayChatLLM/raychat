@@ -21,6 +21,7 @@ from raychat.validation import (
 
 from .accept_tui import Case
 from .acceptance_support import (
+    fixture_provider_environment,
     ignore_bytecode,
     json_text,
     read_messages,
@@ -48,8 +49,6 @@ def _chat(case: Case) -> TerminalChat:
             str(case.output / "features"),
             "--provider",
             "features_probe",
-            "--model",
-            "features_probe",
             "--context-chars",
             "64000",
             "--instruction-role",
@@ -61,6 +60,7 @@ def _chat(case: Case) -> TerminalChat:
             "--no-session",
             "--yes",
         ],
+        environ=fixture_provider_environment(model="features_probe"),
     )
 
 
