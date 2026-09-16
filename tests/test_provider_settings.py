@@ -9,7 +9,7 @@ from functools import partial
 from unittest import mock
 
 from raychat.entrypoint import main
-from raychat.provider_settings import provider_settings
+from raychat.provider_settings import environment_status, provider_settings
 from tests.assertions import TypedTestCase
 from tests.environment_support import provider_environment
 from tests.transport_support import captured
@@ -18,6 +18,70 @@ from tests.tui_support import arguments
 
 class ProviderSettingsTests(TypedTestCase):
     """Validate complete settings, helpful failures and the removed CLI selectors."""
+
+    def test_status_distinguishes_unset_empty_and_exported_without_values(self) -> None:
+        """Give an actionable diagnosis without disclosing an existing credential."""
+        self.equal(
+            environment_status(
+                {
+                    "RAYCHAT_AUTH_TOKEN": "synthetic-private-token",
+                    "RAYCHAT_MODEL": " \t",
+                },
+            ),
+            "Provider environment visible to RayChat (values hidden):\n"
+            "  RAYCHAT_AUTH_TOKEN: set\n"
+            "  RAYCHAT_MODEL: empty (or whitespace only)\n"
+            "  RAYCHAT_BASE_URL: missing (not exported to this process)",
+        )
+
+    def test_environment_probe_never_initializes_plugins_or_terminal(self) -> None:
+        """Exit before parser metadata, storage and terminal setup, even with --yes."""
+        for environment, expected in ((provider_environment(), 0), ({}, 1)):
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                self.subTest(environment_present=bool(environment)),
+                redirect_stdout(out),
+                redirect_stderr(err),
+                mock.patch("raychat.entrypoint.build_parser") as parser,
+                mock.patch("raychat.entrypoint.create_resources") as resources,
+                mock.patch(
+                    "raychat.entrypoint.terminal_ui.TerminalSession",
+                ) as terminal,
+            ):
+                self.equal(main(["--yes", "--check-env"], environment), expected)
+            parser.assert_not_called()
+            resources.assert_not_called()
+            terminal.assert_not_called()
+            report = out.getvalue() + err.getvalue()
+            for name in provider_environment():
+                self.require(name + ": " in report)
+            self.require("fixture-token" not in report)
+            self.require("http://127.0.0.1" not in report)
+
+    def test_missing_environment_precedes_plugin_metadata_for_normal_launch(
+        self,
+    ) -> None:
+        """Report setup errors before a plugin cache or permission error hides them."""
+        out = io.StringIO()
+        with (
+            redirect_stderr(out),
+            mock.patch("raychat.entrypoint.build_parser") as parser,
+        ):
+            self.equal(main(["--yes"], {}), 1)
+        parser.assert_not_called()
+        self.require("not exported to this process" in out.getvalue())
+
+    def test_environment_probe_rejects_invalid_configured_values(self) -> None:
+        """Presence does not imply a valid provider URL or header value."""
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            self.equal(
+                main(["--check-env"], provider_environment(url="not-a-url")),
+                1,
+            )
+        self.equal(out.getvalue(), "")
+        self.require("RAYCHAT_BASE_URL must" in err.getvalue())
+        self.require("not-a-url" not in err.getvalue())
 
     def test_missing_variables_are_reported_together_without_values(self) -> None:
         """List missing names and platform help without echoing existing secrets."""
@@ -38,8 +102,14 @@ class ProviderSettingsTests(TypedTestCase):
                         environment.pop(name)
                     else:
                         environment[name] = value
-                    with self.rejected(ValueError, name):
-                        provider_settings(environment)
+                    error = captured(
+                        ValueError,
+                        partial(provider_settings, environment),
+                    )
+                    self.equal(
+                        str(error).splitlines()[0],
+                        "Missing required environment variables: " + name + ".",
+                    )
 
     def test_snapshot_normalizes_endpoints_and_keeps_credentials_out_of_repr(
         self,

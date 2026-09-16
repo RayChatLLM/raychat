@@ -11,12 +11,35 @@ if TYPE_CHECKING:
 
 _REQUIRED = ("RAYCHAT_AUTH_TOKEN", "RAYCHAT_MODEL", "RAYCHAT_BASE_URL")
 _HELP = (
-    "Set all three in the environment before starting RayChat. "
-    "RAYCHAT_AUTH_TOKEN is your API token; RAYCHAT_MODEL is your model ID; "
-    "RAYCHAT_BASE_URL is your provider's HTTP(S) API base URL. "
+    "Export the missing or empty variables in the same shell that launches RayChat. "
+    "Environment files are not loaded automatically. In Bash/Zsh, load your "
+    "filled-in file with: set -a; . ./.env; set +a\n"
     "See environment/windows.env, environment/linux.env, or environment/macos.env "
     "and README.md for setup instructions."
 )
+
+
+def environment_status(environ: Mapping[str, str]) -> str:
+    """Describe each required variable without revealing any configured values.
+
+    Returns
+    -------
+    str
+        Presence in the child process, distinguishing unset and blank values.
+
+    """
+    rows = ["Provider environment visible to RayChat (values hidden):"]
+    for name in _REQUIRED:
+        value = environ.get(name)
+        status = (
+            "missing (not exported to this process)"
+            if value is None
+            else "empty (or whitespace only)"
+            if not value.strip()
+            else "set"
+        )
+        rows.append(f"  {name}: {status}")
+    return "\n".join(rows)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -97,7 +120,7 @@ def provider_settings(environ: Mapping[str, str]) -> ProviderSettings:
     missing = [name for name in _REQUIRED if not environ.get(name, "").strip()]
     if missing:
         message = "Missing required environment variables: " + ", ".join(missing)
-        raise ValueError(message + ". " + _HELP)
+        raise ValueError(message + ".\n" + environment_status(environ) + "\n" + _HELP)
     token = environ["RAYCHAT_AUTH_TOKEN"].strip()
     model = environ["RAYCHAT_MODEL"].strip()
     if any(not "!" <= character <= "~" for character in token):
