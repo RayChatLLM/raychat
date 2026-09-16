@@ -34,29 +34,45 @@ class ProviderSettingsTests(TypedTestCase):
             "  RAYCHAT_BASE_URL: missing (not exported to this process)",
         )
 
-    def test_environment_probe_never_initializes_plugins_or_terminal(self) -> None:
-        """Exit before parser metadata, storage and terminal setup, even with --yes."""
-        for environment, expected in ((provider_environment(), 0), ({}, 1)):
-            out, err = io.StringIO(), io.StringIO()
-            with (
-                self.subTest(environment_present=bool(environment)),
-                redirect_stdout(out),
-                redirect_stderr(err),
-                mock.patch("raychat.entrypoint.build_parser") as parser,
-                mock.patch("raychat.entrypoint.create_resources") as resources,
-                mock.patch(
-                    "raychat.entrypoint.terminal_ui.TerminalSession",
-                ) as terminal,
-            ):
-                self.equal(main(["--yes", "--check-env"], environment), expected)
-            parser.assert_not_called()
-            resources.assert_not_called()
-            terminal.assert_not_called()
-            report = out.getvalue() + err.getvalue()
-            for name in provider_environment():
-                self.require(name + ": " in report)
-            self.require("fixture-token" not in report)
-            self.require("http://127.0.0.1" not in report)
+    def test_startup_identifies_each_missing_variable_before_initializing(self) -> None:
+        """Normal --yes invocation checks every setting before acquiring resources."""
+        for name in provider_environment():
+            for value in (None, " \t"):
+                environment = provider_environment()
+                if value is None:
+                    environment.pop(name)
+                else:
+                    environment[name] = value
+                out, err = io.StringIO(), io.StringIO()
+                with (
+                    self.subTest(name=name, value=value),
+                    redirect_stdout(out),
+                    redirect_stderr(err),
+                    mock.patch("raychat.entrypoint.build_parser") as parser,
+                    mock.patch("raychat.entrypoint.create_resources") as resources,
+                    mock.patch(
+                        "raychat.entrypoint.terminal_ui.TerminalSession",
+                    ) as terminal,
+                ):
+                    self.equal(main(["--yes"], environment), 1)
+                parser.assert_not_called()
+                resources.assert_not_called()
+                terminal.assert_not_called()
+                self.equal(out.getvalue(), "")
+                report = err.getvalue()
+                self.equal(
+                    report.splitlines()[0],
+                    "Error: Missing required environment variables: " + name + ".",
+                )
+                for key in provider_environment():
+                    status = (
+                        ("missing" if value is None else "empty")
+                        if key == name
+                        else "set"
+                    )
+                    self.require(key + ": " + status in report)
+                self.require("fixture-token" not in report)
+                self.require("http://127.0.0.1" not in report)
 
     def test_missing_environment_precedes_plugin_metadata_for_normal_launch(
         self,
@@ -71,12 +87,12 @@ class ProviderSettingsTests(TypedTestCase):
         parser.assert_not_called()
         self.require("not exported to this process" in out.getvalue())
 
-    def test_environment_probe_rejects_invalid_configured_values(self) -> None:
+    def test_startup_rejects_invalid_configured_values(self) -> None:
         """Presence does not imply a valid provider URL or header value."""
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             self.equal(
-                main(["--check-env"], provider_environment(url="not-a-url")),
+                main(["--yes"], provider_environment(url="not-a-url")),
                 1,
             )
         self.equal(out.getvalue(), "")
@@ -185,13 +201,14 @@ class ProviderSettingsTests(TypedTestCase):
         create.assert_not_called()
         for name in provider_environment():
             self.require(name in output.getvalue())
+        self.require("--check-env" not in output.getvalue())
 
-    def test_provider_identity_cli_flags_are_removed(self) -> None:
-        """Reject obsolete overrides so environment values remain authoritative."""
-        for flag in ("--model", "--url"):
+    def test_obsolete_cli_flags_are_removed(self) -> None:
+        """Reject removed overrides and the separate environment diagnostic mode."""
+        for flag in ("--model", "--url", "--check-env"):
             with (
                 self.subTest(flag=flag),
                 redirect_stderr(io.StringIO()),
                 self.rejected(SystemExit),
             ):
-                arguments([flag, "obsolete"])
+                arguments([flag] if flag == "--check-env" else [flag, "obsolete"])
