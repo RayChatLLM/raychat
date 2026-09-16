@@ -241,7 +241,6 @@ class ProviderClient(Protocol):
     api_key: str
     timeout: float
     request_options: dict[str, object]
-    require_key: bool
 
     def __call__(self, messages: Messages) -> str:
         """Request a model reply for the supplied messages."""
@@ -269,11 +268,6 @@ class ProviderService:
     ProviderSpec: type[ProviderConfiguration]
     validate_options: Callable[[object], dict[str, object]]
     parse_options: Callable[[str], dict[str, object]]
-    same_endpoint: Callable[[str, str], bool]
-    credential: Callable[[str, Mapping[str, str]], str]
-    default_url: str
-    default_model: str
-    custom_key_env: str
     default_timeout: float
     default_request_options: Mapping[str, object]
 

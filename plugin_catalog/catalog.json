@@ -3,14 +3,6 @@
     {
       "cli": [
         {
-          "environment": "LLM_API_URL",
-          "flags": [
-            "--url"
-          ],
-          "help": "HTTP chat-completions endpoint",
-          "setting": "url"
-        },
-        {
           "flags": [
             "--api-timeout"
           ],
@@ -27,17 +19,10 @@
         }
       ],
       "defaults": {
-        "api_key_envs": [
-          "FIREWORK_API_KEY",
-          "FIREWORKS_API_KEY",
-          "LLM_API_KEY"
-        ],
         "api_timeout_seconds": 120,
-        "custom_api_key_env": "LLM_API_KEY",
         "max_http_bytes": 2097152,
         "max_provider_api_key_chars": 8192,
         "max_request_options_bytes": 65536,
-        "model": "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
         "name": "chat_completions",
         "request_options": {},
         "reserved_request_options": [
@@ -62,16 +47,15 @@
           "eos",
           "eos_token"
         ],
-        "url": "https://api.fireworks.ai/inference/v1/chat/completions",
         "user_agent": "stdlib-chat-agent/1"
       },
       "description": "chat completions capabilities",
       "entrypoint": "__init__:register",
       "id": "chat_completions",
-      "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Operator launch options include --url, --model, --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to fetch all model IDs from the configured GET /models endpoint, filter the menu, and select the model for subsequent requests.",
+      "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Provider identity and authentication come only from RAYCHAT_AUTH_TOKEN, RAYCHAT_MODEL and RAYCHAT_BASE_URL. Operator launch options include --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to discover model IDs; selecting one explains how to set RAYCHAT_MODEL and restart. Discovery never changes the active model.",
       "requires": {},
       "sdk": 4,
-      "sha256": "5a1cd9150264f75192e38cbe75f07f23a7d374254667ea56abca6b427ee5eec0",
+      "sha256": "c07c85bb08a73f7d620caf7a8056f81f0c1626a41834e972f4a13d4d55dc8696",
       "url": "chat_completions-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -201,9 +185,7 @@
           "evaluation_max_steps": 3,
           "evaluation_timeout_seconds": 1,
           "max_proposals": 1,
-          "provider": "auto",
           "reflection_minibatch_size": 1,
-          "reflection_provider": null,
           "retries": 3,
           "retry_base_seconds": 1,
           "retry_max_seconds": 30,
@@ -218,8 +200,6 @@
           "demo_workers": 4,
           "done_message": "incident routed",
           "input_path": "incident.json",
-          "live_provider": "fireworks",
-          "live_reflection_provider": "openrouter",
           "live_test_repeats": 3,
           "minimum_model_turns": 3,
           "output_path": "response-plan.json",
@@ -229,55 +209,6 @@
         },
         "oracle_transcript_bytes": 2029,
         "oracle_transcript_sha256": "adc7258f502b2c9a5d52c8d15220f31948414639c8160bf544675f8660ae3c29",
-        "provider_priority": [
-          "fireworks",
-          "openrouter"
-        ],
-        "providers": {
-          "fireworks": {
-            "key_envs": [
-              "FIREWORK_API_KEY",
-              "FIREWORKS_API_KEY"
-            ],
-            "model": "accounts/fireworks/models/gpt-oss-120b",
-            "reflection_options": {
-              "max_tokens": 4096,
-              "reasoning_effort": "medium",
-              "temperature": 0.6
-            },
-            "task_options": {
-              "max_tokens": 1024,
-              "reasoning_effort": "low",
-              "response_format": {
-                "type": "json_object"
-              },
-              "temperature": 0
-            },
-            "url": "https://api.fireworks.ai/inference/v1/chat/completions"
-          },
-          "openrouter": {
-            "key_envs": [
-              "OPENROUTER_API_KEY"
-            ],
-            "model": "nvidia/nemotron-3.5-lightning:free",
-            "reflection_options": {
-              "max_tokens": 8192,
-              "reasoning": {
-                "effort": "none"
-              },
-              "temperature": 0.6
-            },
-            "task_options": {
-              "max_tokens": 4096,
-              "reasoning": {
-                "effort": "none"
-              },
-              "seed": 0,
-              "temperature": 0
-            },
-            "url": "https://openrouter.ai/api/v1/chat/completions"
-          }
-        },
         "upstream_commit": "a79dc2922cdb0308e9de4f6a5bb9b5ec16f05a91",
         "upstream_file_count": 39,
         "upstream_tag": "v0.1.0",
@@ -296,7 +227,7 @@
         "workflows": "1.0.0"
       },
       "sdk": 4,
-      "sha256": "9f0ca004ab089ef15036587089d916f391edc63c63cb79faaf6fc00f64c35872",
+      "sha256": "1ce1854ef974e19b3e970e4664bbfb918501efbb89967e56b9a73bb2515e0889",
       "url": "optimization-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -481,7 +412,7 @@
         "chat_completions": "1.0.0"
       },
       "sdk": 4,
-      "sha256": "af8674b7165437de551c80b17fe3a3a67758cc7a2200b12db1106503469fe03f",
+      "sha256": "f447d2b29883110927b7f2f66d0a226ac0e6aeeceae67d1dfbd8a31feeee9020",
       "url": "subagents-1.0.0.zip",
       "version": "1.0.0"
     },

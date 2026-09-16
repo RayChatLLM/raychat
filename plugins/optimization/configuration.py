@@ -3,124 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import MappingProxyType
-from typing import TYPE_CHECKING
 
 from raychat.configuration import captured_settings
 from raychat.validation import (
     boolean_field,
-    configuration_fields,
-    frozen_fields,
     integer_field,
     number_field,
-    object_field,
     settings_fields,
-    string_list_field,
     text_field,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-
-def _validate_constraints(raw: object) -> None:
-    """Validate the optimization schema before plugin registration.
-
-    Raises
-    ------
-    RuntimeError
-        If a required field is missing or violates the package schema.
-
-    """
-    value = configuration_fields(raw, "optimization")
-    optimization = value
-    providers = object_field(optimization.get("providers"), "optimization.providers")
-    priority = string_list_field(
-        optimization.get("provider_priority"),
-        "optimization.provider_priority",
-    )
-    if len(priority) != len(set(priority)) or set(priority) != set(providers):
-        error_message = "optimization.provider_priority must order every provider once."
-        raise RuntimeError(
-            error_message,
-        )
-    for name, preset_value in providers.items():
-        preset = object_field(preset_value, f"optimization.providers.{name}")
-        text_field(preset.get("url"), f"optimization.providers.{name}.url")
-        text_field(preset.get("model"), f"optimization.providers.{name}.model")
-        string_list_field(
-            preset.get("key_envs"),
-            f"optimization.providers.{name}.key_envs",
-        )
-        for role in ("task", "reflection"):
-            object_field(
-                preset.get(f"{role}_options"),
-                f"optimization.providers.{name}.{role}_options",
-            )
-    defaults = object_field(optimization.get("defaults"), "optimization.defaults")
-    integer_field(
-        defaults.get("evaluation_max_steps"),
-        "optimization.defaults.evaluation_max_steps",
-    )
-    number_field(
-        defaults.get("evaluation_timeout_seconds"),
-        "optimization.defaults.evaluation_timeout_seconds",
-    )
-    object_field(optimization.get("opaque_demo"), "optimization.opaque_demo")
-
-
-@dataclass(frozen=True, kw_only=True)
-class ProviderPreset:
-    """Checked optimization.providers.preset settings for one plugin generation."""
-
-    url: str
-    model: str
-    key_envs: tuple[str, ...]
-    task_options: Mapping[str, object]
-    reflection_options: Mapping[str, object]
-
-    @classmethod
-    def parse(
-        cls,
-        raw: object,
-        path: str = "optimization.providers.preset",
-    ) -> ProviderPreset:
-        """Validate every field before constructing the immutable record.
-
-        Returns
-        -------
-        ProviderPreset
-            Concrete fields detached from mutable configuration input.
-
-        """
-        fields = settings_fields(
-            raw,
-            path,
-            required=("url", "model", "key_envs", "task_options", "reflection_options"),
-        )
-        return cls(
-            url=text_field(fields.get("url"), f"{path}.url"),
-            model=text_field(fields.get("model"), f"{path}.model"),
-            key_envs=tuple(
-                string_list_field(fields.get("key_envs"), f"{path}.key_envs"),
-            ),
-            task_options=frozen_fields(
-                fields.get("task_options"),
-                f"{path}.task_options",
-            ),
-            reflection_options=frozen_fields(
-                fields.get("reflection_options"),
-                f"{path}.reflection_options",
-            ),
-        )
 
 
 @dataclass(frozen=True, kw_only=True)
 class DefaultsSettings:
     """Checked optimization.defaults settings for one plugin generation."""
 
-    provider: str
-    reflection_provider: str | None
     api_timeout_seconds: float
     max_proposals: int
     workers: int
@@ -156,8 +53,6 @@ class DefaultsSettings:
             raw,
             path,
             required=(
-                "provider",
-                "reflection_provider",
                 "api_timeout_seconds",
                 "max_proposals",
                 "workers",
@@ -177,12 +72,6 @@ class DefaultsSettings:
             ),
         )
         return cls(
-            provider=text_field(fields.get("provider"), f"{path}.provider"),
-            reflection_provider=text_field(
-                fields.get("reflection_provider"),
-                f"{path}.reflection_provider",
-                nullable=True,
-            ),
             api_timeout_seconds=number_field(
                 fields.get("api_timeout_seconds"),
                 f"{path}.api_timeout_seconds",
@@ -255,8 +144,6 @@ class OpaqueDemoSettings:
     target_score: float
     proposal_cap: int
     demo_workers: int
-    live_provider: str
-    live_reflection_provider: str
     live_test_repeats: int
 
     @classmethod
@@ -285,8 +172,6 @@ class OpaqueDemoSettings:
                 "target_score",
                 "proposal_cap",
                 "demo_workers",
-                "live_provider",
-                "live_reflection_provider",
                 "live_test_repeats",
             ),
         )
@@ -314,14 +199,6 @@ class OpaqueDemoSettings:
                 fields.get("demo_workers"),
                 f"{path}.demo_workers",
             ),
-            live_provider=text_field(
-                fields.get("live_provider"),
-                f"{path}.live_provider",
-            ),
-            live_reflection_provider=text_field(
-                fields.get("live_reflection_provider"),
-                f"{path}.live_reflection_provider",
-            ),
             live_test_repeats=integer_field(
                 fields.get("live_test_repeats"),
                 f"{path}.live_test_repeats",
@@ -342,8 +219,6 @@ class OptimizationSettings:
     oracle_transcript_bytes: int
     max_evaluation_workers: int
     max_retries: int
-    provider_priority: tuple[str, ...]
-    providers: Mapping[str, ProviderPreset]
     defaults: DefaultsSettings
     opaque_demo: OpaqueDemoSettings
 
@@ -370,13 +245,10 @@ class OptimizationSettings:
                 "oracle_transcript_bytes",
                 "max_evaluation_workers",
                 "max_retries",
-                "provider_priority",
-                "providers",
                 "defaults",
                 "opaque_demo",
             ),
         )
-        _validate_constraints(fields)
         return cls(
             upstream_tag=text_field(fields.get("upstream_tag"), f"{path}.upstream_tag"),
             upstream_commit=text_field(
@@ -408,19 +280,6 @@ class OptimizationSettings:
                 f"{path}.max_evaluation_workers",
             ),
             max_retries=integer_field(fields.get("max_retries"), f"{path}.max_retries"),
-            provider_priority=tuple(
-                string_list_field(
-                    fields.get("provider_priority"),
-                    f"{path}.provider_priority",
-                ),
-            ),
-            providers=MappingProxyType({
-                name: ProviderPreset.parse(item, f"{path}.providers.{name}")
-                for name, item in configuration_fields(
-                    fields.get("providers"),
-                    f"{path}.providers",
-                ).items()
-            }),
             defaults=DefaultsSettings.parse(fields.get("defaults"), f"{path}.defaults"),
             opaque_demo=OpaqueDemoSettings.parse(
                 fields.get("opaque_demo"),

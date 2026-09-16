@@ -15,6 +15,7 @@ from urllib.request import HTTPRedirectHandler, Request
 
 from raychat.configuration import SETTINGS
 from raychat.http_debug import build_http_opener, drain_debug_response
+from raychat.provider_settings import provider_settings
 from raychat.sdk import (
     HTTP_PROVIDER,
     CancelCheck,
@@ -71,13 +72,6 @@ RESERVED_REQUEST_OPTIONS = frozenset(
 _SUCCESSFUL_FINISH_REASONS = frozenset(
     _PLUGIN_SETTINGS.successful_finish_reasons,
 )
-
-DEFAULT_API_URL = _PLUGIN_SETTINGS.url
-DEFAULT_MODEL = _PLUGIN_SETTINGS.model
-_DEFAULT_KEY_ENVS = tuple(
-    _PLUGIN_SETTINGS.api_key_envs,
-)
-_CUSTOM_KEY_ENV = _PLUGIN_SETTINGS.custom_api_key_env
 
 _SOURCE: ServiceSlot[Mapping[str, object]] = ServiceSlot("provider source")
 MAX_TIMEOUT_SECONDS = SETTINGS.limits.max_timeout_seconds
@@ -388,7 +382,6 @@ class ChatAPI:
         ):
             error_message = "API timeout must be a positive finite number."
             raise ValueError(error_message)
-        self.require_key = False
         self.url = url
         self.model = model
         self.api_key = api_key
@@ -411,7 +404,6 @@ class ChatAPI:
 
         """
         cancel_check()
-        self._check_credentials()
         try:
             return run_chat_profile(self, messages, cancel_check)
         except ProviderProcessError as exc:
@@ -432,15 +424,7 @@ class ChatAPI:
         """
         return _worker_payload(self)
 
-    def _check_credentials(self) -> None:
-        if self.require_key and not self.api_key:
-            error_message = "Set a configured provider credential: " + ", ".join(
-                _DEFAULT_KEY_ENVS,
-            )
-            raise ValueError(error_message)
-
     def _request(self, messages: Messages) -> Request:
-        self._check_credentials()
         payload = dict(self.request_options)
         payload.update(model=self.model, messages=messages)
         headers = {
@@ -497,7 +481,6 @@ class ChatAPI:
             The endpoint cannot identify a models route or the response is invalid.
 
         """
-        self._check_credentials()
         endpoint = _validate_endpoint(self.url)
         suffix = "/chat/completions"
         path = endpoint.path.rstrip("/")
@@ -562,19 +545,6 @@ class ChatAPI:
         ) as exc:
             error_message = "Expected choices[0].message.content as text."
             raise RuntimeError(error_message) from exc
-
-
-def _same_endpoint(left: str, right: str) -> bool:
-    return left.rstrip("/") == right.rstrip("/")
-
-
-def _api_key(url: str, environ: Mapping[str, str]) -> str:
-    if _same_endpoint(url, DEFAULT_API_URL):
-        return next(
-            (environ[name] for name in _DEFAULT_KEY_ENVS if environ.get(name)),
-            "",
-        )
-    return environ.get(_CUSTOM_KEY_ENV, "")
 
 
 def _request_options_from_text(value: object) -> dict[str, object]:
@@ -712,11 +682,6 @@ def register(api: PluginAPI) -> None:
             ProviderSpec,
             _validated_request_options,
             _request_options_from_text,
-            _same_endpoint,
-            _api_key,
-            DEFAULT_API_URL,
-            DEFAULT_MODEL,
-            _CUSTOM_KEY_ENV,
             _PLUGIN_SETTINGS.api_timeout_seconds,
             _PLUGIN_SETTINGS.request_options,
         ),
@@ -728,25 +693,17 @@ def register(api: PluginAPI) -> None:
     ) -> ChatAPI:
         values: object = vars(args)
         fields = configuration_fields(values, "provider options")
-        url = text_field(fields["url"], "provider.url")
-        model = text_field(fields["model"], "provider.model", nullable=True)
-        if model is None:
-            if not _same_endpoint(url, DEFAULT_API_URL):
-                error_message = "Set --model when using a custom endpoint."
-                raise ValueError(error_message)
-            model = DEFAULT_MODEL
-            args.model = model
-        key = _api_key(url, environ)
+        identity = provider_settings(environ)
+        args.model = identity.model
         chat = ChatAPI(
-            url,
-            model,
-            key,
+            identity.chat_url,
+            identity.model,
+            identity.auth_token,
             _timeout(fields["api_timeout"]),
             request_options=_request_options_from_text(
                 text_field(fields["request_options"], "provider.request_options"),
             ),
         )
-        chat.require_key = _same_endpoint(url, DEFAULT_API_URL)
         models.bind(chat)
         return chat
 

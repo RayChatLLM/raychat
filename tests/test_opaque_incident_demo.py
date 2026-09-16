@@ -8,6 +8,7 @@ import hashlib
 import io
 import itertools
 import json
+import os
 import re
 import shlex
 import sys
@@ -20,6 +21,7 @@ from unittest import mock
 
 from raychat import configuration
 from raychat import entrypoint as _rc_entrypoint
+from raychat.provider_settings import provider_settings
 from raychat.validation import json_object, object_field
 from tests.plugin_support import plugin_module
 from tests.provider_support import provider as _rc_chat_completions
@@ -32,7 +34,7 @@ if TYPE_CHECKING:
     from plugins.optimization.gepa.instruction_proposal import (
         InstructionProposalSignature,
     )
-    from raychat.sdk import Chat, Messages
+    from raychat.sdk import Chat, Messages, ProviderClient
 else:
     incident = plugin_module("optimization.opaque_incident_demo")
     port = plugin_module("optimization.optimize_chat_prompt")
@@ -52,6 +54,12 @@ async def _run_child(argv: Sequence[str], directory: Path) -> ChildResult:
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=directory,
+        env={
+            **os.environ,
+            "RAYCHAT_AUTH_TOKEN": "fixture-incident-token",
+            "RAYCHAT_MODEL": "fixture-model",
+            "RAYCHAT_BASE_URL": "http://127.0.0.1:1/v1",
+        },
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -91,7 +99,11 @@ class IncidentTestCase(unittest.TestCase):
             self.fail(message or f"Expected {expected!r}; received {actual!r}.")
 
     @contextlib.contextmanager
-    def rejected(self, expected: type[Exception], match: str = "") -> Iterator[None]:
+    def rejected(
+        self,
+        expected: type[BaseException],
+        match: str = "",
+    ) -> Iterator[None]:
         """Require the operation to fail with the expected exception and message.
 
         Yields
@@ -189,22 +201,34 @@ class OpaqueIncidentOptimizationTests(IncidentTestCase):
                 "Failed condition: assertTrue "
                 'report["held_out_test"]["all_optimized_goals_met"]',
             )
-        self.equal(report["configuration"]["kind"], "hosted-two-model")
+        self.equal(report["configuration"]["kind"], "hosted-task-reflection")
 
-    def test_named_provider_key_cannot_follow_an_unrelated_url(self) -> None:
-        """Named provider key cannot follow an unrelated url."""
-        with self.rejected(ValueError, "non-matching endpoint"):
-            incident.provider_api(
-                incident.ProviderRequest(
-                    provider="fireworks",
-                    url="https://unrelated.example/v1/chat/completions",
-                    model=None,
-                    key_env=None,
-                    role="task",
-                    request_options=None,
-                    timeout=1,
-                ),
-            )
+    def test_live_cli_rejects_retired_provider_selectors(self) -> None:
+        """Keep both role identities exclusively in the canonical environment."""
+        for flag in (
+            "--provider",
+            "--url",
+            "--model",
+            "--key-env",
+            "--reflection-provider",
+            "--reflection-url",
+            "--reflection-model",
+            "--reflection-key-env",
+        ):
+            with (
+                self.subTest(flag=flag),
+                mock.patch("sys.stderr", new=io.StringIO()),
+                self.rejected(SystemExit, "2"),
+            ):
+                incident.main([
+                    "live",
+                    "--output",
+                    "unused.txt",
+                    "--report",
+                    "unused.json",
+                    flag,
+                    "unused",
+                ])
 
     def test_exact_goal_settings_are_validated_before_hosted_calls(self) -> None:
         """Exact goal settings are validated before hosted calls."""
@@ -224,20 +248,38 @@ class OpaqueIncidentOptimizationTests(IncidentTestCase):
                 incident.run_hosted(provider, provider, settings)
         self.equal(calls, 0)
 
-    def test_hosted_roles_reject_the_same_endpoint_and_model(self) -> None:
-        """Hosted roles reject the same endpoint and model."""
-        task = _rc_chat_completions.ChatAPI("http://127.0.0.1/v1/chat", "same-model")
-        reflection = _rc_chat_completions.ChatAPI(
-            "http://127.0.0.1/v1/chat",
-            "same-model",
-        )
+    def test_hosted_roles_accept_the_same_endpoint_and_model(self) -> None:
+        """Keep task/reflection data isolation when both roles share one identity."""
+        settings = provider_settings({
+            "RAYCHAT_AUTH_TOKEN": "fixture-incident-token",
+            "RAYCHAT_MODEL": "fixture-model",
+            "RAYCHAT_BASE_URL": "http://127.0.0.1/v1",
+        })
+        configured = port.configured_provider(settings)
+        task = configured.client(1)
+        reflection = configured.client(1)
+        task_model = incident.DeterministicIncidentTaskModel()
+        reflection_calls = 0
 
-        with self.rejected(ValueError, "distinct hosted models"):
-            incident.run_hosted(
+        def dispatch(client: ProviderClient, messages: Messages) -> str:
+            nonlocal reflection_calls
+            if client is reflection:
+                reflection_calls += 1
+                return (
+                    f"{incident.CONTRACT_APPENDIX}\n\n"
+                    f"{incident.PRIORITY_APPENDIX}\n\n{incident.OWNER_APPENDIX}"
+                )
+            return task_model(messages)
+
+        with mock.patch.object(_rc_chat_completions.ChatAPI, "__call__", dispatch):
+            run = incident.run_hosted(
                 task,
                 reflection,
-                incident.HostedSettings(workers=1, retries=0),
+                incident.HostedSettings(workers=1, test_repeats=1, retries=0),
             )
+        self.equal(reflection_calls, 1)
+        self.equal(run.summary()["goal"]["reached"], expected=True)
+        self.equal(run.held_out_test["all_optimized_goals_met"], expected=True)
 
     def test_cli_rejects_protocol_report_path_collision_before_running(self) -> None:
         """Cli rejects protocol report path collision before running."""

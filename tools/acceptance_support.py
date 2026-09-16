@@ -24,6 +24,26 @@ class VerificationPaths:
     scenarios: tuple[str, ...]
 
 
+def fixture_provider_environment(
+    *,
+    url: str = "http://127.0.0.1:1/v1",
+    model: str = "terminal-fixture",
+) -> dict[str, str]:
+    """Configure offline terminal probes without using real provider credentials.
+
+    Returns
+    -------
+    dict[str, str]
+        Synthetic provider variables for the launched fixture process.
+
+    """
+    return {
+        "RAYCHAT_AUTH_TOKEN": "terminal-fixture-token",
+        "RAYCHAT_MODEL": model,
+        "RAYCHAT_BASE_URL": url,
+    }
+
+
 def verification_paths(args: argparse.Namespace) -> VerificationPaths:
     """Validate the shared terminal probe CLI arguments.
 

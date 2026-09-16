@@ -9,11 +9,19 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from raychat.sdk import WorkerPayload
     from raychat.service_contracts import ModelSummary
 
 from raychat.configuration import SETTINGS
+from raychat.sdk import WorkerDescriptor
 from raychat.service_contracts import ModelProcessSpec
-from raychat.validation import array_field, plain
+from raychat.validation import (
+    array_field,
+    configuration_fields,
+    frozen_fields,
+    number_field,
+    plain,
+)
 
 from .configuration import load as load_settings
 
@@ -36,6 +44,15 @@ def _name(value: object, label: str) -> str:
     return value
 
 
+@dataclass(frozen=True)
+class _ProfileProvider:
+    model: str
+    descriptor: WorkerDescriptor
+
+    def private_payload(self) -> WorkerPayload:
+        return self.descriptor.private_payload()
+
+
 @dataclass(frozen=True, slots=True)
 class ModelProfile:
     """A named model capability whose factory creates a fresh chat client."""
@@ -52,6 +69,8 @@ class ModelProfile:
     context_chars: int | None = None
     keep_recent_turns: int | None = None
     inherits_primary: bool = False
+    api_timeout: float | None = None
+    request_options: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate routing, provider identity and optional context limits.
@@ -67,6 +86,13 @@ class ModelProfile:
         _callable_factory(self.chat_factory)
         _integer(self.priority, "Profile priority must be an integer.")
         _process_spec(self.process_spec, self.model)
+        if self.api_timeout is not None:
+            number_field(self.api_timeout, "profile API timeout")
+        object.__setattr__(
+            self,
+            "request_options",
+            frozen_fields(self.request_options, "profile request options"),
+        )
         if (
             self.instruction_role is not None
             and self.instruction_role not in SETTINGS.chat.instruction_roles
@@ -102,7 +128,7 @@ class ModelProfile:
         Returns
         -------
         ModelProfile
-            A fixed per-child provider, or this explicitly configured profile.
+            A provider snapshot whose identity follows the current primary client.
 
         """
         if not self.inherits_primary or self.process_spec is None:
@@ -110,10 +136,31 @@ class ModelProfile:
         provider: object = self.chat_factory()
         if not isinstance(provider, ModelProcessSpec):
             return self
+        payload = provider.private_payload()
+        options = dict(payload["options"])
+        if self.api_timeout is not None:
+            options["timeout"] = self.api_timeout
+        options["request_options"] = {
+            **configuration_fields(
+                options.get("request_options", {}),
+                "request options",
+            ),
+            **plain(self.request_options),
+        }
+        snapshot = _ProfileProvider(
+            provider.model,
+            WorkerDescriptor(
+                payload["plugin"],
+                payload["worker"],
+                payload["source"],
+                options,
+                tuple(payload["secrets"]),
+            ),
+        )
         return replace(
             self,
             model=provider.model,
-            process_spec=provider,
+            process_spec=snapshot,
             inherits_primary=False,
         )
 

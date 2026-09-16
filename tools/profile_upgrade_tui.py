@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING
 
 from raychat.validation import json_object, object_field, text_field
 
-from .acceptance_support import ignore_bytecode, read_object, require
+from .acceptance_support import (
+    fixture_provider_environment,
+    ignore_bytecode,
+    read_object,
+    require,
+)
 from .bare_tui import PROVIDER_SOURCE
 from .drive_tui import TerminalChat
 from .probe_json import catalog_entries, receipt
@@ -143,10 +148,9 @@ class Scenario:
                 str(self.provider),
                 "--provider",
                 "bare_probe",
-                "--model",
-                "bare_probe",
                 "--no-session",
             ],
+            environ=fixture_provider_environment(model="bare_probe"),
         )
 
     def commands(self, name: str, commands: list[tuple[str, str]]) -> None:

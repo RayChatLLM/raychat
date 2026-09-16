@@ -10,17 +10,18 @@ Run it with Python 3.10 or newer. No third-party runtime packages are required.
 feature archives on first launch.
 
 ```bash
-export FIREWORK_API_KEY="your-key"
+export RAYCHAT_AUTH_TOKEN="your-api-token"
+export RAYCHAT_MODEL="your-model-id"
+export RAYCHAT_BASE_URL="https://provider.example/v1"
 python3 -B -S raychat.py --workspace ./workspace
 ```
 
 Use `/models` in the TUI to fetch all model IDs from the configured provider's
 OpenAI-compatible `GET /models` endpoint. Type to filter; use arrows, Page Up/Down,
-Home/End, Enter, or click to select. Escape closes the menu. The selection applies
-to subsequent requests and survives session restoration, plugin reloads, and live
-core updates. In-flight requests finish with the model they already started using.
-New child chats using the primary profile inherit the selection; explicitly
-configured model profiles keep their own models.
+Home/End, Enter, or click to inspect an ID. Escape closes the menu. To change the
+active model, set `RAYCHAT_MODEL` and restart RayChat. Saved sessions and profile
+settings cannot override it. Child chats, task evaluation, and optimization
+reflection use the same endpoint, model, and token as the main chat.
 The `/system` panel wraps the complete model identifier onto multiple lines,
 including its provider path.
 
@@ -28,21 +29,51 @@ Self-Harness is disabled by default. The ordinary chat agent still has the core'
 source inspection, live-update, status, and recovery tools. See
 [live core updates](docs/LIVE_CORE.md) for activation and recovery controls.
 
-On Windows, use `py -3` in place of `python3`. The endpoint, model, environment
-variable names, plugin selection, limits, storage, and rendering settings live
-in [raychat.json](raychat.json). `--config PATH` selects another complete JSON
-configuration. CLI flags override settings for that launch. Credentials come
-from the configured environment variables.
+On Windows, use `py -3` in place of `python3`. Every launch requires exactly these
+three provider variables; missing or blank values produce an error listing the
+variables to set. `--help` works without them. `RAYCHAT_BASE_URL` is the API root;
+RayChat derives `/chat/completions` and `/models` from it. A complete URL ending
+in `/chat/completions` is also normalized to that same root. There is no default
+provider address or model, and `--model` and `--url` are removed. Other providers'
+credential environment variables are not consulted.
 
-For a different Chat Completions endpoint:
+Plugin selection, request options, limits, storage, and rendering settings live
+in [raychat.json](raychat.json). `--config PATH` selects another complete JSON
+configuration. Those settings cannot change the provider token, model, or URL.
+Configuration rejects duplicate keys, invalid types and ranges, non-finite values,
+unsupported versions, and oversized files.
+
+### Environment files
+
+Copy the template for your platform to `.env`, fill in all three values, and load
+it into the shell before launching. RayChat reads the process environment; it
+does not silently load another configuration file. `.env` is ignored by Git.
+The templates contain no credentials, endpoint, or model defaults.
+
+Linux or macOS (Bash or Zsh):
 
 ```bash
-python3 -B -S raychat.py --url https://provider.example/v1/chat/completions --model vendor/model
+cp environment/linux.env .env  # macOS: use environment/macos.env
+# Edit .env and fill in all three values, retaining the single quotes.
+set -a
+. ./.env
+set +a
+python3 -B -S raychat.py --workspace ./workspace
 ```
 
-Custom endpoints use `LLM_API_KEY` by default. A custom URL requires an explicit
-model. Configuration rejects duplicate keys, invalid types and ranges,
-non-finite values, unsupported versions, and oversized files.
+Windows (PowerShell):
+
+```powershell
+Copy-Item environment/windows.env .env
+notepad .env
+# Fill in all three values without quotes, then save and close Notepad.
+Get-Content .env | ForEach-Object {
+    if ($_ -match '^\s*(RAYCHAT_AUTH_TOKEN|RAYCHAT_MODEL|RAYCHAT_BASE_URL)\s*=(.*)$') {
+        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2].Trim(), 'Process')
+    }
+}
+py -3 -B -S raychat.py --workspace ./workspace
+```
 
 ## Raw HTTP debugging
 
@@ -267,13 +298,13 @@ provenance, unchanged prompt templates, and the deterministic transcript oracle.
 | `plugin_catalog/` | Distributable feature ZIPs, catalog metadata and standard profile; rebuild after plugin edits |
 | `tools/` | Acceptance drivers and development/release commands, including `tools/release.py` |
 | `tests/` | Executable unit and integration regression tests |
-| `docs/verification/` | Indexed historical evidence and final-acceptance status |
+| `environment/` | Windows, Linux, and macOS provider environment templates |
 | `build/` | Ignored generated ZIP, release folder and local verification output |
 
 There is no root `optimization/` implementation or checked-in `dist/` release
 copy. The optimization plugin owns its code; release commands generate
-`build/raychat.zip` and `build/raychat/`. Historical reports belong under
-`docs/verification/artifacts/`, separate from executable feature resources.
+`build/raychat.zip` and `build/raychat/`. Local verification output belongs in
+`build/`; CI retains its own run artifacts.
 
 ## Development acceptance
 
@@ -298,8 +329,8 @@ uses of `Any`.
 
 The complete unit suite is required alongside static checks and actual TUI
 acceptance; none substitutes for the others. Record failures, errors and skips
-with the tested source revision. Historical packaged QA is retained in
-[the verification index](docs/verification/README.md). The current
+with the tested source revision. See [verification instructions](docs/VERIFICATION.md)
+for reproducible checks. The current
 `verify_quality.py` gate independently inventories source files, applies maximum
 mypy and Ruff rules, checks formatting, and fails if sources change during the
 run. Its report lists every diagnostic and explicit rule exception.

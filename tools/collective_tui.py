@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, TypedDict
 from urllib.parse import urlsplit
 
 from raychat.http_debug import HTTPConnection, HTTPSConnection, drain_debug_response
+from raychat.provider_settings import provider_settings
 from raychat.type_support import override
 from raychat.validation import (
     ConfigurationError,
@@ -37,9 +38,15 @@ from raychat.validation import (
 )
 
 from .accept_tui import SOURCE, Case
-from .acceptance_support import json_text, message_history, read_object, require
+from .acceptance_support import (
+    fixture_provider_environment,
+    json_text,
+    message_history,
+    read_object,
+    require,
+)
 from .drive_tui import TerminalChat
-from .probe_json import catalog_entries, text_array
+from .probe_json import catalog_entries
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -498,7 +505,6 @@ class _RunOptions:
     agents: int
     parallel: int
     live: bool
-    model: str | None
 
 
 class _CollectiveRun:
@@ -512,33 +518,10 @@ class _CollectiveRun:
             entry.identifier: entry.defaults
             for entry in catalog_entries(case.root / "plugin_catalog/catalog.json")
         }
-        provider = defaults["chat_completions"]
-        provider.update(
-            object_field(settings.get("chat_completions", {}), "provider settings"),
+        provider = provider_settings(os.environ) if options.live else None
+        self.selected_model = (
+            provider.model if provider is not None else "deterministic-terminal-fixture"
         )
-        self.selected_model = options.model or (
-            text_field(provider["model"], "model")
-            if options.live
-            else "deterministic-terminal-fixture"
-        )
-        key = (
-            next(
-                (
-                    os.environ[name]
-                    for name in text_array(
-                        provider["api_key_envs"],
-                        "API key variables",
-                    )
-                    if os.environ.get(name)
-                ),
-                "",
-            )
-            if options.live
-            else ""
-        )
-        if options.live and not key:
-            error_message = "Live acceptance requires a configured provider credential"
-            raise ValueError(error_message)
         workflows = defaults["workflows"]
         workflows.update(
             object_field(settings.get("workflows", {}), "workflow settings"),
@@ -549,19 +532,17 @@ class _CollectiveRun:
         )
         self.gateway = _ModelGateway(
             self.ledger,
-            text_field(provider["url"], "provider URL") if options.live else None,
-            key,
+            provider.chat_url if provider is not None else None,
+            provider.auth_token if provider is not None else "",
         )
 
-    def _configure(self, endpoint: str) -> None:
+    def _configure(self) -> None:
         plugins = object_field(self.config["plugins"], "plugins")
         settings = object_field(plugins["settings"], "plugin settings")
         settings["subagents"] = {
             "max_parallel": self.options.parallel,
             "profiles": {
                 "ledger": {
-                    "url": endpoint,
-                    "model": self.selected_model,
                     "purposes": ["ledger"],
                     "context_chars": 10000,
                     "keep_recent_turns": 1,
@@ -570,7 +551,6 @@ class _CollectiveRun:
             "purpose_routes": {"ledger": "ledger"},
         }
         settings["chat_completions"] = {
-            "model": self.selected_model,
             "request_options": {
                 "reasoning_effort": "low",
                 "max_tokens": 8192,
@@ -628,12 +608,6 @@ class _CollectiveRun:
             [
                 "--config",
                 str(self.case.config),
-                # Keep the gateway a custom endpoint. Redefining the provider's
-                # default URL would incorrectly require real credentials here.
-                "--url",
-                endpoint,
-                "--model",
-                self.selected_model,
                 "--workspace",
                 str(self.case.work),
                 "--context-chars",
@@ -644,6 +618,10 @@ class _CollectiveRun:
                 "--log",
                 str(self.case.output / "events.jsonl"),
             ],
+            environ=fixture_provider_environment(
+                url=endpoint,
+                model=self.selected_model,
+            ),
         )
 
     def _drive_batches(self, chat: TerminalChat) -> None:
@@ -820,7 +798,7 @@ class _CollectiveRun:
         thread.start()
         try:
             endpoint = f"http://127.0.0.1:{server.server_port}/chat"
-            self._configure(endpoint)
+            self._configure()
             self._write_fixtures()
             return self._run_terminal(endpoint)
         finally:
@@ -847,7 +825,6 @@ def run(
     agents: int = MINIMUM_AGENTS,
     parallel: int = 4,
     live: bool = False,
-    model: str | None = None,
 ) -> dict[str, object]:
     """Exercise real child sessions, request budgets and complete ledger aggregation.
 
@@ -857,7 +834,7 @@ def run(
         Independent recorded evidence for every collective acceptance condition.
 
     """
-    return _CollectiveRun(case, _RunOptions(agents, parallel, live, model)).run()
+    return _CollectiveRun(case, _RunOptions(agents, parallel, live)).run()
 
 
 class _Options(argparse.Namespace):
@@ -866,7 +843,6 @@ class _Options(argparse.Namespace):
     agents: int
     parallel: int
     live: bool
-    model: str | None
 
 
 def main() -> None:
@@ -877,7 +853,6 @@ def main() -> None:
     parser.add_argument("--agents", type=int, default=MINIMUM_AGENTS)
     parser.add_argument("--parallel", type=int, default=4)
     parser.add_argument("--live", action="store_true")
-    parser.add_argument("--model")
     args = parser.parse_args(namespace=_Options())
     if args.agents < MINIMUM_AGENTS:
         parser.error("This acceptance scenario requires at least 50 agents")
@@ -887,7 +862,6 @@ def main() -> None:
         agents=args.agents,
         parallel=args.parallel,
         live=args.live,
-        model=args.model,
     )
     sys.stdout.write(json_text(report, indent=2) + "\n")
     sys.stdout.flush()

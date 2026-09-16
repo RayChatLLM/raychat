@@ -1,12 +1,5 @@
 # Verification
 
-The current queue/status work is recorded in
-[`ui_queue_status_report.json`](verification/artifacts/ui_queue_status_report.json).
-It covers SDK 4 push status, command completion, automatic mouse copying,
-transactional FIFO queue editing in root and workflow-child chats, real launcher
-use, package upgrades, and the 50-child collective task. Older reports below
-retain their original source identities and describe earlier releases.
-
 Run the new composer acceptance directly with:
 
 ```bash
@@ -21,11 +14,8 @@ feedback without saved-history changes, and independent workflow-child chats.
 
 Verification requires the complete unittest suite, strict typing and lint/format
 checks, plus actual RayChat terminal interaction with keyboard, mouse and screen
-observations. [Final functional QA](verification/artifacts/reorganization_report.json)
-ran 592 tests with one Windows-only skip, passed all thirteen packaged terminal
-drivers and configured static checks, and completed the 50-child collective task.
-The [evidence index](verification/README.md) identifies the tested source, the
-static-only import correction, and separately retained earlier live experiments.
+observations. Retain each run's source identity, complete output, and generated
+reports in its chosen output directory or CI artifacts.
 
 The checked-in drivers launch `python -B -S` in isolated workspaces and homes. They observe model requests and filesystem/process
 effects; they do not invoke feature or session APIs from the driver.
@@ -67,12 +57,12 @@ verify the application's user-facing behavior. Complete verification requires
 both, and final results must identify the tested source/ZIP hash.
 
 The following make paid requests through the configured provider. Set credentials
-in the provider's documented environment variables, without putting secrets in
-commands or reports:
+with `RAYCHAT_AUTH_TOKEN`, `RAYCHAT_MODEL`, and `RAYCHAT_BASE_URL` before launching.
+The offline drivers supply their own synthetic environment values:
 
 ```bash
-python3 -B -S -m tools.collective_tui --output /tmp/raychat-live-collective --agents 50 --parallel 8 --live --model accounts/fireworks/models/glm-5p3-flash
-python3 -B -S -m tools.self_harness_tui --output /tmp/raychat-live-self-harness --model accounts/fireworks/models/glm-5p3-flash --request-options '{"reasoning_effort":"low"}'
+python3 -B -S -m tools.collective_tui --output /tmp/raychat-live-collective --agents 50 --parallel 8 --live
+python3 -B -S -m tools.self_harness_tui --output /tmp/raychat-live-self-harness --request-options '{"reasoning_effort":"low"}'
 ```
 
 ## What the terminal scenarios verify
@@ -122,100 +112,21 @@ or dynamic memory. `--keep-recent` limits raw pairs from completed tasks, not
 inputs still needed by the active task. Older summaries keep complete factual
 groups and never replace the active user prompt.
 
-## Historical evidence and limits
+## Coverage limits
 
-The reports below predate the current file/folder reorganization. They document
-their own sources and experiments; they do not establish that the reorganized
-tree has passed the new full-unit and fourteen-driver acceptance requirement.
-
-The retained deterministic collective run completed 50 correct children with eight
-active at once. All 50 compacted; 305 requests contained compaction, and the
-largest child request was 9,993/10,000 characters. It also repaired one deliberately
-malformed model response, rejected oversized input before provider invocation and
-recovered in the selected child. The aggregate was 24,900 cents.
-
-The aggregation fixture computes exclusively from the current request; it does
-not remember evicted report contents between requests. The request that wrote
-the aggregate contained all seven complete batch reports at 31,332/32,000
-characters. This catches the earlier retention-cap failure that caused a live
-parent to keep rereading reports instead of finishing.
-
-The earlier live collective run on the frozen runtime also passed: 50/50 correct
-children, eight active at once, 304 compacted child requests and a verified total
-of 24,900 cents in 275 seconds. The largest child request was 9,966/10,000
-characters; the largest parent request was 31,993/32,000. Child follow-up,
-oversized-input rejection and recovery all passed. The complete conditions and
-outcome are in [the live report](verification/artifacts/workflow_tui_live_report.json).
-
-An earlier live Self-Harness TUI run accepted one candidate: training 0/6 → 6/6,
-validation 2/4 → 4/4 and post-selection tests 2/4 → 4/4, using 83 calls in 83
-seconds. The complete paired outcomes and proposal are in
-[the report](verification/artifacts/self_harness_tui_report.json).
-
-The subsequent interactive QA reproduced the user's installed-package startup
-crash, then verified the upgrade using a read-only copy of that exact old
-installation. The default provider also completed a real two-reviewer workflow
-and file repair, with approvals entered in the UI and an independent verifier
-returning `QA_VERIFY_PASSED total=2440`. Child follow-up, keyboard/mouse switching,
-parent return, cancellation, replacement input and denied writes passed. Model
-mistakes and corrections are recorded in the
-[manual interaction report](verification/artifacts/tui_manual_default_report.json).
-
-The earlier packaged-source acceptance passed the nine terminal drivers that
-existed at that time; it did not include the new plugin-guide driver. Its
-50 children all compacted and returned correct subtotals, with a 24,900-cent
-aggregate, peak concurrency eight, and maximum requests of 9,991/10,000 child
-characters and 31,982/32,000 parent characters. Startup errors, existing-package
-upgrades, separate child queues, picker cancellation, Unicode copying, oversized
-pastes and saved-session navigation are included in the
-[QA report](verification/artifacts/tui_qa_report.json), which records the exact
-tested archive hash. Full transcripts are retained under
-`/tmp/raychat-expanded/qa-release-acceptance-v1/`.
-
-Three further live Self-Harness TUI trials used identical cases and provider
-settings, totaling 250 calls. Two improved training from 0/6 to 6/6, validation
-from 2/4 to 4/4, and post-selection tests from 2/4 to 4/4. The other improved
-training only to 1/6 and stayed at 2/4 on both other splits: it learned the key
-rule but often violated the required exact compact JSON formatting. All three
-outcomes are retained in the
-[Self-Harness QA report](verification/artifacts/self_harness_qa_report.json).
-This demonstrates useful but inconsistent improvement on the measured tasks.
-
-Historical evidence is retained under `docs/verification/artifacts/`; the
-[index](verification/README.md) separates older API/optimization experiments from
-terminal and live-provider evidence. Reports retain their original conditions,
-paths and source hashes rather than being relabeled as new results. Full ANSI
-transcripts, request logs and failed attempts from this development session are
-under `/tmp/raychat-expanded/` and are not durable release attachments.
-
-The final post-reorganization report records the full unit result, pinned static
-checks, all thirteen extracted-release drivers, platform/interpreter and exact
-source/archive identity. All 50 current-run children compacted and returned correct
-subtotals; the aggregate was 24,900 cents. Nine persistence scenarios cover the
-checkpoint corrections, including isolated child completion and cancellation.
-Eight earlier terminal samples measured 118.67–120.00 full-frame writes per second;
-that measurement included repeated identical screens. The current FPS driver
-records completed application frames separately from terminal writes, measures
-typing latency, and can throttle PTY reads to exercise output backpressure.
-Historical live experiments retain their original scope. The separate maximum-strictness audit
-is not included in the configured static-checks claim.
+The FPS driver records completed application frames separately from terminal
+writes, measures typing latency, and can throttle PTY reads to exercise output
+backpressure. A measured application frame rate does not establish the physical
+display rate of every terminal emulator.
 
 The Self-Harness cases deliberately omit an organization-specific deployment
 policy. Held-in verifier feedback supplies examples from which the model can
 learn that rule. Validation and post-selection tests use different inputs, but
-the small public case set has also been used during development, and repeated
-trials reuse cases. A passing comparison demonstrates useful instruction learning
-on this task family, not broad or statistically established coding improvement.
-Failed evaluations, proposals and runs remain evidence; they are not counted as
-improvements.
+repeated trials reuse the small public case set. Passing demonstrates useful
+instruction learning on this task family, not general coding improvement.
+Failed evaluations and runs are retained as failures rather than improvements.
 
-Process cancellation includes isolated plugin commands on the main thread and
-in an executor thread. The registered process runner cleaned up commands and
-SIGTERM-resistant grandchildren in 0.197–0.249 seconds; cleanup markers and PID
-checks were observed before replacement prompts. This proves managed subprocess
-cleanup. Arbitrary plugins that detach unmanaged processes are outside this test.
-
-The historical terminal evidence here is macOS/Python 3.12. Portable smoke extracts the exact
-archive and runs the same offline TUI drivers on POSIX, retaining an explicit
-coverage report with `--smoke-output`. Windows CI checks source compilation and
-package/archive integrity, and reports that Windows TUI behavior was not tested.
+Portable smoke extracts the exact archive and runs the offline TUI drivers on
+POSIX, retaining a coverage report with `--smoke-output`. Windows CI checks source
+compilation, provider configuration, HTTP capture/replay, and package/archive
+integrity; it reports that Windows TUI behavior was not tested.

@@ -196,10 +196,9 @@ Each removal runs the fixed candidate evaluator. The provider needs a model capa
 of generating valid code in RayChat's JSON action protocol. For the recorded test:
 
 ```sh
-.venv/bin/python -m tools.live_agent_tui --output build/live-agent-check \
-  --select-model nemotron-lightning-3p5-30b-a3b
+.venv/bin/python -B -m tools.live_agent_tui --output build/live-agent-check
 ```
 
-This uses the configured Fireworks credentials and sends inspected source to that
-provider. The report and captured screens distinguish successful activations from
+This uses `RAYCHAT_AUTH_TOKEN`, `RAYCHAT_MODEL`, and `RAYCHAT_BASE_URL` and sends
+inspected source to that provider. The report and captured screens distinguish successful activations from
 rejected or incomplete proposals; a model's completion message alone is not a pass.

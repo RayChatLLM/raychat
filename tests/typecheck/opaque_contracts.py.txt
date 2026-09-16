@@ -1,5 +1,7 @@
 """Incident planning and proof artifacts must preserve concrete field types."""
-from plugins.optimization.opaque_incident_demo import HostedSettings, ProofReport, ProviderRequest, ResponsePlan
+from plugins.optimization.optimize_chat_prompt import ConfiguredProvider
+from raychat.provider_settings import ProviderSettings
+from plugins.optimization.opaque_incident_demo import HostedSettings, ProofReport, ResponsePlan
 
 
 def wrong_worker_setting() -> None:
@@ -7,7 +9,7 @@ def wrong_worker_setting() -> None:
 
 
 def wrong_provider_timeout() -> None:
-    ProviderRequest(provider="example", role="task", timeout="bad")  # expect-error: arg-type
+    ConfiguredProvider(ProviderSettings(auth_token="fixture", model="fixture", base_url="https://example.invalid/v1"), {}).client("bad")  # expect-error: arg-type
 
 
 def wrong_plan_duration() -> ResponsePlan:

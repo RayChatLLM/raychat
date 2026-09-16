@@ -13,6 +13,7 @@ from raychat.entrypoint import build_parser
 from raychat.plugins import Runtime
 from raychat.resources import AgentResources
 from raychat.validation import configuration_fields
+from tests.environment_support import provider_environment
 
 if TYPE_CHECKING:
     import argparse
@@ -38,6 +39,7 @@ def arguments(
     argv: Sequence[str] = (),
     *,
     initial_prompt: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> argparse.Namespace:
     """Parse application options while isolating the operator's home directory.
 
@@ -51,7 +53,10 @@ def arguments(
         tempfile.TemporaryDirectory(prefix="raychat-test-arguments-") as directory,
         mock.patch.object(Path, "home", return_value=Path(directory)),
     ):
-        args = build_parser({}, argv).parse_args(argv)
+        args = build_parser(
+            provider_environment() if environ is None else environ,
+            argv,
+        ).parse_args(argv)
     args.initial_prompt = initial_prompt
     return args
 

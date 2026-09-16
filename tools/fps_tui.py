@@ -19,6 +19,7 @@ from raychat.validation import (
     text_field,
 )
 
+from .acceptance_support import fixture_provider_environment
 from .drive_tui import TerminalChat, TerminalOptions
 
 if TYPE_CHECKING:
@@ -257,6 +258,7 @@ def _size_samples(
             "fps_probe",
             "--no-session",
         ],
+        environ=fixture_provider_environment(),
         options=TerminalOptions(
             columns=columns,
             rows=rows,

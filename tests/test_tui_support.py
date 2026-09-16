@@ -329,7 +329,7 @@ class TuiFixtureTests(TypedTestCase):
             "home",
             side_effect=AssertionError("Argument fixture accessed operator home."),
         ) as operator_home:
-            args = arguments(["--model", "test", "--no-memory"])
+            args = arguments(["--no-memory"])
         operator_home.assert_not_called()
         self.equal(argument_fields(args)["model"], "test")
         self.require(argument_fields(args)["no_memory"])

@@ -28,6 +28,7 @@ from raychat.type_support import override
 from raychat.validation import object_field
 from raychat.workers import AgentWorker
 from tests.assertions import TypedTestCase
+from tests.environment_support import provider_environment
 from tests.plugin_support import (
     ScriptedChat,
     callback_plugin,
@@ -573,11 +574,9 @@ class HotPluginTests(_HotPluginFixture):
                 str(self.root),
                 "--no-session",
                 "--no-memory",
-                "--model",
-                "test",
             ],
         )
-        resources = create_resources(args, {})
+        resources = create_resources(args, provider_environment())
         self.addCleanup(resources.close)
         old_provider = resources.runtime.services["chat"]
         old_judge = require_goal_controller(resources.runtime).judge

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Generic, TypedDict, TypeVar
 import raychat.composition as _rc_composition
 import raychat.protocol as _rc_protocol
 from raychat.configuration import SETTINGS
+from raychat.provider_settings import ProviderSettings, provider_settings
 from raychat.sdk import (
     Action,
     Chat,
@@ -138,13 +139,6 @@ UPSTREAM_TOTAL_BYTES = _PLUGIN_SETTINGS.upstream_total_bytes
 ORACLE_TRANSCRIPT_SHA256 = _PLUGIN_SETTINGS.oracle_transcript_sha256
 ORACLE_TRANSCRIPT_BYTES = _PLUGIN_SETTINGS.oracle_transcript_bytes
 
-_PROVIDER_DEFAULTS = _PLUGIN_SETTINGS.providers
-PROVIDER_NAMES = tuple(_PROVIDER_DEFAULTS)
-PROVIDER_CHOICES = ("auto", *PROVIDER_NAMES, "custom")
-OPENROUTER_API_URL = _PROVIDER_DEFAULTS["openrouter"].url
-OPENROUTER_MODEL = _PROVIDER_DEFAULTS["openrouter"].model
-FIREWORKS_API_URL = _PROVIDER_DEFAULTS["fireworks"].url
-FIREWORKS_MODEL = _PROVIDER_DEFAULTS["fireworks"].model
 MAX_EVALUATION_WORKERS = _PLUGIN_SETTINGS.max_evaluation_workers
 MAX_RETRIES = _PLUGIN_SETTINGS.max_retries
 
@@ -2852,14 +2846,28 @@ def write_json_report(path: Path, report: Mapping[str, object]) -> None:
 
 
 @dataclass(frozen=True)
-class ProviderSelection:
-    """Bind a provider endpoint, model and endpoint-specific credential source."""
+class ConfiguredProvider:
+    """Bind the shared environment settings to one role's request options."""
 
-    name: str
-    url: str
-    model: str
-    key_env: str | None
+    settings: ProviderSettings
     request_options: dict[str, object]
+
+    def client(self, timeout: float) -> ProviderClient:
+        """Create a client from the same validated settings snapshot.
+
+        Returns
+        -------
+        ProviderClient
+            A client with the shared endpoint, model and authentication token.
+
+        """
+        return _provider.get().ChatAPI(
+            self.settings.chat_url,
+            self.settings.model,
+            self.settings.auth_token,
+            timeout,
+            request_options=self.request_options,
+        )
 
     def public_summary(self) -> dict[str, str]:
         """Identify the model and option digest without exposing credentials.
@@ -2867,7 +2875,7 @@ class ProviderSelection:
         Returns
         -------
         dict[str, str]
-            The public provider name, model and request-option digest.
+            The model and request-option digest used for this role.
 
         """
         encoded_options = json.dumps(
@@ -2877,242 +2885,30 @@ class ProviderSelection:
             separators=(",", ":"),
         ).encode("utf-8")
         return {
-            "provider": self.name,
-            "model": self.model,
+            "model": self.settings.model,
             "request_options_sha256": hashlib.sha256(encoded_options).hexdigest(),
         }
 
 
-def provider_for_url(url: str | None) -> str | None:
-    """Identify a configured preset from its normalized endpoint.
+def configured_provider(
+    settings: ProviderSettings,
+    request_options_text: str | None = None,
+) -> ConfiguredProvider:
+    """Validate role options without introducing another provider configuration.
 
     Returns
     -------
-    str | None
-        The validated result described above.
+    ConfiguredProvider
+        The shared settings and a detached validated request-options mapping.
 
     """
-    if not url:
-        return None
-    for name, preset in _PROVIDER_DEFAULTS.items():
-        if _provider.get().same_endpoint(url, preset.url):
-            return str(name)
-    return "custom"
-
-
-class _OptionalProviderSelectionOptions(TypedDict, total=False):
-    """Optional settings for resolve provider."""
-
-    allow_implicit_custom_key: bool
-
-
-class ProviderSelectionOptions(_OptionalProviderSelectionOptions):
-    """Checked keyword arguments for resolve provider."""
-
-    url: str | None
-    model: str | None
-    key_env: str | None
-    role: str
-    request_options_text: str | None
-    environ: Mapping[str, str]
-
-
-@dataclass(frozen=True, kw_only=True)
-class _ProviderSelectionOptionsValues:
-    """Resolve defaults once for resolve provider."""
-
-    url: str | None
-    model: str | None
-    key_env: str | None
-    role: str
-    request_options_text: str | None
-    environ: Mapping[str, str]
-    allow_implicit_custom_key: bool = True
-
-
-def _resolved_provider_name(
-    provider: str,
-    url: str | None,
-    environ: Mapping[str, str],
-) -> str:
-    resolved_name = provider
-    if resolved_name == "auto":
-        resolved_name = provider_for_url(url) or ""
-        if not resolved_name:
-            configured = [
-                name
-                for name in _PLUGIN_SETTINGS.provider_priority
-                for preset in (_PROVIDER_DEFAULTS[name],)
-                if any(environ.get(key) for key in preset.key_envs)
-            ]
-            if configured:
-                resolved_name = configured[0]
-            else:
-                expected = sorted({
-                    key
-                    for preset in _PROVIDER_DEFAULTS.values()
-                    for key in preset.key_envs
-                })
-                raise ValueError(
-                    "No provider is configured. Set one of "
-                    + ", ".join(expected)
-                    + "; or select a custom endpoint explicitly.",
-                )
-    return resolved_name
-
-
-def resolve_provider(
-    provider: str,
-    **arguments: Unpack[ProviderSelectionOptions],
-) -> ProviderSelection:
-    """Resolve one provider without ever moving a key across endpoints.
-
-    Returns
-    -------
-    ProviderSelection
-        The validated result described above.
-
-    Raises
-    ------
-    ValueError
-        If the operation cannot satisfy its validated input or runtime contract.
-
-    """
-    parameters = _ProviderSelectionOptionsValues(**arguments)
-    if provider not in PROVIDER_CHOICES:
-        error_message = "Unknown provider selection."
-        raise ValueError(error_message)
-    if parameters.role not in {"task", "reflection"}:
-        error_message = "Provider role must be task or reflection."
-        raise ValueError(error_message)
-    resolved_name = _resolved_provider_name(
-        provider,
-        parameters.url,
-        parameters.environ,
+    provider = _provider.get()
+    options = (
+        plain(provider.default_request_options)
+        if request_options_text is None
+        else provider.parse_options(request_options_text)
     )
-    preset = _PROVIDER_DEFAULTS.get(resolved_name)
-    selected_url = parameters.url or (str(preset.url) if preset else "")
-    selected_model = parameters.model or (str(preset.model) if preset else "")
-    if not selected_url:
-        error_message = "A URL is required for a custom provider."
-        raise ValueError(error_message)
-    if not selected_model:
-        error_message = "A model is required for a custom provider."
-        raise ValueError(error_message)
-    selected_key_env = parameters.key_env
-    if selected_key_env is None and preset is not None:
-        key_envs = tuple(preset.key_envs)
-        selected_key_env = next(
-            (name for name in key_envs if parameters.environ.get(name)),
-            key_envs[0],
-        )
-    elif (
-        selected_key_env is None
-        and resolved_name == "custom"
-        and parameters.allow_implicit_custom_key
-        and parameters.environ.get(_provider.get().custom_key_env)
-    ):
-        selected_key_env = _provider.get().custom_key_env
-    if parameters.request_options_text is None:
-        options = (
-            plain(
-                preset.task_options
-                if parameters.role == "task"
-                else preset.reflection_options,
-            )
-            if preset
-            else {}
-        )
-    else:
-        options = _provider.get().parse_options(parameters.request_options_text)
-    return ProviderSelection(
-        name=resolved_name,
-        url=selected_url,
-        model=selected_model,
-        key_env=selected_key_env,
-        request_options=options,
-    )
-
-
-class _OptionalApiArguments(TypedDict, total=False):
-    """Optional settings for api from args."""
-
-    use_default_key: bool
-    request_options: Mapping[str, object] | None
-
-
-class ApiArguments(_OptionalApiArguments):
-    """Checked keyword arguments for api from args."""
-
-    url: str
-    model: str | None
-    key_env: str | None
-    timeout: float
-
-
-@dataclass(frozen=True, kw_only=True)
-class _ApiArgumentsValues:
-    """Resolve defaults once for api from args."""
-
-    url: str
-    model: str | None
-    key_env: str | None
-    timeout: float
-    use_default_key: bool = True
-    request_options: Mapping[str, object] | None = None
-
-
-def api_from_args(**arguments: Unpack[ApiArguments]) -> ProviderClient:
-    """Construct a provider client with credentials scoped to its endpoint.
-
-    Returns
-    -------
-    ProviderClient
-        The validated result described above.
-
-    Raises
-    ------
-    ValueError
-        If the operation cannot satisfy its validated input or runtime contract.
-
-    """
-    parameters = _ApiArgumentsValues(**arguments)
-    selected_model = parameters.model
-    if selected_model is None and _provider.get().same_endpoint(
-        parameters.url,
-        _provider.get().default_url,
-    ):
-        selected_model = _provider.get().default_model
-    if not selected_model:
-        error_message = "A model is required for a custom endpoint."
-        raise ValueError(error_message)
-    if parameters.key_env:
-        key = os.environ.get(parameters.key_env, "")
-        if not key:
-            error_message = f"Set {parameters.key_env} for the selected chat endpoint."
-            raise ValueError(error_message)
-    elif parameters.use_default_key:
-        key = _provider.get().credential(parameters.url, os.environ)
-    else:
-        key = ""
-    endpoint_provider = provider_for_url(parameters.url)
-    if (
-        endpoint_provider is not None
-        and endpoint_provider in _PROVIDER_DEFAULTS
-        and (not key)
-    ):
-        expected = _PROVIDER_DEFAULTS[endpoint_provider].key_envs
-        raise ValueError(
-            "Set one configured key environment variable for the selected endpoint: "
-            + ", ".join(expected),
-        )
-    return _provider.get().ChatAPI(
-        parameters.url,
-        selected_model,
-        key,
-        parameters.timeout,
-        request_options=parameters.request_options,
-    )
+    return ConfiguredProvider(settings, options)
 
 
 def run_scalability_benchmark(
@@ -3302,41 +3098,12 @@ def _parser() -> argparse.ArgumentParser:
 
     live = subparsers.add_parser("live", help="run a real-provider prompt optimization")
     live.add_argument(
-        "--provider",
-        choices=PROVIDER_CHOICES,
-        default=_PLUGIN_SETTINGS.defaults.provider,
-        help="provider preset; auto uses an explicit URL or an available named key",
-    )
-    live.add_argument("--url", default=os.environ.get("LLM_API_URL"))
-    live.add_argument(
-        "--model",
-        default=os.environ.get(SETTINGS.chat.environment.model),
-    )
-    live.add_argument(
-        "--key-env",
-        help="environment variable holding the task-model API key",
-    )
-    live.add_argument(
         "--task-request-options",
-        help="JSON object replacing the provider's task-call defaults",
-    )
-    live.add_argument(
-        "--reflection-provider",
-        choices=PROVIDER_CHOICES,
-        help="reflection provider preset; defaults to the task provider",
-    )
-    live.add_argument("--reflection-url", help="reflection endpoint; defaults to --url")
-    live.add_argument(
-        "--reflection-model",
-        help="reflection model; defaults to --model",
-    )
-    live.add_argument(
-        "--reflection-key-env",
-        help="environment variable holding the reflection API key",
+        help="JSON object replacing the shared task-call defaults",
     )
     live.add_argument(
         "--reflection-request-options",
-        help="JSON object replacing the provider's reflection-call defaults",
+        help="JSON object replacing the shared reflection-call defaults",
     )
     live.add_argument(
         "--api-timeout",
@@ -3400,15 +3167,7 @@ def _parser() -> argparse.ArgumentParser:
 
 class _Arguments(argparse.Namespace):
     handler: str
-    provider: str
-    url: str | None
-    model: str | None
-    key_env: str | None
     task_request_options: str | None
-    reflection_provider: str | None
-    reflection_url: str | None
-    reflection_model: str | None
-    reflection_key_env: str | None
     reflection_request_options: str | None
     api_timeout: float
     max_proposals: int
@@ -3464,86 +3223,18 @@ def _benchmark_command(args: _Arguments) -> tuple[Mapping[str, object], bool]:
     ]
 
 
-def _reflection_selection(
-    args: _Arguments,
-    task_selection: ProviderSelection,
-) -> ProviderSelection:
-    explicit_reflection_url = args.reflection_url
-    reflection_reuses_task_endpoint = (
-        explicit_reflection_url is None
-        or _provider.get().same_endpoint(
-            explicit_reflection_url,
-            task_selection.url,
-        )
-    )
-    if args.reflection_provider is None:
-        reflection_provider = (
-            task_selection.name if reflection_reuses_task_endpoint else "auto"
-        )
-    else:
-        reflection_provider = args.reflection_provider
-    explicit_different_provider = args.reflection_provider not in {
-        None,
-        "auto",
-        task_selection.name,
-    }
-    if explicit_different_provider and explicit_reflection_url is None:
-        reflection_url = None
-        reflection_model = args.reflection_model
-    else:
-        reflection_url = explicit_reflection_url or task_selection.url
-        reflection_model = args.reflection_model or task_selection.model
-    inherited_key_env = (
-        task_selection.key_env
-        if reflection_reuses_task_endpoint and not explicit_different_provider
-        else None
-    )
-    return resolve_provider(
-        reflection_provider,
-        url=reflection_url,
-        model=reflection_model,
-        key_env=args.reflection_key_env or inherited_key_env,
-        role="reflection",
-        request_options_text=args.reflection_request_options,
-        environ=os.environ,
-        allow_implicit_custom_key=reflection_reuses_task_endpoint,
-    )
-
-
 def _live_command(args: _Arguments) -> tuple[Mapping[str, object], bool]:
     if args.output is None:
         message = "The live command requires an output path."
         raise ValueError(message)
-    task_selection = resolve_provider(
-        args.provider,
-        url=args.url,
-        model=args.model,
-        key_env=args.key_env,
-        role="task",
-        request_options_text=args.task_request_options,
-        environ=os.environ,
+    settings = provider_settings(os.environ)
+    task_selection = configured_provider(settings, args.task_request_options)
+    reflection_selection = configured_provider(
+        settings,
+        args.reflection_request_options,
     )
-    task_api = api_from_args(
-        url=task_selection.url,
-        model=task_selection.model,
-        key_env=task_selection.key_env,
-        timeout=args.api_timeout,
-        request_options=task_selection.request_options,
-    )
-
-    reflection_selection = _reflection_selection(args, task_selection)
-    same_endpoint = _provider.get().same_endpoint(
-        reflection_selection.url,
-        task_selection.url,
-    )
-    reflection_api = api_from_args(
-        url=reflection_selection.url,
-        model=reflection_selection.model,
-        key_env=reflection_selection.key_env,
-        timeout=args.api_timeout,
-        use_default_key=same_endpoint,
-        request_options=reflection_selection.request_options,
-    )
+    task_api = task_selection.client(args.api_timeout)
+    reflection_api = reflection_selection.client(args.api_timeout)
     run = run_live(
         task_api,
         reflection_api,

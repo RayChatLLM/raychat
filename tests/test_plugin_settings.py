@@ -119,16 +119,16 @@ class PluginSettingsTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.reject(ProcessSettings.parse, raw, "command_read_bytes")
 
-    def test_provider_options_and_environment_names_are_frozen(self) -> None:
+    def test_provider_options_and_reserved_fields_are_frozen(self) -> None:
         """Freeze nested provider options and sequences without hiding their types."""
         raw = plain(SETTINGS.plugins.settings["chat_completions"])
         nested: dict[str, object] = {"enabled": True}
         raw["request_options"] = {"nested": nested}
-        environments = ["FIRST_KEY"]
-        raw["api_key_envs"] = environments
+        reserved = ["model"]
+        raw["reserved_request_options"] = reserved
         settings = ChatCompletionsSettings.parse(raw)
         nested["enabled"] = False
-        environments.append("SECOND_KEY")
+        reserved.append("messages")
         if (
             configuration_fields(settings.request_options["nested"], "nested")[
                 "enabled"
@@ -136,9 +136,9 @@ class PluginSettingsTests(unittest.TestCase):
             is not True
         ):
             self.fail("Provider settings retained a mutable nested input.")
-        if settings.api_key_envs != ("FIRST_KEY",):
-            self.fail("Provider settings retained a mutable environment list.")
-        field = "model"
+        if settings.reserved_request_options != ("model",):
+            self.fail("Provider settings retained a mutable reserved-field list.")
+        field = "user_agent"
         try:
             setattr(settings, field, "changed")
         except FrozenInstanceError:
@@ -157,8 +157,6 @@ class PluginSettingsTests(unittest.TestCase):
         """Reject malformed profile values and literal credentials at parse time."""
         raw = plain(SETTINGS.plugins.settings["subagents"])
         profile: dict[str, object] = {
-            "url": "https://provider.example/v1/chat/completions",
-            "model": "example",
             "purposes": ["judge"],
         }
         raw["profiles"] = {"reviewer": profile}
@@ -168,5 +166,7 @@ class PluginSettingsTests(unittest.TestCase):
         profile["api_timeout"] = "slow"
         self.reject(SubagentsSettings.parse, raw, "api_timeout")
         del profile["api_timeout"]
-        profile["api_key"] = "literal"
-        self.reject(SubagentsSettings.parse, raw, "api_key")
+        for name in ("url", "model", "key_env", "api_key"):
+            profile[name] = "obsolete"
+            self.reject(SubagentsSettings.parse, raw, name)
+            del profile[name]

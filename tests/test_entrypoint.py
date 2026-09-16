@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -24,6 +25,7 @@ from raychat.type_support import override
 from raychat.ui.terminal import InteractiveTerminal, TerminalSession
 from raychat.validation import array_field, json_object, object_field
 from tests.assertions import TypedTestCase
+from tests.environment_support import provider_environment
 from tests.plugin_support import (
     ScriptedChat,
     distribution_ids,
@@ -53,6 +55,7 @@ async def _launch(arguments: list[str], cwd: Path) -> _LaunchResult:
         sys.executable,
         *arguments,
         cwd=cwd,
+        env={**os.environ, **provider_environment()},
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -141,7 +144,7 @@ class _EntrypointFixture(TypedTestCase):
         ):
             return entrypoint.main(
                 self.flags + list(flags),
-                {"TERM": "xterm-256color"},
+                {**provider_environment(), "TERM": "xterm-256color"},
             )
 
     def saved(
@@ -252,13 +255,18 @@ class EntrypointTests(_EntrypointFixture):
                 self.main(flags)
             create.assert_not_called()
 
-    def test_custom_http_endpoint_requires_an_explicit_model(self) -> None:
-        """Check custom http endpoint requires an explicit model."""
-        result = entrypoint.main(
-            [*self.flags, "--url", "https://example.invalid/chat", "--exec", "test"],
-            {},
-        )
+    def test_missing_environment_prevents_resource_creation(self) -> None:
+        """Report all missing variables before a provider or terminal is created."""
+        with (
+            redirect_stderr(self.err),
+            mock.patch.object(entrypoint, "create_resources") as create,
+        ):
+            result = entrypoint.main([*self.flags, "--exec", "test"], {})
         self.equal(result, 1)
+        create.assert_not_called()
+        for variable in provider_environment():
+            self.require(variable in self.err.getvalue())
+        self.require("environment/windows.env" in self.err.getvalue())
 
 
 class ResumeTests(_EntrypointFixture):
@@ -416,8 +424,8 @@ class ResumeTests(_EntrypointFixture):
         protocol = "Reviewed custom instructions for every agent."
         path = self.root / "protocol.txt"
         path.write_text(protocol)
-        args = entrypoint.build_parser({}).parse_args(
-            [*self.flags, "--protocol-file", str(path), "--model", "test"],
+        args = entrypoint.build_parser(provider_environment()).parse_args(
+            [*self.flags, "--protocol-file", str(path)],
         )
         chat = ScriptedChat(['{"action":"done","message":"reviewed"}'])
         with provider_fixture(chat):

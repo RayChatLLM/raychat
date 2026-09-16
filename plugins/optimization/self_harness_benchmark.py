@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 import raychat
 from raychat.composition import create_runtime
+from raychat.provider_settings import ProviderSettings, provider_settings
 from raychat.sdk import Messages, ProviderError, ProviderService, ServiceSlot
 from raychat.service_contracts import CHAT, ChatService, OptimizationComponent
 from raychat.type_support import override
@@ -267,7 +268,7 @@ class _GatewayResult:
 @dataclass(kw_only=True)
 class _GatewayState:
     provider: ProviderService
-    key: str
+    settings: ProviderSettings
     options: dict[str, object]
     calls: list[ProviderCall] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -284,9 +285,9 @@ class _GatewayState:
         retrying: benchmark.RetryingChat | None = None
         try:
             client = self.provider.ChatAPI(
-                self.provider.default_url,
-                self.provider.default_model,
-                self.key,
+                self.settings.chat_url,
+                self.settings.model,
+                self.settings.auth_token,
                 self.provider.default_timeout,
                 request_options=self.options,
             )
@@ -411,7 +412,7 @@ def _initial_report(state: _GatewayState, repetitions: int) -> ExperimentReport:
         benchmark.LIVE_TEST_CASES,
     ]
     return {
-        "model": state.provider.default_model,
+        "model": state.settings.model,
         "request_options": state.options,
         "repetitions": repetitions,
         "candidate_count": 1,
@@ -526,12 +527,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _Arguments()
     parser.parse_args(argv, namespace=args)
     provider = _provider.get()
-    key = provider.credential(provider.default_url, os.environ)
-    if not key:
-        parser.error("No configured provider credential is available.")
+    settings = provider_settings(os.environ)
     options = plain(provider.default_request_options)
     options.update(temperature=0, max_tokens=8192)
-    state = _GatewayState(provider=provider, key=key, options=options)
+    state = _GatewayState(provider=provider, settings=settings, options=options)
     report = _initial_report(state, args.repetitions)
     try:
         with (

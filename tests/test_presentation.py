@@ -8,9 +8,8 @@ from pathlib import Path
 
 import raychat.presentation as _rc_presentation
 from raychat.configuration import SETTINGS
-from raychat.sdk import HTTP_PROVIDER
+from raychat.provider_settings import provider_settings
 from tests.assertions import TypedTestCase
-from tests.plugin_support import registered_service
 
 
 class PresentationTests(TypedTestCase):
@@ -49,43 +48,27 @@ class PresentationTests(TypedTestCase):
             with self.rejected(ValueError, "regular file"):
                 _rc_presentation.load_protocol(root)
 
-    def test_api_key_selection_and_priority(self) -> None:
-        """Check api key selection and priority."""
-        provider = registered_service("chat_completions", HTTP_PROVIDER)
-        fireworks = provider.default_url
-        self.equal(
-            provider.credential(fireworks, {"FIREWORK_API_KEY": "primary"}),
-            "primary",
-        )
-        self.equal(
-            provider.credential(
-                fireworks + "/",
-                {"FIREWORKS_API_KEY": "plural"},
-            ),
-            "plural",
-        )
-        self.equal(
-            provider.credential(fireworks, {"LLM_API_KEY": "generic"}),
-            "generic",
-        )
-        self.equal(
-            provider.credential(
-                fireworks,
-                {
-                    "FIREWORK_API_KEY": "primary",
-                    "FIREWORKS_API_KEY": "plural",
-                    "LLM_API_KEY": "generic",
-                },
-            ),
-            "primary",
-        )
-        self.equal(
-            provider.credential(
-                "http://localhost:8000/v1/chat/completions",
-                {"FIREWORK_API_KEY": "no", "LLM_API_KEY": "yes"},
-            ),
-            "yes",
-        )
+    def test_provider_credentials_have_one_environment_source(self) -> None:
+        """Use the canonical identity while rejecting historical credential aliases."""
+        settings = provider_settings({
+            "RAYCHAT_AUTH_TOKEN": "synthetic-canonical-token",
+            "RAYCHAT_MODEL": "fixture-model",
+            "RAYCHAT_BASE_URL": "https://provider.example/v1",
+            "FIREWORK_API_KEY": "synthetic-ignored-token",
+            "LLM_API_KEY": "synthetic-ignored-token",
+        })
+        self.equal(settings.auth_token, "synthetic-canonical-token")
+        self.equal(settings.chat_url, "https://provider.example/v1/chat/completions")
+        for alias in ("FIREWORK_API_KEY", "FIREWORKS_API_KEY", "LLM_API_KEY"):
+            with (
+                self.subTest(alias=alias),
+                self.rejected(ValueError, "RAYCHAT_AUTH_TOKEN"),
+            ):
+                provider_settings({
+                    alias: "synthetic-legacy-token",
+                    "RAYCHAT_MODEL": "fixture-model",
+                    "RAYCHAT_BASE_URL": "https://provider.example/v1",
+                })
 
     def test_private_log_appends_utf8_and_is_owner_only_on_posix(self) -> None:
         """Check private log appends utf8 and is owner only on posix."""

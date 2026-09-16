@@ -23,6 +23,7 @@ from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
 from .http_debug import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
+from .provider_settings import provider_settings
 from .resources import AgentResources, create_resources, create_worker
 from .storage import SessionStore
 from .ui import controller, picker, terminal_control
@@ -97,7 +98,14 @@ def build_parser(
     """
     debug, debug_dir = _configure_debug(environ, argv)
     instruction_roles: list[str] = sorted(SETTINGS.chat.instruction_roles)
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "Required environment: RAYCHAT_AUTH_TOKEN (API token), "
+            "RAYCHAT_MODEL (model ID), RAYCHAT_BASE_URL (HTTP(S) API root). "
+            "See environment/ for platform templates and README.md for loading them."
+        ),
+    )
     parser.set_defaults(initial_prompt=SETTINGS.tui.initial_prompt)
     parser.add_argument(
         "--config",
@@ -112,10 +120,7 @@ def build_parser(
         help="Run one prompt or plugin command without an interactive terminal",
     )
     parser.add_argument("--provider", default=SETTINGS.chat.default_provider)
-    parser.add_argument(
-        "--model",
-        default=environ.get(SETTINGS.chat.environment.model) or None,
-    )
+    parser.set_defaults(model=environ.get("RAYCHAT_MODEL") or None)
     parser.add_argument("--workspace", default=SETTINGS.chat.workspace)
     parser.add_argument(
         "--max-steps",
@@ -457,6 +462,7 @@ def main(
     options = _launch_options(args)
     _check_arguments(parser, options)
     try:
+        provider_settings(environ)
         return _launch(parser, args, options, environ)
     except KeyboardInterrupt:
         return 130

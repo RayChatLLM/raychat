@@ -212,17 +212,7 @@ def _interact(chat: TerminalChat, *, visible: bool) -> None:
     chat.send(b"\x7f" * len("draft 雪🙂"))
 
 
-def _select_model(chat: TerminalChat, output: Path, model_filter: str) -> None:
-    if model_filter:
-        chat.command("/models", "Models · type to filter")
-        chat.send(model_filter)
-        chat.wait("Filter: " + model_filter)
-        _screen(chat, output, "models-menu")
-        chat.send("\r")
-        chat.wait("Model selected:")
-
-
-def run(root: Path, output: Path, model_filter: str = "") -> dict[str, object]:
+def run(root: Path, output: Path) -> dict[str, object]:
     """Exercise genuine model-generated source edits and recovery using keyboard input.
 
     Returns
@@ -242,7 +232,6 @@ def run(root: Path, output: Path, model_filter: str = "") -> dict[str, object]:
     report: dict[str, object] = {"passed": False, "steps": steps}
     try:
         chat.wait("Start a conversation below", seconds=30)
-        _select_model(chat, output, model_filter)
         chat.command("/system", "LIVE RAY FIELD")
         manifest = next((output / "home/live").glob("*/recovery.json"))
         original = read_object(manifest)
@@ -351,16 +340,9 @@ def main() -> None:
         default=Path(__file__).resolve().parents[1],
     )
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--select-model", default="")
     args = parser.parse_args()
     options = verification_paths(args)
-    fields: object = vars(args)
-    model = text_field(
-        configuration_fields(fields, "arguments")["select_model"],
-        "model filter",
-        allow_empty=True,
-    )
-    write_report(run(options.root, options.output, model), indent=2)
+    write_report(run(options.root, options.output), indent=2)
 
 
 if __name__ == "__main__":

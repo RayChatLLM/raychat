@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import socket
 import unittest
 from typing import TYPE_CHECKING
+from unittest import mock
 
 from raychat.validation import integer_field, object_field
 from tests.plugin_support import plugin_module
@@ -27,7 +29,15 @@ class WorkflowStressTests(unittest.TestCase):
                 probe.bind(("127.0.0.1", 0))
         except OSError as exc:
             self.skipTest(f"Loopback unavailable: {exc}")
-        with contextlib.redirect_stdout(io.StringIO()):
+        environment = {
+            "RAYCHAT_AUTH_TOKEN": "",
+            "RAYCHAT_MODEL": "",
+            "RAYCHAT_BASE_URL": "",
+        }
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            mock.patch.dict(os.environ, environment),
+        ):
             raw: object = benchmark.run(agents=50)
         report = object_field(raw, "workflow report")
         summary = {

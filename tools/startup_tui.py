@@ -8,6 +8,7 @@ from pathlib import Path
 from raychat.validation import object_field
 
 from .acceptance_support import (
+    fixture_provider_environment,
     json_text,
     read_object,
     require,
@@ -93,7 +94,7 @@ def run(root: Path, output: Path) -> dict[str, object]:
     )
     for phase, source, error in failures:
         entrypoint.write_text(source)
-        chat = TerminalChat(root, arguments)
+        chat = TerminalChat(root, arguments, environ=fixture_provider_environment())
         try:
             chat.wait("Error:")
             chat.process.wait(timeout=10)
@@ -108,7 +109,7 @@ def run(root: Path, output: Path) -> dict[str, object]:
         finally:
             chat.close(output / f"{phase}-failure.ansi", expected_exit=1)
         entrypoint.write_text(VALID)
-        chat = TerminalChat(root, arguments)
+        chat = TerminalChat(root, arguments, environ=fixture_provider_environment())
         try:
             chat.wait("[IDLE]")
             chat.command("/startup-check", "PLUGIN_COMMAND_WORKS")

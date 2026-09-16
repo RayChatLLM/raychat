@@ -17,6 +17,7 @@ from raychat.validation import (
 )
 
 from .acceptance_support import (
+    fixture_provider_environment,
     ignore_bytecode,
     json_text,
     matches,
@@ -197,10 +198,9 @@ def run(root: Path, output: Path) -> dict[str, object]:
             str(provider),
             "--provider",
             "bare_probe",
-            "--model",
-            "bare_probe",
             "--no-session",
         ],
+        environ=fixture_provider_environment(model="bare_probe"),
     )
     try:
         _exercise(chat, app, workspace, report)

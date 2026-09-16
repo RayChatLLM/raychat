@@ -25,7 +25,7 @@ from raychat.type_support import override
 from raychat.validation import json_object, object_field
 from raychat.workers import TaskCancelled
 from tests.assertions import TypedTestCase
-from tests.provider_support import registered_provider
+from tests.provider_support import provider, registered_provider
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -479,7 +479,7 @@ class HTTPDebugIntegrationTests(TypedTestCase):
         with tempfile.TemporaryDirectory() as temporary, _server() as endpoint:
             directory = Path(temporary) / "debug"
             with mock.patch.dict(os.environ, _debug_environment(directory)):
-                client = registered_provider(
+                client = provider.ChatAPI(
                     endpoint.url + "/v1/chat/completions?fixture=raw",
                     "fixture-model",
                     _KEY,
@@ -608,7 +608,7 @@ class HTTPDebugIntegrationTests(TypedTestCase):
         with tempfile.TemporaryDirectory() as temporary, _server() as endpoint:
             directory = Path(temporary) / "debug"
             with mock.patch.dict(os.environ, _debug_environment(directory)):
-                client = registered_provider(
+                client = provider.ChatAPI(
                     endpoint.url + "/redirect",
                     "fixture-model",
                     _KEY,

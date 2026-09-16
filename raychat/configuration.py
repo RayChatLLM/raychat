@@ -77,7 +77,6 @@ def _validate_configuration(settings: HostSettings, raw_size: int) -> None:
         ),
     )
     for name, value in (
-        ("model", chat.environment.model),
         ("context_chars", chat.environment.context_chars),
         ("instruction_role", chat.environment.instruction_role),
     ):

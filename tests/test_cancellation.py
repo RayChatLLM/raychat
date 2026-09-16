@@ -469,7 +469,7 @@ class CancellationTests(PackageTestCase):
         provider = registered_provider(
             "http://127.0.0.1:1/v1/chat/completions",
             "test",
-            "",
+            "fixture-token",
             60,
         )
         worker = self.worker(provider)
@@ -530,7 +530,7 @@ class CancellationTests(PackageTestCase):
             views.append((state.snapshot(), editor.text, composition.message_queue))
             return Surface(4, 2)
 
-        args = arguments(["--model", "test", "--no-session"], initial_prompt="first")
+        args = arguments(["--no-session"], initial_prompt="first")
         resources = resources_fixture()
         with (
             mock.patch.object(tui, "create_worker", return_value=worker),
