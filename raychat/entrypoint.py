@@ -23,7 +23,7 @@ from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
 from .http_debug import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
-from .provider_settings import provider_settings
+from .provider_settings import environment_status, provider_settings
 from .resources import AgentResources, create_resources, create_worker
 from .storage import SessionStore
 from .ui import controller, picker, terminal_control
@@ -107,6 +107,11 @@ def build_parser(
         ),
     )
     parser.set_defaults(initial_prompt=SETTINGS.tui.initial_prompt)
+    parser.add_argument(
+        "--check-env",
+        action="store_true",
+        help="Check provider variables without showing values or starting chat",
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -440,6 +445,28 @@ def _launch(
         resources.close()
 
 
+def _provider_preflight(argv: Sequence[str], environ: Mapping[str, str]) -> int | None:
+    probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    probe.add_argument("--check-env", action="store_true")
+    probe.add_argument("--help", "-h", action="store_true")
+    known, _ = probe.parse_known_args(argv)
+    raw: object = vars(known)
+    fields = configuration_fields(raw, "provider diagnostic arguments")
+    if boolean_field(fields["help"], "help"):
+        return None
+    try:
+        provider_settings(environ)
+    except ValueError as exc:
+        sys.stderr.write("Error: " + str(exc) + "\n")
+        return 1
+    if boolean_field(fields["check_env"], "check_env"):
+        sys.stdout.write(
+            environment_status(environ) + "\nProvider environment is valid.\n",
+        )
+        return 0
+    return None
+
+
 def main(
     argv: Sequence[str] | None = None,
     environ: Mapping[str, str] | None = None,
@@ -453,8 +480,12 @@ def main(
 
     """
     environ = os.environ if environ is None else environ
+    arguments = sys.argv[1:] if argv is None else argv
+    preflight = _provider_preflight(arguments, environ)
+    if preflight is not None:
+        return preflight
     try:
-        parser = build_parser(environ, sys.argv[1:] if argv is None else argv)
+        parser = build_parser(environ, arguments)
     except (ValueError, OSError, RuntimeError) as exc:
         sys.stderr.write("Error: " + str(exc) + "\n")
         return 1
@@ -462,7 +493,6 @@ def main(
     options = _launch_options(args)
     _check_arguments(parser, options)
     try:
-        provider_settings(environ)
         return _launch(parser, args, options, environ)
     except KeyboardInterrupt:
         return 130

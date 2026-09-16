@@ -54,7 +54,8 @@ def main() -> int:
             os.isatty(0)
             and os.isatty(1)
             and not any(
-                arg in {"--exec", "--help", "-h"} or arg.startswith("--exec=")
+                arg in {"--exec", "--help", "-h", "--check-env"}
+                or arg.startswith("--exec=")
                 for arg in sys.argv[1:]
             )
         )
