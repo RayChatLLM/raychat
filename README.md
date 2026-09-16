@@ -51,18 +51,13 @@ does not silently load another configuration file. `.env` is ignored by Git.
 The templates contain no credentials, endpoint, or model defaults.
 
 Editing a file or assigning a shell variable alone does not export it to RayChat.
-Check what the launched process can see without displaying credentials or making
-an API request:
-
-```bash
-python3 -B -S raychat.py --check-env
-```
-
-This lists each variable as `set`, `missing`, or `empty`, validates the settings,
-and exits with status 0 only when they are valid. Missing-variable startup errors
-show the same per-variable status. If you filled in a platform template directly,
-source that file in the commands below instead of `.env` (for example,
-`. ./environment/macos.env`). Run the check and RayChat in that same shell.
+Every launch checks the provider environment automatically, before opening the
+terminal or loading plugins. If any variable is missing or blank, startup stops
+with the exact names to fix and a separate `set`, `missing`, or `empty` status for
+each variable. Configured values are never displayed in these diagnostics.
+If you filled in a platform template directly, source that file in the commands
+below instead of `.env` (for example, `. ./environment/macos.env`). Start RayChat
+in that same shell.
 
 Linux or macOS (Bash or Zsh):
 

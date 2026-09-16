@@ -23,7 +23,7 @@ from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
 from .http_debug import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
-from .provider_settings import environment_status, provider_settings
+from .provider_settings import provider_settings
 from .resources import AgentResources, create_resources, create_worker
 from .storage import SessionStore
 from .ui import controller, picker, terminal_control
@@ -107,11 +107,6 @@ def build_parser(
         ),
     )
     parser.set_defaults(initial_prompt=SETTINGS.tui.initial_prompt)
-    parser.add_argument(
-        "--check-env",
-        action="store_true",
-        help="Check provider variables without showing values or starting chat",
-    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -447,7 +442,6 @@ def _launch(
 
 def _provider_preflight(argv: Sequence[str], environ: Mapping[str, str]) -> int | None:
     probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    probe.add_argument("--check-env", action="store_true")
     probe.add_argument("--help", "-h", action="store_true")
     known, _ = probe.parse_known_args(argv)
     raw: object = vars(known)
@@ -459,11 +453,6 @@ def _provider_preflight(argv: Sequence[str], environ: Mapping[str, str]) -> int 
     except ValueError as exc:
         sys.stderr.write("Error: " + str(exc) + "\n")
         return 1
-    if boolean_field(fields["check_env"], "check_env"):
-        sys.stdout.write(
-            environment_status(environ) + "\nProvider environment is valid.\n",
-        )
-        return 0
     return None
 
 
