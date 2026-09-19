@@ -1455,8 +1455,8 @@ class GoalModeTests(PackageTestCase):
                 equal(result, "finished")
                 equal(len(judge_chat.calls), 1)
 
-    def test_goal_progress_streams_each_iteration_reply(self) -> None:
-        """Each goal iteration's reply is surfaced live as goal progress."""
+    def test_rejected_draft_stays_hidden_while_judge_decisions_stream(self) -> None:
+        """Judge decisions stream live while a rejected draft stays hidden."""
         main = ScriptedChat(
             [
                 '{"action":"done","message":"not final"}',
@@ -1491,17 +1491,17 @@ class GoalModeTests(PackageTestCase):
             event_callback=lambda kind, payload: events.append((kind, payload)),
         )
         equal(result, "actually final")
-        progress = [payload for kind, payload in events if kind == "goal_progress"]
-        equal([item["message"] for item in progress], ["not final", "actually final"])
         kinds = [kind for kind, _ in events]
         equal(kinds.count("done"), 1)
+        rendered = [payload for kind, payload in events if kind != "request"]
+        require("not final" not in json.dumps(rendered))
         decision_feedback = [
             payload["feedback"]
             for kind, payload in events
             if kind == "goal_judge_decision"
         ]
         equal(decision_feedback, ["One check remains.", "Accepted."])
-        require(kinds.index("goal_progress") < kinds.index("goal_judge_decision"))
+        require(kinds.index("goal_judge_decision") < kinds.index("done"))
 
     def test_reply_failures_become_model_feedback_and_recover(self) -> None:
         """Reply-shaped provider failures turn into feedback the model sees."""
