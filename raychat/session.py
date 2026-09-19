@@ -66,11 +66,13 @@ from .sdk import (
     CancellableChat,
     Chat,
     ContextBuilder,
+    ProviderError,
     SessionHost,
     SessionMessage,
 )
 from .validation import (
     ConfigurationError,
+    ProviderResponseError,
     array_field,
     assistant_text,
     integer_field,
@@ -79,6 +81,29 @@ from .validation import (
 )
 
 _CORE_REVIEW_STEPS = 20
+# Reply-shaped provider failures become model-visible feedback this many
+# consecutive times per prompt before the failure escapes to outer recovery.
+_MAX_REPLY_FAILURE_FEEDBACK = 3
+# Narrated transitions are tolerated as asides this many consecutive times
+# before falling through to the protocol's corrective feedback.
+_MAX_PROSE_ASIDES = 3
+_REPLY_FAILURE_KINDS = frozenset(
+    {"empty_reply", "truncated_reply", "native_tool_call"},
+)
+
+
+def _is_reply_failure(error: Exception) -> bool:
+    """Whether a provider failure describes the reply rather than transport.
+
+    Returns
+    -------
+    bool
+        True for empty or truncated assistant replies.
+
+    """
+    if not isinstance(error, (ProviderError, ProviderResponseError)):
+        return False
+    return error.kind in _REPLY_FAILURE_KINDS
 
 
 @runtime_checkable
@@ -244,6 +269,8 @@ class _SendState:
     approval_callback: ApprovalCallback | None
     cancel_check: CancelCheck | None
     step: int = 0
+    reply_failures: int = 0
+    prose_asides: int = 0
 
     def validate(self, prompt: str) -> None:
         if not _nonempty_text(prompt):
@@ -565,6 +592,24 @@ class AgentSession:
             return self.chat.call_with_cancel(messages, cancel_check)
         return self.chat(messages)
 
+    def _publish_reasoning(self, state: _SendState) -> None:
+        """Surface reasoning text the provider returned beside its last reply."""
+        # Structural getattr rather than a ReasoningCarrier isinstance check:
+        # the declared Chat callable type does not intersect the protocol, so
+        # the narrowing would be statically impossible.
+        raw_reasoning: object = getattr(self.chat, "last_reasoning", "")
+        reasoning = raw_reasoning if isinstance(raw_reasoning, str) else ""
+        if reasoning:
+            self._emit(
+                state.event_callback,
+                "thinking",
+                {
+                    "step": state.step,
+                    "max_steps": state.max_steps,
+                    "text": reasoning,
+                },
+            )
+
     @contextmanager
     def turn(self, *, notify: EventCallback | None = None) -> Iterator[None]:
         """Open one local or external turn with checkpoint-aware rollback.
@@ -820,11 +865,70 @@ class AgentSession:
         request_messages: Messages,
     ) -> Action | None:
         self._check_cancel(state.cancel_check)
-        reply = assistant_text(
-            self._call_chat(request_messages, state.cancel_check),
-            maximum_chars=SETTINGS.limits.max_reply_chars,
-        )
+        try:
+            reply = assistant_text(
+                self._call_chat(request_messages, state.cancel_check),
+                maximum_chars=SETTINGS.limits.max_reply_chars,
+            )
+        except (ProviderError, ProviderResponseError) as exc:
+            if not _is_reply_failure(exc):
+                raise
+            self._publish_reasoning(state)
+            state.reply_failures += 1
+            if state.reply_failures > _MAX_REPLY_FAILURE_FEEDBACK:
+                raise
+            # Feeding the failure back changes the conversation state, which
+            # recovers reasoning models that repeatedly answer inside their
+            # thinking channel where an identical retry would fail again.  The
+            # placeholder keeps history in (assistant, host_result) pairs, the
+            # invariant compaction relies on.
+            self._add_history(
+                "assistant",
+                "(the provider returned no usable assistant text for this turn)",
+                "assistant",
+                state.prompt_id,
+            )
+            self._publish_result(
+                state,
+                None,
+                {
+                    "ok": False,
+                    "error": (
+                        f"{type(exc).__name__}: {exc} "
+                        "Reply again with exactly one protocol action as text."
+                    ),
+                },
+            )
+            return None
+        state.reply_failures = 0
+        self._publish_reasoning(state)
         self._check_cancel(state.cancel_check)
+        if "{" not in reply and state.prose_asides < _MAX_PROSE_ASIDES:
+            # Reasoning models narrate transitions in the reply channel; a
+            # bounded number of these are treated as tolerated asides rather
+            # than errors: shown, kept in history, and answered with a
+            # neutral continuation note.
+            state.prose_asides += 1
+            self._add_history("assistant", reply, "assistant", state.prompt_id)
+            self._emit(
+                state.event_callback,
+                "aside",
+                {"step": state.step, "max_steps": state.max_steps, "text": reply},
+            )
+            aside_note: dict[str, object] = {
+                "ok": True,
+                "note": (
+                    "Narration noted; nothing was executed. Continue "
+                    "now with the single JSON action itself."
+                ),
+            }
+            self._add_history(
+                "user",
+                RESULT_PREFIX + json.dumps(aside_note, ensure_ascii=False),
+                "host_result",
+                state.prompt_id,
+            )
+            return None
         action = None
         try:
             action = decode_action(reply)
@@ -843,6 +947,7 @@ class AgentSession:
             self._publish_result(state, None, result)
             return None
         self._add_history("assistant", reply, "assistant", state.prompt_id)
+        state.prose_asides = 0
         return action
 
     def _review_completion(self, action: Action) -> Action:

@@ -73,8 +73,8 @@ class ParseActionTests(unittest.TestCase):
                 if registered_parse(fenced)["message"] != "ok":
                     self.fail("A valid fence changed the completion message.")
 
-    def test_rejects_ambiguous_or_mismatched_fences(self) -> None:
-        """Reject prose, mismatched delimiters and unsupported fence labels."""
+    def test_recovers_the_single_action_object_from_decorated_replies(self) -> None:
+        """Recover one unambiguous action object from prose or broken fences."""
         document = '{"action":"done","message":"ok"}'
         cases = (
             f"```python\n{document}\n```",
@@ -83,19 +83,60 @@ class ParseActionTests(unittest.TestCase):
             f"prose\n```json\n{document}\n```",
             f"```json\n{document}\n```\nprose",
             f"````json\n{document}\n````",
+            f"I will finish now. {document} Let me know if that works.",
+            f"{document} trailing",
         )
-        for fenced in cases:
-            with self.subTest(fenced=fenced):
-                self.reject(fenced)
+        for decorated in cases:
+            with self.subTest(decorated=decorated):
+                if registered_parse(decorated)["message"] != "ok":
+                    self.fail("A decorated single action was not recovered.")
 
-    def test_rejects_duplicate_keys_trailing_text_and_nonobjects(self) -> None:
+    def test_recovers_actions_with_raw_control_characters_in_strings(self) -> None:
+        """Raw newlines inside a JSON string are recovered, not rejected."""
+        reply = (
+            '{"action":"write","path":"a.py","content":"line one\nline two\n\t'
+            'indented"}'
+        )
+        action = registered_parse(reply)
+        if action["path"] != "a.py":
+            self.fail("The recovered write lost its path.")
+        if action["content"] != "line one\nline two\n\tindented":
+            self.fail("The recovered write altered its content.")
+
+    def test_recovers_a_final_string_with_unescaped_quotes(self) -> None:
+        """A closed object whose last string has raw quotes is recovered."""
+        reply = (
+            '{"action":"write","path":"a.py","content":"x = "quoted" and\n'
+            'y = \\"escaped\\""}'
+        )
+        action = registered_parse(reply)
+        if action["content"] != 'x = "quoted" and\ny = "escaped"':
+            self.fail("The mixed-escaping content was not recovered exactly.")
+
+    def test_truncated_reply_reports_the_cutoff_clearly(self) -> None:
+        """A reply cut off mid-string names truncation, not generic JSON."""
+        reply = '{"action":"write","path":"a.py","content":"line one\nline two'
+        try:
+            registered_parse(reply)
+        except ValueError as error:
+            if "cut off" not in str(error):
+                self.fail(f"Truncation was not diagnosed: {error}")
+        else:
+            self.fail("A truncated reply was accepted.")
+
+    def test_rejects_several_embedded_action_objects(self) -> None:
+        """Two candidate action objects stay ambiguous and rejected."""
+        document = '{"action":"done","message":"ok"}'
+        self.reject(f"Either {document} or {document} would work.")
+
+    def test_rejects_duplicate_keys_and_nonobjects(self) -> None:
         """Require a single unambiguous JSON object containing an action name."""
         cases = (
             '{"action":"done","action":"done","message":"x"}',
-            '{"action":"done","message":"x"} trailing',
             "[]",
             '"string"',
             "{}",
+            "no json at all",
         )
         for document in cases:
             with self.subTest(document=document):
@@ -154,16 +195,14 @@ class ParseActionTests(unittest.TestCase):
             "content": "x",
             "expected_sha256": "0" * 64,
         }
+        # Out-of-range integer limits are clamped rather than rejected; the
+        # filesystem suite covers that. Only non-integer limits reject here.
         actions: tuple[dict[str, object], ...] = (
             {"action": "list", "path": ".", "cursor": 1},
             {"action": "list", "path": ".", "cursor": "bad\x00cursor"},
-            {"action": "list", "path": ".", "limit": 0},
-            {"action": "list", "path": ".", "limit": 201},
             {"action": "list", "path": ".", "limit": True},
             {"action": "read", "path": "a", "offset": -1},
             {"action": "read", "path": "a", "offset": True},
-            {"action": "read", "path": "a", "limit": 0},
-            {"action": "read", "path": "a", "limit": _rc_filesystem.OUTPUT_BYTES + 1},
             {"action": "read", "path": "a", "limit": 1.5},
             {**valid_edit, "start": True},
             {**valid_edit, "start": 2, "end": 1},

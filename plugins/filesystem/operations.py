@@ -79,6 +79,22 @@ def _file_state(info: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def _cross_api_state(info: os.stat_result) -> tuple[int, int, int, int]:
+    """Capture identity fields stable across handle and path stat calls.
+
+    Windows reports creation time (``st_ctime``) at different precision
+    through open-handle metadata and directory queries, so ``st_ctime_ns``
+    only participates in same-API comparisons.
+
+    Returns
+    -------
+    tuple[int, int, int, int]
+        Device, inode, size and the modification timestamp.
+
+    """
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
 def _read_exactly_up_to(stream: BinaryIO, count: int) -> bytes:
     chunks: list[bytes] = []
     remaining = count
@@ -182,7 +198,7 @@ def _read_file_page(path: Path, offset: int, limit: int) -> dict[str, object]:
         except FileNotFoundError:
             error_message = "read target changed while it was being read."
             raise OSError(error_message) from None
-        if _file_state(current) != _file_state(before):
+        if _cross_api_state(current) != _cross_api_state(before):
             error_message = "read target changed while it was being read."
             raise OSError(error_message)
         return result
@@ -411,7 +427,7 @@ def _replace_edit(path: Path, temporary: Path, before: os.stat_result) -> None:
     except FileNotFoundError:
         message = "edit target changed before it could be replaced."
         raise OSError(message) from None
-    if _file_state(current) != _file_state(before):
+    if _cross_api_state(current) != _cross_api_state(before):
         message = "edit target changed before it could be replaced."
         raise OSError(message)
     temporary.replace(path)
@@ -476,6 +492,7 @@ class _ReadRequest:
 class _WriteRequest:
     path: str
     content: str
+    append: bool = False
 
 
 @dataclass(frozen=True)
@@ -485,6 +502,13 @@ class _EditRequest:
     end: int
     content: str
     expected_sha256: str
+
+
+@dataclass(frozen=True)
+class _AnchorEditRequest:
+    path: str
+    find: str
+    replace: str
 
 
 def _text(value: object, name: str) -> str:
@@ -500,7 +524,55 @@ def _bounded_integer(value: object, message: str, maximum: int, minimum: int) ->
     return value
 
 
-def _edit_request(action: Mapping[str, object], path: str) -> _EditRequest:
+def _clamped_integer(value: object, message: str, maximum: int, minimum: int) -> int:
+    """Validate an integer but forgive out-of-range magnitudes by clamping.
+
+    A model asking to read one page larger than the cap clearly wants the
+    maximum; failing the whole turn over the excess teaches nothing the
+    clamp does not.
+
+    Returns
+    -------
+    int
+        The value clamped into the inclusive range.
+
+    Raises
+    ------
+    ValueError
+        If the value is not an integer.
+
+    """
+    if type(value) is not int:
+        raise ValueError(message)
+    return max(minimum, min(maximum, value))
+
+
+def _edit_request(
+    action: Mapping[str, object],
+    path: str,
+) -> _EditRequest | _AnchorEditRequest:
+    if "find" in action or "replace" in action:
+        if any(name in action for name in _BYTE_EDIT_FIELDS):
+            message = (
+                "edit uses either find/replace or "
+                "start/end/content/expected_sha256, not both."
+            )
+            raise ValueError(message)
+        find = _text(action.get("find"), "find")
+        if not find:
+            message = "find must be nonempty text currently present in the file."
+            raise ValueError(message)
+        return _AnchorEditRequest(
+            path,
+            find,
+            _text(action.get("replace", ""), "replace"),
+        )
+    missing = _BYTE_EDIT_FIELDS - set(action)
+    if missing:
+        message = (
+            "edit requires find/replace, or all of start/end/content/expected_sha256."
+        )
+        raise ValueError(message)
     start, end = action["start"], action["end"]
     if (
         type(start) is not int
@@ -519,14 +591,18 @@ def _edit_request(action: Mapping[str, object], path: str) -> _EditRequest:
 _ACTION_FIELDS = {
     "list": ({"path"}, {"limit", "cursor"}),
     "read": ({"path"}, {"offset", "limit"}),
-    "write": ({"path", "content"}, set()),
-    "edit": ({"expected_sha256", "path", "end", "start", "content"}, set()),
+    "write": ({"path", "content"}, {"append"}),
+    "edit": (
+        {"path"},
+        {"expected_sha256", "end", "start", "content", "find", "replace"},
+    ),
 }
+_BYTE_EDIT_FIELDS = frozenset({"start", "end", "content", "expected_sha256"})
 
 
 def _request(
     action: Mapping[str, object],
-) -> _ListRequest | _ReadRequest | _WriteRequest | _EditRequest:
+) -> _ListRequest | _ReadRequest | _WriteRequest | _EditRequest | _AnchorEditRequest:
     name = _text(action.get("action"), "action")
     if name not in _ACTION_FIELDS:
         message = "Action cannot be executed here."
@@ -534,7 +610,7 @@ def _request(
     validate_fields(
         action,
         _ACTION_FIELDS,
-        non_string_fields=("offset", "limit", "start", "end"),
+        non_string_fields=("offset", "limit", "start", "end", "append"),
     )
     path = _text(action["path"], "path")
     if not path or "\x00" in path:
@@ -545,7 +621,7 @@ def _request(
         if cursor is not None and "\x00" in cursor:
             message = "cursor must contain no NUL characters."
             raise ValueError(message)
-        limit = _bounded_integer(
+        limit = _clamped_integer(
             action.get("limit", LIST_PAGE_ENTRIES),
             f"list limit must be an integer from 1 to {LIST_PAGE_ENTRIES}.",
             LIST_PAGE_ENTRIES,
@@ -559,7 +635,7 @@ def _request(
             MAX_FILE_OFFSET,
             0,
         )
-        limit = _bounded_integer(
+        limit = _clamped_integer(
             action.get("limit", OUTPUT_BYTES),
             f"read limit must be an integer from 1 to {OUTPUT_BYTES}.",
             OUTPUT_BYTES,
@@ -567,7 +643,11 @@ def _request(
         )
         return _ReadRequest(path, offset, limit)
     if name == "write":
-        return _WriteRequest(path, _text(action["content"], "content"))
+        append = action.get("append", False)
+        if not isinstance(append, bool):
+            message = "write append must be true or false."
+            raise ValueError(message)
+        return _WriteRequest(path, _text(action["content"], "content"), append)
     return _edit_request(action, path)
 
 
@@ -620,13 +700,20 @@ def execute_filesystem(
     if isinstance(request, _ReadRequest):
         return _read_file_page(path, request.offset, request.limit)
     if isinstance(request, _WriteRequest):
-        count, digest = _atomic_write(path, request.content.encode("utf-8"))
+        data = request.content.encode("utf-8")
+        if request.append and path.is_file():
+            # Appends reuse the atomic replace, so a crash never leaves a
+            # partially extended file.
+            data = path.read_bytes() + data
+        count, digest = _atomic_write(path, data)
         return {
             "ok": True,
             "path": request.path,
             "bytes_written": count,
             "sha256": digest,
         }
+    if isinstance(request, _AnchorEditRequest):
+        return _anchor_edit(request, path)
     result = _atomic_edit(
         path,
         request.start,
@@ -636,6 +723,57 @@ def execute_filesystem(
     )
     result["path"] = request.path
     return result
+
+
+def _anchor_edit(request: _AnchorEditRequest, path: Path) -> dict[str, object]:
+    """Replace one unique occurrence of anchor text, no offsets or hash needed.
+
+    The unique anchor doubles as the freshness check: it can only match when
+    the file still contains what the caller believes it contains.
+
+    Returns
+    -------
+    dict[str, object]
+        The write outcome, including the file's new size and digest.
+
+    Raises
+    ------
+    ValueError
+        If the file is missing or non-UTF-8, or the anchor is absent or
+        ambiguous.
+
+    """
+    if not path.is_file():
+        message = "edit requires an existing regular file."
+        raise ValueError(message)
+    raw = path.read_bytes()
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        message = "find/replace edits require a UTF-8 text file."
+        raise ValueError(message) from None
+    occurrences = content.count(request.find)
+    if occurrences == 0:
+        message = (
+            "find text was not found in the file; re-read the file and copy "
+            "the exact current text."
+        )
+        raise ValueError(message)
+    if occurrences > 1:
+        message = (
+            f"find text matches {occurrences} places; include more "
+            "surrounding lines so it matches exactly once."
+        )
+        raise ValueError(message)
+    updated = content.replace(request.find, request.replace, 1)
+    count, digest = _atomic_write(path, updated.encode("utf-8"))
+    return {
+        "ok": True,
+        "path": request.path,
+        "bytes_written": count,
+        "sha256": digest,
+        "replacements": 1,
+    }
 
 
 def validate_action(action: Mapping[str, object]) -> None:

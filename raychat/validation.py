@@ -17,7 +17,20 @@ class ConfigurationError(RuntimeError):
 
 
 class ProviderResponseError(RuntimeError):
-    """Identify an unusable assistant response without exposing its contents."""
+    """Identify an unusable assistant response without exposing its contents.
+
+    An unusable reply is a per-turn provider failure, not corrupted local
+    state: reasoning models intermittently return empty or oversized text, and
+    the next sample usually succeeds.  The retry metadata below lets recovery
+    loops (such as goal runs) treat these like other transient provider
+    failures instead of aborting.
+    """
+
+    retryable = True
+    retry_after: float | None = None
+    # Mirrors ProviderError.kind: "empty_reply" marks the reply shape that
+    # hosts may convert into model feedback; other failures stay terminal.
+    kind: str = ""
 
 
 def array_field(value: object, path: str) -> list[object]:
@@ -423,7 +436,9 @@ def assistant_text(value: object, *, maximum_chars: int) -> str:
         raise ProviderResponseError(error_message)
     if not value.strip():
         error_message = "The chat provider did not return nonempty assistant text."
-        raise ProviderResponseError(error_message)
+        failure = ProviderResponseError(error_message)
+        failure.kind = "empty_reply"
+        raise failure
     if len(value) > maximum_chars:
         error_message = "The chat provider returned assistant text over the size limit."
         raise ProviderResponseError(

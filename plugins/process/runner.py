@@ -438,9 +438,19 @@ def _result(
     stderr_capture: _CommandOutputCapture,
     *,
     timed_out: bool,
+    timeout_seconds: float,
 ) -> CommandResult:
     stdout, out_cut, out_omitted, out_errors = stdout_capture.result()
     stderr, err_cut, err_omitted, err_errors = stderr_capture.result()
+    if timed_out:
+        # Timed-out results otherwise carry no explanation at all; say what
+        # happened where both the model and the operator will read it.
+        notice = (
+            f"[host] Command timed out after {timeout_seconds:g} seconds and "
+            "was terminated. Run shorter commands, or make long work print "
+            "progress and finish within the limit."
+        )
+        stderr = f"{stderr}\n{notice}" if stderr else notice
     return {
         "ok": process.returncode == 0 and not timed_out,
         "returncode": process.returncode,
@@ -504,7 +514,13 @@ async def _run_command(command: _Command) -> CommandResult:
     if process is None:
         message = "Command process was not created."
         raise RuntimeError(message)
-    return _result(process, stdout, stderr, timed_out=timed_out)
+    return _result(
+        process,
+        stdout,
+        stderr,
+        timed_out=timed_out,
+        timeout_seconds=command.timeout,
+    )
 
 
 def command_timeout(value: object) -> float:

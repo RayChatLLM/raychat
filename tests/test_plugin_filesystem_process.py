@@ -177,9 +177,19 @@ class WorkspaceFilesystemTests(_WorkspaceFixture):
             workspace_path(self.root, "nested/file.txt"),
             (self.root / "nested" / "file.txt").resolve(),
         )
-        for value in ("", str(self.root), str(Path("..") / "outside.txt")):
+        for value in ("", str(Path("..") / "outside.txt")):
             with self.subTest(value=value), self.rejecting(ValueError):
                 workspace_path(self.root, value)
+
+    def test_workspace_path_accepts_absolute_paths_inside_the_workspace(self) -> None:
+        """Absolute paths that stay inside the workspace are accepted."""
+        self.equal(workspace_path(self.root, str(self.root)), self.root)
+        self.equal(
+            workspace_path(self.root, str(self.root / "nested" / "file.txt")),
+            (self.root / "nested" / "file.txt").resolve(),
+        )
+        with self.rejecting(ValueError):
+            workspace_path(self.root, str(self.root.parent / "outside.txt"))
 
     def test_workspace_path_rejects_symlink_escape_when_supported(self) -> None:
         """Workspace path rejects symlink escape when supported."""
@@ -309,6 +319,34 @@ class WorkspaceFilesystemTests(_WorkspaceFixture):
         with self.rejecting(ValueError, "exceeds file size"):
             registered_execute(
                 {"action": "read", "path": "short.txt", "offset": 4},
+                self.root,
+                1,
+            )
+
+    def test_out_of_range_read_and_list_limits_are_clamped(self) -> None:
+        """Oversized or undersized limits clamp to the bounds, not errors."""
+        (self.root / "clamp.txt").write_bytes(b"abcdef")
+        oversized = registered_execute(
+            {"action": "read", "path": "clamp.txt", "limit": 999_999},
+            self.root,
+            1,
+        )
+        self.equal(oversized["content"], "abcdef")
+        undersized = registered_execute(
+            {"action": "read", "path": "clamp.txt", "limit": 0},
+            self.root,
+            1,
+        )
+        self.equal(undersized["bytes_read"], 1)
+        listing = registered_execute(
+            {"action": "list", "path": ".", "limit": 999_999},
+            self.root,
+            1,
+        )
+        self.check(condition=listing["ok"] is True)
+        with self.rejecting(ValueError, "read limit"):
+            registered_execute(
+                {"action": "read", "path": "clamp.txt", "limit": "many"},
                 self.root,
                 1,
             )
@@ -632,6 +670,7 @@ class ProcessExecutionTests(_WorkspaceFixture):
         self.check(condition=bool(result["timed_out"]))
         self.check(condition=not (result["ok"]))
         self.check(condition=result["returncode"] is not None)
+        self.check(condition="timed out after 0.1 seconds" in result["stderr"])
 
     def test_run_command_rejects_nonfinite_and_boolean_timeouts(self) -> None:
         """Run command rejects nonfinite and boolean timeouts."""

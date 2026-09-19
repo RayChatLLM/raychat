@@ -12,6 +12,11 @@ select = ["ALL"]
 ignore = ["missing-copyright-notice"]
 
 [tool.ruff.lint.per-file-ignores]
+# The transcript state façade exposes one method per user-visible concern;
+# the reasoning-visibility toggle pushed it one past the default budget.
+"raychat/ui/state.py" = ["too-many-public-methods"]
+# One test method per behavior; the suite grows with every UI behavior.
+"tests/test_tui_state.py" = ["too-many-public-methods"]
 # Seeded optimization sampling must reproduce the existing search sequence.
 "plugins/optimization/gepa/batch_sampler.py" = ["suspicious-non-cryptographic-random-usage"]
 "plugins/optimization/gepa/candidate_selector.py" = ["suspicious-non-cryptographic-random-usage"]

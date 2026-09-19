@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -44,6 +45,53 @@ class GoalJudgeResponseError(RuntimeError):
 
     retryable = True
     retry_after = None
+
+
+_FENCE_PATTERN = re.compile(
+    r"^(?:```|~~~)[ \t]*(?:json)?[ \t]*\n(?P<body>.*?)\n(?:```|~~~)[ \t]*$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _judge_reply_object(reply: str) -> dict[str, object]:
+    """Extract the judge's JSON decision from a possibly decorated reply.
+
+    Reasoning models routinely wrap their verdict in code fences or prose;
+    tolerate that decoration instead of retrying the judge forever.
+
+    Returns
+    -------
+    dict[str, object]
+        The first complete JSON object found in the reply.
+
+    Raises
+    ------
+    ValueError
+        No complete JSON object could be extracted from the reply.
+
+    """
+    candidate = reply.strip()
+    fenced = _FENCE_PATTERN.match(candidate)
+    if fenced is not None:
+        candidate = fenced.group("body").strip()
+    try:
+        return object_field(json_object(candidate), "goal judge response")
+    except (ConfigurationError, RecursionError, TypeError, ValueError):
+        pass
+    decoder = json.JSONDecoder()
+    start = candidate.find("{")
+    while start != -1:
+        try:
+            pair: tuple[object, int] = decoder.raw_decode(candidate, start)
+        except ValueError:
+            start = candidate.find("{", start + 1)
+            continue
+        value = pair[0]
+        if isinstance(value, dict):
+            return object_field(value, "goal judge response")
+        start = candidate.find("{", start + 1)
+    error_message = "Goal judge reply did not contain a JSON decision object."
+    raise ValueError(error_message)
 
 
 class GoalJudge:
@@ -158,14 +206,14 @@ class GoalJudge:
                 error_message,
             ) from None
         try:
-            value = object_field(json_object(reply), "goal judge response")
+            value = _judge_reply_object(reply)
         except (ConfigurationError, RecursionError, TypeError, ValueError) as exc:
             error_message = f"Invalid goal judge response: {exc}"
             raise GoalJudgeResponseError(
                 error_message,
             ) from None
-        if set(value) != {"decision", "feedback"}:
-            error_message = "Goal judge must return only decision and feedback."
+        if not {"decision", "feedback"} <= set(value):
+            error_message = "Goal judge must return decision and feedback."
             raise GoalJudgeResponseError(
                 error_message,
             )
@@ -175,11 +223,7 @@ class GoalJudge:
             raise GoalJudgeResponseError(
                 error_message,
             )
-        if (
-            not isinstance(feedback, str)
-            or not feedback.strip()
-            or len(feedback) > _MAX_FEEDBACK_CHARS
-        ):
+        if not isinstance(feedback, str) or not feedback.strip():
             error_message = (
                 f"Goal judge feedback must contain 1-{_MAX_FEEDBACK_CHARS} characters."
             )
@@ -188,7 +232,9 @@ class GoalJudge:
             )
         return GoalDecision(
             decision == "complete",
-            feedback,
+            # A verbose judge is a recoverable nuisance, not a reason to loop:
+            # keep the actionable head of oversized feedback.
+            feedback[:_MAX_FEEDBACK_CHARS],
             profile.name,
             profile.model,
         )

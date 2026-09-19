@@ -8,7 +8,7 @@
     "workspace": "workspace",
     "max_steps": 0,
     "command_timeout_seconds": 30,
-    "context_chars": 32000,
+    "context_chars": 48000,
     "keep_recent_turns": 4,
     "instruction_role": "system",
     "message_roles": [
@@ -225,6 +225,9 @@
       "goal_judge_started",
       "goal_judge_decision",
       "goal_retry",
+      "goal_progress",
+      "thinking",
+      "aside",
       "ui",
       "subagent_cancelled",
       "session_restored",

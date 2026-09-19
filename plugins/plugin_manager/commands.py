@@ -41,6 +41,19 @@ class _Arguments:
     force: bool
 
 
+_QUOTED_TOKEN_MINIMUM = 2
+
+
+def _unquote(token: str) -> str:
+    return (
+        token[1:-1]
+        if len(token) >= _QUOTED_TOKEN_MINIMUM
+        and token[0] == token[-1]
+        and token[0] in {'"', "'"}
+        else token
+    )
+
+
 def _arguments(arguments: str) -> _Arguments:
     parser = _Parser(prog="/plugins", add_help=False)
     parser.add_argument(
@@ -67,7 +80,10 @@ def _arguments(arguments: str) -> _Arguments:
     parser.add_argument("arguments", nargs="*")
     parser.add_argument("--user", action="store_true")
     parser.add_argument("--force", action="store_true")
-    raw: object = vars(parser.parse_args(shlex.split(arguments)))
+    # posix=False keeps Windows path backslashes intact (C:\plugins\x.zip);
+    # quotes around whole tokens are stripped afterwards, matching /goal.
+    tokens = [_unquote(token) for token in shlex.split(arguments, posix=False)]
+    raw: object = vars(parser.parse_args(tokens))
     fields = configuration_fields(raw, "plugin command")
     return _Arguments(
         operation=text_field(fields["operation"], "plugin operation"),

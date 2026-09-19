@@ -158,17 +158,26 @@ class ServiceSlot(Generic[_Service]):
 class ProviderError(RuntimeError):
     """A sanitized provider failure with portable retry information."""
 
+    # A short machine-readable failure classification ("empty_reply",
+    # "truncated_reply", or "" for unclassified) that survives the isolated
+    # worker boundary so hosts can convert reply-shaped failures into model
+    # feedback instead of retrying an identical request.
+    kind: str = ""
+
     def __init__(
         self,
         message: str,
         *,
         retryable: bool = False,
         retry_after: float | None = None,
+        kind: str = "",
     ) -> None:
-        """Retain sanitized failure text and retry information."""
+        """Retain sanitized failure text, retry information and classification."""
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
+        if kind:
+            self.kind = kind
 
 
 class ProviderSourceOptions(TypedDict, total=False):
@@ -452,6 +461,16 @@ class CancellableChat(Protocol):
     ) -> str:
         """Request a model reply while observing cancellation."""
         ...
+
+
+MAX_REASONING_CHARS = 65536
+
+
+@runtime_checkable
+class ReasoningCarrier(Protocol):
+    """Expose the reasoning text a provider returned beside its last reply."""
+
+    last_reasoning: str
 
 
 @dataclass(frozen=True)
@@ -1158,10 +1177,19 @@ def workspace_path(root: Path, name: str) -> Path:
     Raises
     ------
     ValueError
-        If the path is empty, absolute or resolves outside the workspace.
+        If the path is empty or resolves outside the workspace.
 
     """
-    if not name or Path(name).is_absolute():
+    if not name:
+        error_message = "Use a nonempty workspace-relative path."
+        raise ValueError(error_message)
+    if Path(name).is_absolute():
+        # Models routinely echo the absolute workspace location; accept any
+        # absolute path that stays inside the workspace instead of failing
+        # the turn, and reject the rest with the same guidance as before.
+        absolute = Path(name).resolve()
+        if absolute.is_relative_to(root):
+            return absolute
         error_message = "Use a nonempty workspace-relative path."
         raise ValueError(error_message)
     path = (root / name).resolve()

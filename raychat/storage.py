@@ -268,6 +268,9 @@ class SessionStore:
             self.stream.seek(0, os.SEEK_END)
             self.stream.write(data)
             self.stream.flush()
+            # Durability per record: a hard-killed host otherwise leaves an
+            # extended-but-unwritten (NUL-filled) tail that loses the session.
+            os.fsync(self.stream.fileno())
         except OSError:
             self.failed = True
             raise

@@ -30,6 +30,7 @@ class ChatCompletionsSettings:
     max_http_bytes: int
     max_request_options_bytes: int
     max_provider_api_key_chars: int
+    empty_reply_retries: int
     reserved_request_options: tuple[str, ...]
     successful_finish_reasons: tuple[str, ...]
 
@@ -58,6 +59,7 @@ class ChatCompletionsSettings:
                 "max_http_bytes",
                 "max_request_options_bytes",
                 "max_provider_api_key_chars",
+                "empty_reply_retries",
                 "reserved_request_options",
                 "successful_finish_reasons",
             ),
@@ -84,6 +86,11 @@ class ChatCompletionsSettings:
             max_provider_api_key_chars=integer_field(
                 fields.get("max_provider_api_key_chars"),
                 f"{path}.max_provider_api_key_chars",
+            ),
+            empty_reply_retries=integer_field(
+                fields.get("empty_reply_retries"),
+                f"{path}.empty_reply_retries",
+                minimum=0,
             ),
             reserved_request_options=tuple(
                 string_list_field(

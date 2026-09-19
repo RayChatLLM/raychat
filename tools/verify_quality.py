@@ -54,6 +54,10 @@ _RUFF_FILE_RULE_EXCEPTIONS = {
     "plugins/optimization/gepa/candidate_selector.py": "S311",
     "plugins/optimization/gepa/merge.py": "S311",
     "plugins/optimization/gepa/optimize_anything.py": "S311",
+    # One method per user-visible transcript concern; the reasoning-visibility
+    # toggle pushed the facade one past the default budget (mirrors pyproject).
+    "raychat/ui/state.py": "PLR0904",
+    "tests/test_tui_state.py": "PLR0904",
 }
 _RUFF_SEEDED_SAMPLING_REASON = (
     "Preserve reproducible optimization sampling; these calls do not generate secrets."

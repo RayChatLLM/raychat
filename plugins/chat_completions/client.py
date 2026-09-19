@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -18,6 +19,7 @@ from raychat.http_debug import build_http_opener, drain_debug_response
 from raychat.provider_settings import provider_settings
 from raychat.sdk import (
     HTTP_PROVIDER,
+    MAX_REASONING_CHARS,
     CancelCheck,
     Messages,
     PluginAPI,
@@ -72,9 +74,27 @@ RESERVED_REQUEST_OPTIONS = frozenset(
 _SUCCESSFUL_FINISH_REASONS = frozenset(
     _PLUGIN_SETTINGS.successful_finish_reasons,
 )
+EMPTY_REPLY_RETRIES = _PLUGIN_SETTINGS.empty_reply_retries
+_EMPTY_REPLY_RETRY_SECONDS = 0.5
+# Reasoning models expose their chain of thought under one of these
+# non-standard Chat Completions message fields (DeepSeek, llama.cpp, vLLM,
+# Fireworks and others); the first non-empty text field wins.
+_REASONING_FIELDS = ("reasoning_content", "reasoning", "reasoning_text")
 
 _SOURCE: ServiceSlot[Mapping[str, object]] = ServiceSlot("provider source")
 MAX_TIMEOUT_SECONDS = SETTINGS.limits.max_timeout_seconds
+
+
+class EmptyReplyError(ChatAPIError):
+    """A completed response whose assistant text was empty; safe to retry."""
+
+    kind = "empty_reply"
+
+
+class TruncatedReplyError(ChatAPIError):
+    """A response cut off at the token ceiling; resampling often succeeds."""
+
+    kind = "truncated_reply"
 
 
 def _worker_payload(
@@ -311,20 +331,177 @@ def _read_binary(opened: object) -> bytes:
     return content
 
 
-def _completed_text(raw: bytes) -> str:
+def _reasoning_text(message: Mapping[str, object]) -> str:
+    """Return the first non-empty reasoning field a reasoning model attached.
+
+    Returns
+    -------
+    str
+        Bounded reasoning text, or an empty string when none was returned.
+
+    """
+    for name in _REASONING_FIELDS:
+        value = message.get(name)
+        if isinstance(value, str) and value.strip():
+            return value[:MAX_REASONING_CHARS]
+    return ""
+
+
+def _completion_tokens(envelope: Mapping[str, object]) -> tuple[int | None, int | None]:
+    usage = envelope.get("usage")
+    if not isinstance(usage, dict):
+        return None, None
+    completion = usage.get("completion_tokens")
+    details = usage.get("completion_tokens_details")
+    reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    return (
+        completion if type(completion) is int else None,
+        reasoning if type(reasoning) is int else None,
+    )
+
+
+def _empty_reply_error(
+    envelope: Mapping[str, object],
+    finish_reason: object,
+    reasoning: str,
+) -> EmptyReplyError:
+    """Build a self-explaining, retryable diagnosis of an empty completion.
+
+    Returns
+    -------
+    EmptyReplyError
+        A retryable provider error naming the likeliest cause.
+
+    """
+    completion, reasoning_tokens = _completion_tokens(envelope)
+    reason = finish_reason if isinstance(finish_reason, str) else "unknown"
+    counters = f"finish_reason={reason}"
+    if completion is not None:
+        counters += f", completion_tokens={completion}"
+    if reasoning_tokens is not None:
+        counters += f", reasoning_tokens={reasoning_tokens}"
+    if reasoning:
+        diagnosis = (
+            f"the model produced {len(reasoning)} characters of reasoning but no "
+            "final text, so the reply was likely consumed by thinking; retrying "
+            "usually succeeds, or raise max_tokens via request options"
+        )
+    elif reasoning_tokens:
+        diagnosis = (
+            "the model spent its completion entirely on reasoning tokens; "
+            "retrying usually succeeds, or raise max_tokens via request options"
+        )
+    else:
+        diagnosis = (
+            "the model closed its reply without any text — a transient "
+            "reasoning-model failure; retrying usually succeeds"
+        )
+    error_message = (
+        f"Chat response contained no assistant text ({counters}): {diagnosis}."
+    )
+    return EmptyReplyError(error_message, retryable=True)
+
+
+def _synthesized_tool_action(message: Mapping[str, object]) -> str | None:
+    """Translate one native function call into the equivalent action text.
+
+    Some models act through the function-calling channel even when no tools
+    were declared; a single well-formed call carries the same intent as the
+    protocol's JSON action, so it is honored rather than rejected.
+
+    Returns
+    -------
+    str | None
+        The action object as JSON text, or None when translation is unsafe.
+
+    """
+    call = _single_call(message)
+    name = call.get("name") if call is not None else None
+    arguments = _call_arguments(call) if call is not None else None
+    if not isinstance(name, str) or not name or arguments is None:
+        return None
+    action = _named_action(name, arguments)
+    if action is None or not isinstance(action.get("action"), str):
+        return None
+    try:
+        return json.dumps(action, ensure_ascii=False, allow_nan=False)
+    except ValueError:
+        return None
+
+
+def _single_call(message: Mapping[str, object]) -> dict[str, object] | None:
+    calls = message.get("tool_calls")
+    call: object = None
+    if isinstance(calls, list) and len(calls) == 1:
+        call = calls[0]
+    elif calls is None:
+        call = message.get("function_call")
+    if isinstance(call, dict) and isinstance(call.get("function"), dict):
+        call = call["function"]
+    return call if isinstance(call, dict) else None
+
+
+def _call_arguments(call: dict[str, object]) -> dict[str, object] | None:
+    raw_arguments = call.get("arguments", "{}")
+    if not isinstance(raw_arguments, str):
+        return None
+    try:
+        return object_field(json_object(raw_arguments or "{}"), "tool arguments")
+    except (ConfigurationError, TypeError, ValueError):
+        return None
+
+
+def _named_action(
+    name: str,
+    arguments: dict[str, object],
+) -> dict[str, object] | None:
+    if not name.lstrip().startswith("{"):
+        return {"action": name, **arguments}
+    # Some models stuff the whole action object into the function name.
+    named_value: object = None
+    try:
+        named_value = json.loads(name, strict=False)
+    except ValueError:
+        return None
+    try:
+        named = object_field(named_value, "stuffed action name")
+    except (ConfigurationError, TypeError):
+        return None
+    if not isinstance(named.get("action"), str):
+        return None
+    return {**named, **arguments}
+
+
+def _completed_text(raw: bytes) -> tuple[str, str]:
     envelope = object_field(json_object(raw), "response")
     choices = array_field(envelope["choices"], "choices")
     choice = object_field(choices[0], "choices[0]")
     finish_reason = choice.get("finish_reason")
-    if finish_reason is not None and (
-        not isinstance(finish_reason, str)
-        or finish_reason.casefold() not in _SUCCESSFUL_FINISH_REASONS
+    called_tools = isinstance(finish_reason, str) and finish_reason.casefold() in {
+        "tool_calls",
+        "function_call",
+    }
+    if (
+        finish_reason is not None
+        and not called_tools
+        and (
+            not isinstance(finish_reason, str)
+            or finish_reason.casefold() not in _SUCCESSFUL_FINISH_REASONS
+        )
     ):
+        if isinstance(finish_reason, str) and finish_reason.casefold() == "length":
+            # Reasoning models hit the token ceiling mid-thought sporadically;
+            # the retry loop resamples, and the hint names the durable fix.
+            error_message = (
+                "Chat response was truncated (finish_reason=length), often "
+                "because reasoning consumed the whole completion budget; "
+                "retrying usually succeeds, or raise max_tokens via request "
+                "options."
+            )
+            raise TruncatedReplyError(error_message, retryable=True)
         reason = (
             f" (finish_reason={finish_reason})"
-            if isinstance(finish_reason, str)
-            and finish_reason
-            in {"length", "content_filter", "tool_calls", "function_call"}
+            if isinstance(finish_reason, str) and finish_reason == "content_filter"
             else ""
         )
         error_message = (
@@ -333,15 +510,28 @@ def _completed_text(raw: bytes) -> str:
         raise RuntimeError(error_message)
     message = object_field(choice["message"], "choices[0].message")
     if message.get("tool_calls") or message.get("function_call"):
+        synthesized = _synthesized_tool_action(message)
+        if synthesized is not None:
+            return (
+                assistant_text(
+                    synthesized,
+                    maximum_chars=SETTINGS.limits.max_reply_chars,
+                ),
+                _reasoning_text(message),
+            )
         error_message = (
-            "Native tool call received; this harness accepts text actions only."
+            "You attempted a native function call, which this harness does "
+            "not support. Resend the same intent as exactly one JSON action "
+            "object in plain text."
         )
-        raise RuntimeError(
-            error_message,
-        )
-    return assistant_text(
-        _response_text(message["content"]),
-        maximum_chars=SETTINGS.limits.max_reply_chars,
+        raise ChatAPIError(error_message, retryable=True, kind="native_tool_call")
+    reasoning = _reasoning_text(message)
+    text = _response_text(message["content"])
+    if not text.strip():
+        raise _empty_reply_error(envelope, finish_reason, reasoning)
+    return (
+        assistant_text(text, maximum_chars=SETTINGS.limits.max_reply_chars),
+        reasoning,
     )
 
 
@@ -388,6 +578,7 @@ class ChatAPI:
         self.timeout = timeout
         self.request_options = _validated_request_options(request_options)
         self.opener: RequestOpener = build_http_opener(NoRedirects())
+        self.last_reasoning: str = ""
 
     def call_with_cancel(self, messages: Messages, cancel_check: CancelCheck) -> str:
         """Use the shared isolated transport so cancellation stops blocked HTTP.
@@ -404,13 +595,21 @@ class ChatAPI:
 
         """
         cancel_check()
+        self.last_reasoning = ""
+
+        def capture(kind: str, payload: Mapping[str, object]) -> None:
+            text = payload.get("text")
+            if kind == "thinking" and isinstance(text, str):
+                self.last_reasoning = text[:MAX_REASONING_CHARS]
+
         try:
-            return run_chat_profile(self, messages, cancel_check)
+            return run_chat_profile(self, messages, cancel_check, capture)
         except ProviderProcessError as exc:
             raise ChatAPIError(
                 str(exc),
                 retryable=exc.retryable,
                 retry_after=exc.retry_after,
+                kind=exc.kind,
             ) from None
 
     def private_payload(self) -> WorkerPayload:
@@ -513,23 +712,34 @@ class ChatAPI:
     def __call__(self, messages: Messages) -> str:
         """Send one request and return a validated, complete assistant message.
 
+        An empty or truncated completed reply — a known transient failure mode
+        of reasoning models whose thinking consumes the whole completion — is
+        retried a bounded number of times before its diagnostic error escapes.
+
         Returns
         -------
         str
             Complete, bounded UTF-8 assistant text.
 
-        Raises
-        ------
-        RuntimeError
-            If the response is malformed, too large, or reports incomplete text.
-
         """
+        return self._send_with_retries(messages, 1)
+
+    def _send_with_retries(self, messages: Messages, attempt: int) -> str:
+        try:
+            return self._attempt(messages)
+        except (EmptyReplyError, TruncatedReplyError):
+            if attempt > EMPTY_REPLY_RETRIES:
+                raise
+            time.sleep(_EMPTY_REPLY_RETRY_SECONDS * attempt)
+            return self._send_with_retries(messages, attempt + 1)
+
+    def _attempt(self, messages: Messages) -> str:
         raw = self._read(self._request(messages))
         if len(raw) > MAX_HTTP_BYTES:
             error_message = "Chat API response exceeds the size limit."
             raise RuntimeError(error_message)
         try:
-            return _completed_text(raw)
+            text, reasoning = _completed_text(raw)
         except ConfigurationError as exc:
             error_message = "Expected choices[0].message.content as text."
             raise RuntimeError(error_message) from exc
@@ -545,6 +755,8 @@ class ChatAPI:
         ) as exc:
             error_message = "Expected choices[0].message.content as text."
             raise RuntimeError(error_message) from exc
+        self.last_reasoning = reasoning
+        return text
 
 
 def _request_options_from_text(value: object) -> dict[str, object]:

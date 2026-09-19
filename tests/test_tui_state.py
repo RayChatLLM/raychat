@@ -528,6 +528,106 @@ class StateTests(TypedTestCase):
         self.require("internal frame" not in rendered)
         self.require("The update failed" in rendered)
 
+    def test_thinking_entries_collapse_until_toggled(self) -> None:
+        """Thinking events render collapsed previews until toggled expanded."""
+        state = tui_state.TuiState()
+        reasoning = "first thought line\nsecond thought line\nthird thought line"
+        state.apply_worker_event("thinking", {"step": 1, "text": reasoning})
+        self.equal([entry.kind for entry in state.entries], ["thinking"])
+        collapsed = "\n".join(row.text for row in state.transcript_rows(120))
+        self.require("first thought line" in collapsed)
+        self.require("second thought line" not in collapsed)
+        self.require("Ctrl+T expands" in collapsed)
+        self.require(state.toggle_thinking() is True)
+        expanded = "\n".join(row.text for row in state.transcript_rows(120))
+        self.require("second thought line" in expanded)
+        self.require("third thought line" in expanded)
+        self.require(state.toggle_thinking() is False)
+        recollapsed = "\n".join(row.text for row in state.transcript_rows(120))
+        self.require("second thought line" not in recollapsed)
+        state.apply_worker_event("thinking", {"text": ""})
+        self.equal(len(state.entries), 1)
+
+    def test_failed_results_are_surfaced_while_successes_stay_hidden(self) -> None:
+        """Failed action results appear live; successful ones stay hidden."""
+        state = tui_state.TuiState()
+        state.start("Run checks", max_steps=5)
+        state.apply_worker_event(
+            "result",
+            {"step": 1, "result": {"ok": True, "entries": ["alpha.py"]}},
+        )
+        self.equal([entry.kind for entry in state.entries], ["user"])
+        state.apply_worker_event(
+            "result",
+            {
+                "step": 2,
+                "result": {"ok": False, "error": "JSONDecodeError: bad reply"},
+            },
+        )
+        self.equal([entry.kind for entry in state.entries], ["user", "status"])
+        rendered = "\n".join(row.text for row in state.transcript_rows(120))
+        self.require("Action failed" in rendered)
+        self.require("JSONDecodeError: bad reply" in rendered)
+        self.require("alpha.py" not in rendered)
+
+    def test_prose_nudges_render_muted_rather_than_as_failures(self) -> None:
+        """A narrated-step nudge is a status note, not a red failure."""
+        state = tui_state.TuiState()
+        state.start("task", max_steps=5)
+        state.apply_worker_event(
+            "result",
+            {
+                "step": 1,
+                "result": {
+                    "ok": False,
+                    "error": (
+                        "ValueError: Nothing was executed: your reply "
+                        "contained no complete JSON action object - it "
+                        "described the step in prose."
+                    ),
+                },
+            },
+        )
+        entry = state.entries[-1]
+        self.equal(entry.kind, "status")
+        self.equal(entry.title, "Protocol nudge")
+        self.require(entry.ok is None)
+
+    def test_goal_events_narrate_progress_judge_and_retries(self) -> None:
+        """Goal events add live status entries without ending the run."""
+        state = tui_state.TuiState()
+        state.start("Organize", max_steps=0)
+        state.apply_worker_event("goal_progress", {"message": "iteration reply"})
+        self.equal(state.phase, tui_state.Phase.RUNNING)
+        state.apply_worker_event(
+            "goal_judge_started",
+            {"judge_profile": "primary"},
+        )
+        state.apply_worker_event(
+            "goal_judge_decision",
+            {"complete": False, "feedback": "One check remains."},
+        )
+        state.apply_worker_event(
+            "goal_retry",
+            {
+                "stage": "agent",
+                "attempt": 2,
+                "delay_seconds": 1.5,
+                "error_type": "ChatAPIError",
+                "message": "Chat response contained no assistant text.",
+            },
+        )
+        self.equal(
+            [entry.kind for entry in state.entries],
+            ["user", "status", "status", "status", "status"],
+        )
+        rendered = "\n".join(row.text for row in state.transcript_rows(120))
+        self.require("iteration reply" in rendered)
+        self.require("primary" in rendered)
+        self.require("One check remains." in rendered)
+        self.require("no assistant text" in rendered)
+        self.equal(state.phase, tui_state.Phase.RUNNING)
+
     def test_complete_worker_and_approval_lifecycle(self) -> None:
         """Check complete worker and approval lifecycle."""
         state = tui_state.TuiState()
@@ -609,22 +709,27 @@ class StateTests(TypedTestCase):
         for entry in state.entries:
             assert_terminal_inert(self, entry.title + entry.body)
 
-    def test_recoverable_invalid_reply_result_stays_out_of_transcript(self) -> None:
-        """Check recoverable invalid reply result stays out of transcript."""
+    def test_recoverable_invalid_reply_failures_are_coalesced_in_transcript(
+        self,
+    ) -> None:
+        """Recoverable failures surface once with a repeat count, not as spam."""
         state = tui_state.TuiState()
         state.start("task")
-        state.apply_worker_event(
-            "result",
-            {
-                "step": 3,
-                "max_steps": 7,
-                "result": {"ok": False, "error": "JSONDecodeError"},
-            },
-        )
+        for step in (3, 4, 5):
+            state.apply_worker_event(
+                "result",
+                {
+                    "step": step,
+                    "max_steps": 7,
+                    "result": {"ok": False, "error": "JSONDecodeError"},
+                },
+            )
         self.equal(state.phase, tui_state.Phase.RUNNING)
-        self.equal(state.step, 3)
+        self.equal(state.step, 5)
         self.equal(state.max_steps, 7)
-        self.equal([entry.kind for entry in state.entries], ["user"])
+        self.equal([entry.kind for entry in state.entries], ["user", "status"])
+        self.equal(state.entries[-1].title, "Action failed x3")
+        self.equal(state.entries[-1].body, "JSONDecodeError")
 
     def test_run_request_keeps_the_complete_command_but_hides_its_result(self) -> None:
         """Check run request keeps the complete command but hides its result."""
@@ -744,7 +849,7 @@ class StateTests(TypedTestCase):
                     "step": step,
                     "max_steps": 100,
                     "action": action,
-                    "result": {"ok": step % 2 == 0, "error": "recoverable"},
+                    "result": {"ok": True, "entries": [f"file-{step}.txt"]},
                 },
             )
 
@@ -982,6 +1087,27 @@ class LayoutTests(TypedTestCase):
         for rect in (layout.header, layout.transcript, layout.composer, layout.status):
             self.assert_inside(rect, 70, 20)
         self.equal(layout.status.bottom, 20)
+
+    def test_panel_lines_reserve_rows_between_transcript_and_composer(self) -> None:
+        """Panel rows shrink the transcript instead of covering its output."""
+        plain = tui_state.calculate_layout(70, 24)
+        layout = tui_state.calculate_layout(
+            70,
+            24,
+            options=tui_state.LayoutOptions(panel_lines=5),
+        )
+        self.equal(layout.transcript.height, plain.transcript.height - 5)
+        self.equal(layout.composer.y, plain.composer.y)
+        self.equal(layout.composer.y - layout.transcript.bottom, 5)
+        # A tiny screen keeps a readable transcript rather than a full panel.
+        small = tui_state.calculate_layout(
+            70,
+            9,
+            options=tui_state.LayoutOptions(panel_lines=7),
+        )
+        self.require(small.transcript.height >= 1)
+        with self.rejected(ValueError, "nonnegative"):
+            tui_state.LayoutOptions(panel_lines=-1)
 
     def test_wide_layout_uses_full_width_until_system_panel_is_requested(self) -> None:
         """Check wide layout uses full width until system panel is requested."""

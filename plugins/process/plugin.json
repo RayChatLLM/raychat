@@ -52,5 +52,5 @@
       "WINDIR"
     ]
   },
-  "instructions": "Run tests or programs with {\"action\":\"run\",\"argv\":[\"python3\",\"-B\",\"-S\",\"script.py\"]}. Use argument arrays, never a shell command string. Optional cwd is workspace-relative. The host applies timeout, environment, bounded output and process cleanup policies. Inspect returncode and truncation metadata before reporting success."
+  "instructions": "Run tests or programs with {\"action\":\"run\",\"argv\":[\"python3\",\"-B\",\"-S\",\"script.py\"]}. Use argument arrays, never a shell command string. Optional cwd is workspace-relative. The host kills commands at its configured timeout (default 30 seconds; timed-out results say so in stderr) and keeps only the first 1536 bytes of each output stream, so run short, noninteractive commands that print little. A command that legitimately needs longer may set \"timeout\" (seconds, up to 120) on the run action. Inspect returncode and truncation metadata before reporting success."
 }

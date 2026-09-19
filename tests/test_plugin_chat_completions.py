@@ -21,6 +21,7 @@ from raychat.event_types import SESSION_RESET, SESSION_RESTORE, Lifecycle
 from raychat.resources import create_resources, create_worker
 from raychat.sdk import HTTP_PROVIDER, ProviderError
 from raychat.service_contracts import CHAT, ExportedProvider
+from raychat.type_support import override
 from raychat.validation import json_object, text_field
 from tests.assertions import TypedTestCase
 from tests.plugin_support import (
@@ -31,6 +32,7 @@ from tests.plugin_support import (
 from tests.provider_support import (
     FIXTURE_PROVIDER_MODEL,
     FIXTURE_PROVIDER_URL,
+    FakeResponse,
     api_response,
     make_api,
     provider,
@@ -452,6 +454,14 @@ class ChatAPITests(ProviderTestCase):
 class CompletionResponseTests(ProviderTestCase):
     """Validate response structure, assistant text and completion status."""
 
+    @override
+    def setUp(self) -> None:
+        """Remove retry backoff delays so rejection tests stay fast."""
+        super().setUp()
+        patcher = mock.patch.object(provider, "_EMPTY_REPLY_RETRY_SECONDS", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_normal_success_allows_unspecified_finish_reason(self) -> None:
         """Normal success allows unspecified finish reason."""
         api, _, _ = make_api(api_response("  usable  ", finish_reason=None))
@@ -494,6 +504,78 @@ class CompletionResponseTests(ProviderTestCase):
             self.fail(
                 "The completion text was not preserved exactly.",
             )
+        if api.last_reasoning != "internal reasoning":
+            self.fail("The reasoning text was not captured beside the reply.")
+
+    def test_empty_reply_with_reasoning_is_diagnosed_and_retryable(self) -> None:
+        """Empty reply with reasoning is diagnosed and retryable."""
+        api, opener, _ = make_api(
+            api_response("", message_extra={"reasoning_content": "chain of thought"}),
+        )
+        error = self.reject(
+            provider.EmptyReplyError,
+            api,
+            "no assistant text.*reasoning",
+            [],
+        )
+        if error.retryable is not True:
+            self.fail("An empty reply was not marked retryable.")
+        if len(opener.requests) != provider.EMPTY_REPLY_RETRIES + 1:
+            self.fail(
+                "The empty reply was not retried the configured number of times.",
+            )
+
+    def test_empty_reply_without_reasoning_reports_token_counters(self) -> None:
+        """Empty reply without reasoning reports token counters."""
+        envelope = {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "stop",
+                },
+            ],
+            "usage": {
+                "completion_tokens": 13,
+                "completion_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+        api, _, _ = make_api(json.dumps(envelope).encode("utf-8"))
+        self.reject(
+            provider.EmptyReplyError,
+            api,
+            "finish_reason=stop, completion_tokens=13",
+            [],
+        )
+
+    def test_empty_reply_retry_recovers_the_next_sample(self) -> None:
+        """Empty reply retry recovers the next sample."""
+        api, opener, _ = make_api(api_response("recovered"))
+        opener.queued.append(
+            FakeResponse(
+                api_response("", message_extra={"reasoning_content": "thinking"}),
+            ),
+        )
+        expected_requests = 2
+        if api([]) != "recovered":
+            self.fail("The retried request did not return the recovered reply.")
+        if len(opener.requests) != expected_requests:
+            self.fail("The empty reply did not trigger exactly one retry.")
+
+    def test_length_truncation_is_diagnosed_and_retryable(self) -> None:
+        """Length truncation is diagnosed and retryable."""
+        api, opener, _ = make_api(api_response("partial", finish_reason="length"))
+        error = self.reject(
+            provider.TruncatedReplyError,
+            api,
+            "max_tokens",
+            [],
+        )
+        if error.retryable is not True:
+            self.fail("A truncated reply was not marked retryable.")
+        if len(opener.requests) != provider.EMPTY_REPLY_RETRIES + 1:
+            self.fail(
+                "The truncated reply was not retried the configured number of times.",
+            )
 
     def test_typed_text_content_parts_are_joined_exactly(self) -> None:
         """Typed text content parts are joined exactly."""
@@ -529,7 +611,7 @@ class CompletionResponseTests(ProviderTestCase):
         for body in bodies:
             with self.subTest(body=body[:80]):
                 api, _, _ = make_api(body)
-                self.reject(RuntimeError, api, "choices|nonempty", [])
+                self.reject(RuntimeError, api, "choices|no assistant text", [])
 
     def test_rejects_oversized_or_invalid_unicode_assistant_text(self) -> None:
         """Rejects oversized or invalid unicode assistant text."""
@@ -542,20 +624,73 @@ class CompletionResponseTests(ProviderTestCase):
                 api, _, _ = make_api(api_response(content))
                 self.reject(RuntimeError, api, expected, [])
 
-    def test_rejects_native_tool_calls_and_incomplete_finish_reasons(self) -> None:
-        """Rejects native tool calls and incomplete finish reasons."""
+    def test_rejects_incomplete_finish_reasons(self) -> None:
+        """Rejects truncation and filtered finish reasons."""
         cases = [
-            api_response("text", message_extra={"tool_calls": [{"id": "1"}]}),
-            api_response("text", message_extra={"function_call": {"name": "x"}}),
             api_response("text", finish_reason="length"),
             api_response("text", finish_reason="content_filter"),
-            api_response("text", finish_reason="tool_calls"),
-            api_response("text", finish_reason="function_call"),
         ]
         for body in cases:
             with self.subTest(body=body):
                 api, _, _ = make_api(body)
                 self.reject(RuntimeError, api, "", [])
+
+    def test_single_native_tool_call_translates_into_the_action_protocol(
+        self,
+    ) -> None:
+        """A single native function call becomes the equivalent JSON action."""
+        api, _, _ = make_api(
+            api_response(
+                "",
+                finish_reason="tool_calls",
+                message_extra={
+                    "tool_calls": [
+                        {
+                            "id": "1",
+                            "type": "function",
+                            "function": {
+                                "name": "read",
+                                "arguments": '{"path": "main.py"}',
+                            },
+                        },
+                    ],
+                },
+            ),
+        )
+        reply: object = json.loads(api([]))
+        if reply != {"action": "read", "path": "main.py"}:
+            self.fail(f"The tool call was not translated exactly: {reply}")
+
+    def test_untranslatable_tool_calls_become_retryable_feedback(self) -> None:
+        """Multiple or malformed native calls raise instructive reply failures."""
+        cases = (
+            {"tool_calls": [{"id": "1"}, {"id": "2"}]},
+            {"tool_calls": [{"id": "1"}]},
+            {
+                "tool_calls": [
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "not json"},
+                    },
+                ],
+            },
+        )
+        for extra in cases:
+            with self.subTest(extra=extra):
+                api, _, _ = make_api(
+                    api_response("", finish_reason="tool_calls", message_extra=extra),
+                )
+                error = self.reject(
+                    ProviderError,
+                    api,
+                    "native function call",
+                    [],
+                )
+                if error.kind != "native_tool_call":
+                    self.fail("The reply failure was not classified.")
+                if error.retryable is not True:
+                    self.fail("The reply failure was not marked retryable.")
 
     def test_rejects_provider_failure_and_truncation_finish_reasons(self) -> None:
         """Rejects provider failure and truncation finish reasons."""
