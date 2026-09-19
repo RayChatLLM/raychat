@@ -56,7 +56,7 @@
       "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Provider identity and authentication come only from RAYCHAT_AUTH_TOKEN, RAYCHAT_MODEL and RAYCHAT_BASE_URL. Operator launch options include --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to discover model IDs; selecting one explains how to set RAYCHAT_MODEL and restart. Discovery never changes the active model.",
       "requires": {},
       "sdk": 4,
-      "sha256": "bae46c5be39bf3a4c9089b63884f1c3f90e555fb345a579e037ad2b0a1185b6a",
+      "sha256": "611114bbcee9613dbd98c78a9cfe4c28081bd94a81a81c7c5d2fb17ebf11149c",
       "url": "chat_completions-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -88,7 +88,7 @@
       "instructions": "Automatically assembles enabled plugin instructions and compacts conversation history to the configured character budget. HOST_COMPACTION is a factual digest of older content. Re-read a file when exact omitted details matter; do not invent details from a digest. No tool call is required to activate context management.",
       "requires": {},
       "sdk": 4,
-      "sha256": "bb653006df9e0b6b8cab589c2b7ea760ef6fff5a8d4d34e057c8a945b749b288",
+      "sha256": "354561c96f9e71e9348bc10efee4f965c6245687a21234cc821879706cb32414",
       "url": "context-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -106,7 +106,7 @@
       "instructions": "Inspect and modify workspace files with list, read, write and edit. Examples: {\"action\":\"list\",\"path\":\".\"}, {\"action\":\"read\",\"path\":\"notes.txt\"}, {\"action\":\"write\",\"path\":\"notes.txt\",\"content\":\"new text\"}. Read is paginated: follow next_offset when truncated. read limit is at most 16384 bytes and list limit at most 200 entries; larger requests are clamped to the maximum. The easiest edit is find/replace: {\"action\":\"edit\",\"path\":\"f.py\",\"find\":\"<exact current text>\",\"replace\":\"<new text>\"} replaces one unique occurrence - no offsets or hashes; if find matches several places, include more surrounding lines. The byte form (start/end/content/expected_sha256 from a fresh read) remains for precise ranges. Only enabled actions are available; writes and edits require the host approval policy. Paths are workspace-relative and confined to the workspace; an absolute path inside the workspace is accepted. list accepts cursor and limit; follow next_cursor. read offset/limit and edit start/end count bytes; edits require UTF-8 character boundaries. content_base64 is authoritative when present. write atomically replaces the whole file; edit atomically replaces [start,end) only if expected_sha256 still matches. Create long files in pieces: write the first part, then add each next part with {\"action\":\"write\",\"path\":...,\"content\":...,\"append\":true} - a single very long write risks a truncated reply.",
       "requires": {},
       "sdk": 4,
-      "sha256": "44e8d914fd98c58189bb3f6f04b0b3dd0c6012131fdb30590430d0d7ddadf389",
+      "sha256": "a047ddecfe96607edae09fb56e31e12d06aa28facc718db4e0822d4c5feaeddd",
       "url": "filesystem-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -131,7 +131,7 @@
         "subagents": "1.0.0"
       },
       "sdk": 4,
-      "sha256": "45361b95d99d7104575dabac072740917e2af613a8d7db29b45f6ad1b3914921",
+      "sha256": "e08825c256620d0a0883d6ef4c1e2cddb992002366672a45a22e0936d1e1612f",
       "url": "goals-1.0.0.zip",
       "version": "1.0.0"
     },
