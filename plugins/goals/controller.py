@@ -323,12 +323,10 @@ class _GoalRun:
 
     def filtered_event(self, kind: str, payload: Mapping[str, object]) -> None:
         if kind == "done":
+            # Buffer the reply until the judge decides: a rejected draft must
+            # never reach the operator as if it were an answer. Live signal
+            # comes from streamed results plus goal_judge_started/decision.
             self.final_done = copy.deepcopy(dict(payload))
-            # Keep the raw "done" for the accepted result, but surface each
-            # iteration's reply immediately so the operator can watch the
-            # goal advance instead of waiting for the judge to accept.
-            if self.callback is not None:
-                self.callback("goal_progress", copy.deepcopy(dict(payload)))
         elif self.callback is not None:
             self.callback(kind, payload)
 
