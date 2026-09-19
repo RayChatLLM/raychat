@@ -15,10 +15,10 @@ import json
 import math
 import threading
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import TypeGuard, cast
+from typing import ClassVar, TypeGuard, cast
 
 from raychat.configuration import SETTINGS
 from raychat.handoff import optional_index
@@ -80,8 +80,11 @@ _ENTRY_KINDS = frozenset(
         "error",
         "status",
         "system",
+        "thinking",
     },
 )
+_THINKING_PREVIEW_CELLS = 100
+_MAX_FAILURE_BODY_CHARS = 500
 
 
 def _is_bool(value: object) -> TypeGuard[bool]:
@@ -1262,6 +1265,41 @@ class TuiState:
         self._transcript_cache_lines: list[TranscriptLine] = []
         self._transcript_viewport_height: int | None = None
         self._transcript_scroll_offset: int | None = None
+        self._thinking_expanded = False
+        self._failure_streak = 0
+
+    def toggle_thinking(self) -> bool:
+        """Flip between collapsed previews and complete reasoning text.
+
+        Returns
+        -------
+        bool
+            The new expansion state.
+
+        """
+        self._assert_main_thread()
+        self._thinking_expanded = not self._thinking_expanded
+        self._transcript_cache_width = None
+        self._transcript_cache_lines = []
+        return self._thinking_expanded
+
+    def _display_entry(self, entry: TranscriptEntry) -> TranscriptEntry:
+        """Collapse thinking entries to a one-line preview unless expanded.
+
+        Returns
+        -------
+        TranscriptEntry
+            The entry to render, possibly a collapsed preview copy.
+
+        """
+        if entry.kind != "thinking" or self._thinking_expanded or not entry.body:
+            return entry
+        first_line = entry.body.split("\n", 1)[0]
+        preview = truncate_display(first_line, _THINKING_PREVIEW_CELLS)
+        return replace(
+            entry,
+            body=f"{preview} … [{len(entry.body)} chars — Ctrl+T expands]",
+        )
 
     @staticmethod
     def _assert_main_thread() -> None:
@@ -1421,7 +1459,7 @@ class TuiState:
             self._dropped_entries += overflow
         if self._transcript_cache_width is not None and not overflow:
             self._transcript_cache_lines.extend(
-                entry_lines(entry, self._transcript_cache_width),
+                entry_lines(self._display_entry(entry), self._transcript_cache_width),
             )
         else:
             self._transcript_cache_width = None
@@ -1624,11 +1662,15 @@ class TuiState:
         """Apply one detached worker event on the main thread.
 
         Supported events are ``request``, ``result``, ``approval`` (or
-        ``approval_required``), ``done`` and ``error``.  Request and result
-        events advance live state; run requests also add their complete argv
-        and cwd to the transcript. Approval is a frontend event used by the
-        blocking approval bridge. Results remain hidden, while a final ``done``
-        reply or terminal ``error`` is added to the transcript.
+        ``approval_required``), ``done``, ``error``, ``thinking``,
+        ``goal_progress``, ``goal_judge_started``, ``goal_judge_decision``
+        and ``goal_retry``.  Request and result events advance live state; run
+        requests also add their complete argv and cwd to the transcript.
+        Approval is a frontend event used by the blocking approval bridge.
+        Results remain hidden, while a final ``done`` reply or terminal
+        ``error`` is added to the transcript.  Thinking entries carry provider
+        reasoning (collapsed unless toggled), and the goal events narrate a
+        running goal's per-iteration replies, judge activity and retries.
 
         Raises
         ------
@@ -1646,49 +1688,164 @@ class TuiState:
         self._step = _event_step(payload.get("step"), self._step)
         self._max_steps = _event_step(payload.get("max_steps"), self._max_steps)
 
-        if event == "cancelled":
-            self._pending_approval = None
-            self._phase = Phase.IDLE
-            return
-        if event == "request":
-            self._apply_request(payload)
-            return
-        if event == "result":
-            self._pending_approval = None
-            if self._phase not in {Phase.STOPPING, Phase.ERROR, Phase.DONE}:
-                self._phase = Phase.RUNNING
-            return
-        if event in {"approval", "approval_required"}:
-            action = payload.get("action")
-            self.begin_approval(
-                action if _is_string_mapping(action) else None,
-                registered=payload.get("registered_tool") is True,
+        handler = self._WORKER_EVENT_HANDLERS.get(event)
+        if handler is None:
+            error_message = "unknown worker event: " + sanitize_text(
+                event,
+                max_chars=64,
             )
+            raise ValueError(error_message)
+        handler(self, payload)
+
+    def _apply_cancelled(self, _payload: Mapping[str, object]) -> None:
+        self._pending_approval = None
+        self._phase = Phase.IDLE
+
+    def _apply_result(self, payload: Mapping[str, object]) -> None:
+        self._pending_approval = None
+        if self._phase not in {Phase.STOPPING, Phase.ERROR, Phase.DONE}:
+            self._phase = Phase.RUNNING
+        # Successful results stay hidden, but a silent failure loop looks like
+        # a frozen agent, so surface what went wrong as it happens.  Repeats
+        # coalesce into one counted entry so loops cannot evict history, and
+        # operator-initiated stops stay quiet.
+        result = payload.get("result")
+        if (
+            self._phase is Phase.STOPPING
+            or not _is_string_mapping(result)
+            or result.get("ok") is not False
+        ):
             return
-        if event == "done":
-            raw_message = payload.get("message")
-            message = raw_message if _is_text(raw_message) else str(raw_message)
-            self._pending_approval = None
-            self._phase = Phase.DONE
-            self._append(
-                "system" if payload.get("host_generated") is True else "assistant",
-                "System" if payload.get("host_generated") is True else "Assistant",
-                message,
-                ok=True,
+        error = result.get("error")
+        if not _is_text(error) or not error:
+            stderr = result.get("stderr")
+            error = (
+                stderr.strip().splitlines()[-1]
+                if _is_text(stderr) and stderr.strip()
+                else "The action did not complete."
             )
+        body = error[:_MAX_FAILURE_BODY_CHARS]
+        if error.startswith("ValueError: Nothing was executed"):
+            # A narrated step is a recoverable nudge, not a failure; keep the
+            # red channel for problems that need the operator's eye.
+            self._append("status", "Protocol nudge", body)
             return
-        if event == "error":
-            error = payload.get("error", payload.get("message"))
-            self._pending_approval = None
-            self._phase = Phase.ERROR
-            self._append(
-                "error",
-                "Agent error",
-                error if _is_text(error) else str(error),
-                ok=False,
+        last = self._entries[-1] if self._entries else None
+        if (
+            last is not None
+            and last.kind == "status"
+            and last.title.startswith("Action failed")
+            and last.body == body
+        ):
+            self._failure_streak += 1
+            self._entries[-1] = replace(
+                last,
+                title=f"Action failed x{self._failure_streak}",
             )
+            self._transcript_cache_width = None
+            self._transcript_cache_lines = []
             return
-        raise ValueError("unknown worker event: " + sanitize_text(event, max_chars=64))
+        self._failure_streak = 1
+        self._append("status", "Action failed", body, ok=False)
+
+    def _apply_approval(self, payload: Mapping[str, object]) -> None:
+        action = payload.get("action")
+        self.begin_approval(
+            action if _is_string_mapping(action) else None,
+            registered=payload.get("registered_tool") is True,
+        )
+
+    def _apply_done(self, payload: Mapping[str, object]) -> None:
+        raw_message = payload.get("message")
+        message = raw_message if _is_text(raw_message) else str(raw_message)
+        self._pending_approval = None
+        self._phase = Phase.DONE
+        self._append(
+            "system" if payload.get("host_generated") is True else "assistant",
+            "System" if payload.get("host_generated") is True else "Assistant",
+            message,
+            ok=True,
+        )
+
+    def _apply_error(self, payload: Mapping[str, object]) -> None:
+        error = payload.get("error", payload.get("message"))
+        self._pending_approval = None
+        self._phase = Phase.ERROR
+        self._append(
+            "error",
+            "Agent error",
+            error if _is_text(error) else str(error),
+            ok=False,
+        )
+
+    def _apply_thinking(self, payload: Mapping[str, object]) -> None:
+        text = payload.get("text")
+        if _is_text(text) and text:
+            # The THINKING row label already names the entry; a title would
+            # render as "THINKING Thinking".
+            self._append("thinking", "", text)
+
+    def _apply_aside(self, payload: Mapping[str, object]) -> None:
+        text = payload.get("text")
+        if _is_text(text) and text:
+            self._append("status", "Aside", text)
+
+    def _apply_goal_progress(self, payload: Mapping[str, object]) -> None:
+        message = payload.get("message")
+        if self._phase not in {Phase.STOPPING, Phase.ERROR}:
+            self._phase = Phase.RUNNING
+        self._append(
+            "status",
+            "Goal progress",
+            message if _is_text(message) else str(message),
+            ok=True,
+        )
+
+    def _apply_goal_judge_started(self, payload: Mapping[str, object]) -> None:
+        profile = payload.get("judge_profile")
+        body = (
+            f"Reviewing the transcript with judge profile {profile}…"
+            if _is_text(profile)
+            else "Reviewing the transcript…"
+        )
+        self._append("status", "Goal judge", body)
+
+    def _apply_goal_judge_decision(self, payload: Mapping[str, object]) -> None:
+        complete = payload.get("complete") is True
+        feedback = payload.get("feedback")
+        verdict = "Goal complete" if complete else "Continue working"
+        body = verdict + (": " + feedback if _is_text(feedback) and feedback else ".")
+        self._append("status", "Goal judge", body, ok=complete or None)
+
+    def _apply_goal_retry(self, payload: Mapping[str, object]) -> None:
+        stage = payload.get("stage")
+        attempt = payload.get("attempt")
+        delay = payload.get("delay_seconds")
+        message = payload.get("message", payload.get("error_type"))
+        body = (
+            f"Recovering from a {stage if _is_text(stage) else 'turn'} error "
+            f"(attempt {attempt}, retrying in {delay}s): "
+            + (message if _is_text(message) else str(message))
+        )
+        self._append("status", "Goal retry", body)
+
+    _WORKER_EVENT_HANDLERS: ClassVar[
+        dict[str, Callable[[TuiState, Mapping[str, object]], None]]
+    ] = {
+        "cancelled": _apply_cancelled,
+        "request": _apply_request,
+        "result": _apply_result,
+        "approval": _apply_approval,
+        "approval_required": _apply_approval,
+        "done": _apply_done,
+        "error": _apply_error,
+        "thinking": _apply_thinking,
+        "aside": _apply_aside,
+        "goal_progress": _apply_goal_progress,
+        "goal_judge_started": _apply_goal_judge_started,
+        "goal_judge_decision": _apply_goal_judge_decision,
+        "goal_retry": _apply_goal_retry,
+    }
 
     def transcript_rows(self, width: int) -> tuple[TranscriptLine, ...]:
         """Return the cached rows shared by painting, scrolling and selection.
@@ -1709,7 +1866,12 @@ class TuiState:
             error_message = "width must be a positive integer"
             raise ValueError(error_message)
         if self._transcript_cache_width != width:
-            self._transcript_cache_lines = list(transcript_lines(self._entries, width))
+            self._transcript_cache_lines = list(
+                transcript_lines(
+                    (self._display_entry(entry) for entry in self._entries),
+                    width,
+                ),
+            )
             self._transcript_cache_width = width
         return tuple(self._transcript_cache_lines)
 
@@ -1790,6 +1952,7 @@ def _line_prefix(entry: TranscriptEntry) -> str:
         "error": "ERROR",
         "status": "STATUS",
         "system": "SYSTEM",
+        "thinking": "THINKING",
     }[entry.kind]
     if entry.kind not in {"user", "assistant"} and entry.step is not None:
         label += " " + str(entry.step)
@@ -1966,6 +2129,9 @@ class LayoutOptions:
     preferred_sidebar: int = SETTINGS.tui.layout.preferred_sidebar_columns
     show_system: bool = SETTINGS.tui.show_system
     composer_lines: int = 1
+    # Rows reserved between the transcript and the composer for the queue or
+    # completion panel, so the panel never paints over transcript output.
+    panel_lines: int = 0
 
     def __post_init__(self) -> None:
         """Validate sidebar geometry and the requested draft height.
@@ -1984,6 +2150,9 @@ class LayoutOptions:
             raise TypeError(message)
         if any(value < 1 for value in dimensions):
             message = "layout dimensions must be positive"
+            raise ValueError(message)
+        if not _is_integer(self.panel_lines) or self.panel_lines < 0:
+            message = "panel_lines must be a nonnegative integer"
             raise ValueError(message)
         if not _is_bool(self.show_system):
             message = "show_system must be a bool"
@@ -2021,9 +2190,8 @@ def calculate_layout(
         error_message = "layout dimensions must be positive"
         raise ValueError(error_message)
 
-    header_height = 1
     status_height = 1 if rows >= _MIN_STATUS_ROWS else 0
-    remaining = rows - header_height - status_height
+    remaining = rows - 1 - status_height
     if remaining <= 1:
         composer_height = max(0, remaining)
     elif remaining <= _COMPACT_BODY_ROWS:
@@ -2036,15 +2204,21 @@ def calculate_layout(
         )
         composer_height = min(visible_lines + 2, remaining - 1)
     body_height = max(0, remaining - composer_height)
+    # Give the composer panel its own rows between the transcript and the
+    # composer, keeping a readable transcript remainder on small screens.
+    content_height = body_height - min(
+        options.panel_lines,
+        max(0, body_height - _MIN_STATUS_ROWS),
+    )
 
-    header = Rect(0, 0, columns, header_height)
+    header = Rect(0, 0, columns, 1)
     composer = Rect(0, header.bottom + body_height, columns, composer_height)
     status = Rect(0, composer.bottom, columns, status_height)
 
     wide = (
         options.show_system
         and columns >= options.wide_at
-        and body_height >= _MIN_SIDEBAR_ROWS
+        and content_height >= _MIN_SIDEBAR_ROWS
     )
     if wide:
         sidebar_width = min(
@@ -2056,10 +2230,15 @@ def calculate_layout(
             ),
         )
         transcript_width = max(1, columns - sidebar_width - 1)
-        transcript = Rect(0, header.bottom, transcript_width, body_height)
-        sidebar = Rect(transcript.right + 1, header.bottom, sidebar_width, body_height)
+        transcript = Rect(0, header.bottom, transcript_width, content_height)
+        sidebar = Rect(
+            transcript.right + 1,
+            header.bottom,
+            sidebar_width,
+            content_height,
+        )
     else:
-        transcript = Rect(0, header.bottom, columns, body_height)
+        transcript = Rect(0, header.bottom, columns, content_height)
         sidebar = None
     return TuiLayout(columns, rows, wide, header, transcript, sidebar, composer, status)
 

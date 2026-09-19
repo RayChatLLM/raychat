@@ -171,37 +171,37 @@ class MessageQueue:
             else self._edits.get(item.identifier, item.text)
         )
 
-    def finish(self, editor: LineEditor, *, save: bool) -> None:
+    def finish(self, editor: LineEditor, *, save: bool) -> int:
         """Commit or discard all edits and restore the suspended composer draft.
 
-        Raises
-        ------
-        ValueError
-            An edited prompt is empty; all edits remain uncommitted.
+        A message whose saved edit is emptied to whitespace is deleted from
+        the queue rather than kept blank.
+
+        Returns
+        -------
+        int
+            How many queued messages were deleted by emptied edits.
 
         """
         if not self.editing:
-            return
+            return 0
         self._remember(editor)
+        deleted = 0
         if save:
-            if any(not text.strip() for text in self._edits.values()):
-                message = (
-                    "Queued messages cannot be empty. "
-                    "Edit the message or press Escape to discard changes."
-                )
-                raise ValueError(message)
-            self.items = [
-                QueuedMessage(
-                    item.identifier,
-                    self._edits.get(item.identifier, item.text),
-                )
-                for item in self.items
-            ]
+            kept: list[QueuedMessage] = []
+            for item in self.items:
+                text = self._edits.get(item.identifier, item.text)
+                if text.strip():
+                    kept.append(QueuedMessage(item.identifier, text))
+                else:
+                    deleted += 1
+            self.items = kept
         if self._draft is not None:
             self._replace(editor, *self._draft)
         self.selected = None
         self._draft = None
         self._edits.clear()
+        return deleted
 
     def clear(self, editor: LineEditor) -> None:
         """Discard pending edits and messages while restoring the original draft."""

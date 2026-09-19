@@ -709,14 +709,18 @@ class RunAgentTests(_RunFixture):
         self,
     ) -> None:
         """Check invalid reply is returned as host result then model can recover."""
-        chat = ScriptedChat(["not json", '{"action":"done","message":"recovered"}'])
+        chat = ScriptedChat(
+            ["not json {also: not json}", '{"action":"done","message":"recovered"}'],
+        )
         result = registered_run(chat, "task", self.root)
         self.equal(result, "recovered")
         feedback = chat.calls[1][-1]["content"]
         self.require(feedback.startswith(SETTINGS.chat.protocol.result_prefix))
         parsed = _decode_object(feedback[len(SETTINGS.chat.protocol.result_prefix) :])
         self.require(not (parsed["ok"]))
-        self.require(("JSONDecodeError") in (text_field(parsed["error"], "error")))
+        self.require(
+            "no complete JSON action object" in text_field(parsed["error"], "error"),
+        )
 
     def test_full_log_retains_history_while_api_input_is_compacted(self) -> None:
         """Check full log retains history while api input is compacted."""
@@ -828,7 +832,9 @@ class RunCallbackTests(_RunFixture):
         self,
     ) -> None:
         """Check event callback reports invalid reply as result without action."""
-        chat = ScriptedChat(["invalid", '{"action":"done","message":"recovered"}'])
+        chat = ScriptedChat(
+            ["invalid {not: json} tail", '{"action":"done","message":"recovered"}'],
+        )
         events: list[tuple[str, Mapping[str, object]]] = []
 
         result = registered_run(
@@ -843,8 +849,33 @@ class RunCallbackTests(_RunFixture):
         self.require((events[0][1]["action"]) is None)
         self.require(not (_result(events[0][1])["ok"]))
         self.require(
-            ("JSONDecodeError")
+            "no complete JSON action object"
             in (text_field(_result(events[0][1])["error"], "error")),
+        )
+
+    def test_event_callback_reports_pure_prose_reply_as_aside(self) -> None:
+        """Check event callback reports pure prose reply as aside."""
+        chat = ScriptedChat(
+            [
+                "I will list the files now.",
+                '{"action":"done","message":"recovered"}',
+            ],
+        )
+        events: list[tuple[str, Mapping[str, object]]] = []
+
+        result = registered_run(
+            chat,
+            "recover",
+            self.root,
+            event_callback=_record_events(events),
+        )
+
+        self.equal(result, "recovered")
+        self.equal([name for name, _payload in events], ["aside", "request", "done"])
+        feedback = chat.calls[1][-1]["content"]
+        self.require("Narration noted" in feedback)
+        self.require(
+            "Continue now with the single JSON action itself" in feedback,
         )
 
     def test_approval_callback_supplies_decisions_and_receives_detached_actions(

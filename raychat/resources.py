@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING
 
 from raychat.event_types import CONFIGURE, Lifecycle
 
-from .sdk import CancelCheck, CancellableChat, Chat, Messages, PluginError
+from .sdk import (
+    CancelCheck,
+    CancellableChat,
+    Chat,
+    Messages,
+    PluginError,
+)
 from .service_contracts import CHAT, ChatService
 
 if TYPE_CHECKING:
@@ -35,6 +41,13 @@ class LiveChat:
     def __init__(self, runtime: Runtime) -> None:
         """Retain the host whose generation supplies each chat request."""
         self.runtime = runtime
+        self.last_reasoning: str = ""
+
+    def _capture_reasoning(self, chat: Chat) -> None:
+        # Structural getattr: the Chat callable type does not intersect the
+        # ReasoningCarrier protocol, so isinstance would never narrow.
+        raw: object = getattr(chat, "last_reasoning", "")
+        self.last_reasoning = raw if isinstance(raw, str) else ""
 
     def __call__(self, messages: Messages) -> str:
         """Send messages through the current provider.
@@ -46,7 +59,10 @@ class LiveChat:
 
         """
         chat = CHAT.validate(self.runtime.services[CHAT.name]).chat
-        return chat(messages)
+        self.last_reasoning = ""
+        result = chat(messages)
+        self._capture_reasoning(chat)
+        return result
 
     def call_with_cancel(self, messages: Messages, cancel_check: CancelCheck) -> str:
         """Forward cancellation when the active provider supports it.
@@ -58,10 +74,14 @@ class LiveChat:
 
         """
         chat = CHAT.validate(self.runtime.services[CHAT.name]).chat
+        self.last_reasoning = ""
         if isinstance(chat, CancellableChat):
-            return chat.call_with_cancel(messages, cancel_check)
-        cancel_check()
-        return chat(messages)
+            result = chat.call_with_cancel(messages, cancel_check)
+        else:
+            cancel_check()
+            result = chat(messages)
+        self._capture_reasoning(chat)
+        return result
 
 
 @dataclass

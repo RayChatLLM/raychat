@@ -45,6 +45,7 @@ _MAX_JUDGE_EVIDENCE_BYTES = _PLUGIN_SETTINGS.max_goal_evidence_bytes
 RETRY_INITIAL_SECONDS = _PLUGIN_SETTINGS.retry_initial_seconds
 _RETRY_MAX_SECONDS = _PLUGIN_SETTINGS.retry_max_seconds
 _RETRY_POLL_SECONDS = _PLUGIN_SETTINGS.retry_poll_seconds
+_MAX_RETRY_MESSAGE_CHARS = 512
 _INSTRUCTION_ROLES = frozenset(SETTINGS.chat.instruction_roles)
 
 
@@ -323,6 +324,11 @@ class _GoalRun:
     def filtered_event(self, kind: str, payload: Mapping[str, object]) -> None:
         if kind == "done":
             self.final_done = copy.deepcopy(dict(payload))
+            # Keep the raw "done" for the accepted result, but surface each
+            # iteration's reply immediately so the operator can watch the
+            # goal advance instead of waiting for the judge to accept.
+            if self.callback is not None:
+                self.callback("goal_progress", copy.deepcopy(dict(payload)))
         elif self.callback is not None:
             self.callback(kind, payload)
 
@@ -343,6 +349,7 @@ class _GoalRun:
                     "delay_seconds": delay,
                     "revision": revision,
                     "error_type": type(error).__name__,
+                    "message": str(error)[:_MAX_RETRY_MESSAGE_CHARS],
                 },
             )
 
@@ -422,6 +429,7 @@ class _GoalRun:
                     "complete": decision.complete,
                     "profile": decision.profile,
                     "model": decision.model,
+                    "feedback": decision.feedback,
                 },
             )
         return self.controller.accept_decision(current, decision)

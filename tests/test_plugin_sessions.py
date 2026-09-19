@@ -301,10 +301,7 @@ class AgentSessionTests(_SessionCase):
             "host_result",
             1,
         )
-        header = (
-            "HOST_COMPACTION: 2 older messages summarized; re-read files when "
-            "exact details are needed."
-        )
+        header = _rc_context.digest_header(2)
         result_line = _rc_summaries.summary_line(result.as_message())
         limit = len(header) + len(result_line) + 3
 
@@ -706,13 +703,15 @@ class AgentSessionTests(_SessionCase):
         self,
     ) -> None:
         """Reject malformed provider replies before adding history or reply logs."""
-        cases = (
-            (None, "assistant text"),
-            ("   ", "empty assistant text"),
-            ("x" * (SETTINGS.limits.max_reply_chars + 1), "size limit"),
-            ("secret-marker-\ud800", "invalid Unicode"),
+        cases: tuple[tuple[list[object], str], ...] = (
+            ([None], "assistant text"),
+            # Empty replies become bounded model feedback before escaping, so
+            # the failure is terminal only after the feedback budget.
+            (["   ", "   ", "   ", "   "], "empty assistant text"),
+            (["x" * (SETTINGS.limits.max_reply_chars + 1)], "size limit"),
+            (["secret-marker-\ud800"], "invalid Unicode"),
         )
-        for index, (reply, expected) in enumerate(cases):
+        for index, (replies, expected) in enumerate(cases):
             with self.subTest(expected=expected):
                 log = io.StringIO()
                 session = registered_session(
@@ -722,7 +721,7 @@ class AgentSessionTests(_SessionCase):
                 )
                 # Deliberately violate the callback contract at runtime. The
                 # negative type fixture rejects this as a direct assignment.
-                _unchecked_attribute(session, "chat", ScriptedChat[object]([reply]))
+                _unchecked_attribute(session, "chat", ScriptedChat[object](replies))
                 with self.rejected(RuntimeError, expected):
                     session.send(
                         "task",
@@ -733,7 +732,13 @@ class AgentSessionTests(_SessionCase):
                     object_field(json_object(line), "log message")
                     for line in log.getvalue().splitlines()
                 ]
+                # A reply never reaches the log as assistant text; empty-reply
+                # feedback logs only the host-authored placeholder.
                 self.require(
-                    not (any(record.get("role") == "assistant" for record in records)),
+                    not any(
+                        record.get("role") == "assistant"
+                        and "no usable assistant text" not in str(record.get("content"))
+                        for record in records
+                    ),
                 )
                 self.require("secret-marker" not in log.getvalue())

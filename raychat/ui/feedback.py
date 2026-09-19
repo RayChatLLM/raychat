@@ -58,6 +58,9 @@ class PanelStyle:
     highlight: RGB
 
 
+_MAX_VISIBLE_PANEL_ROWS = 5
+
+
 @dataclass
 class ComposerPanel:
     """Paint completion or queue choices above the active composer."""
@@ -70,6 +73,19 @@ class ComposerPanel:
     visible_count: int = 0
     row_indexes: list[int] = field(default_factory=list)
 
+    def required_lines(self) -> int:
+        """Rows this panel occupies above the composer, including its border.
+
+        Returns
+        -------
+        int
+            The panel's full height, or 0 while it has nothing to show.
+
+        """
+        if not self.rows:
+            return 0
+        return min(_MAX_VISIBLE_PANEL_ROWS, len(self.rows)) + 2
+
     def paint(
         self,
         surface: Surface,
@@ -80,7 +96,11 @@ class ComposerPanel:
         """Render visible choices and record their mouse hit targets."""
         self.rect = None
         self.row_indexes.clear()
-        count = min(5, len(self.rows), max(0, composer.y - 3))
+        count = min(
+            _MAX_VISIBLE_PANEL_ROWS,
+            len(self.rows),
+            max(0, composer.y - 3),
+        )
         if not count:
             return
         if self.selected is not None:

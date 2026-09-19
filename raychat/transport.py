@@ -108,6 +108,7 @@ class _ErrorFrame(TypedDict):
     retryable: bool
     retry_after: float | None
     os_error: bool
+    kind: str
 
 
 WorkerFrame = _EventFrame | _SnapshotFrame | _FinalFrame | _ErrorFrame
@@ -149,12 +150,14 @@ def _frame_fields(value: object) -> WorkerFrame:
             "message": _text(fields.get("message"), "final message"),
         }
     if kind == "error":
+        classification = fields.get("kind")
         return {
             "type": "error",
             "message": _text(fields.get("message"), "error message"),
             "retryable": fields.get("retryable") is True,
             "retry_after": _retry_after(fields.get("retry_after")),
             "os_error": fields.get("os_error") is True,
+            "kind": classification if isinstance(classification, str) else "",
         }
     message = "Subagent process returned an unexpected record."
     raise RuntimeError(message)
@@ -188,20 +191,23 @@ class _Frames:
 
     def consume(self, raw: bytes) -> None:
         frame = _parse_frame(raw)
-        if frame["type"] == "event" and self.event_callback is not None:
-            self.event_callback(frame["event"], frame["payload"])
-        elif frame["type"] == "snapshot" and self.snapshot_callback is not None:
-            self.snapshot_callback(frame["snapshot"])
+        if frame["type"] == "event":
+            # A caller without an event callback simply ignores child events
+            # (for example provider reasoning frames on judge requests).
+            if self.event_callback is not None:
+                self.event_callback(frame["event"], frame["payload"])
+        elif frame["type"] == "snapshot":
+            if self.snapshot_callback is not None:
+                self.snapshot_callback(frame["snapshot"])
         elif frame["type"] == "final":
             if self.final is not None:
                 message = "Subagent process returned duplicate final records."
                 raise RuntimeError(message)
             self.final = frame["message"]
         elif frame["type"] == "error":
+            # _parse_frame already rejected any type outside this union, so
+            # the discriminated branches above are exhaustive.
             self.raise_provider_error(frame)
-        else:
-            message = "Subagent process returned an unexpected record."
-            raise RuntimeError(message)
 
     def raise_provider_error(self, frame: _ErrorFrame) -> None:
         message = frame["message"]
@@ -214,6 +220,7 @@ class _Frames:
             retry_after=frame["retry_after"],
         )
         failure.os_error = frame["os_error"]
+        failure.kind = frame["kind"]
         raise failure
 
 
@@ -541,6 +548,7 @@ def run_chat_profile(
     profile: ProviderSpec,
     messages: Messages,
     cancel_check: CancelCheck | None,
+    event_callback: TransportEvent | None = None,
 ) -> str:
     """Run a provider chat request through the isolated transport.
 
@@ -551,4 +559,4 @@ def run_chat_profile(
 
     """
     payload: dict[str, object] = {"mode": "chat", "messages": messages}
-    return run_child(profile, payload, cancel_check)
+    return run_child(profile, payload, cancel_check, event_callback)

@@ -481,7 +481,13 @@ def _execute(
         _exact_fields(request, {"provider", "mode", "messages"})
         messages = _messages(request["messages"])
         api = _provider(request["provider"], resources)
-        return api(messages)
+        result = api(messages)
+        # Structural getattr: the provider callable type does not intersect
+        # the ReasoningCarrier protocol, so isinstance would never narrow.
+        reasoning: object = getattr(api, "last_reasoning", "")
+        if isinstance(reasoning, str) and reasoning:
+            _event("thinking", {"text": reasoning})
+        return result
     if mode == "conversation":
         conversation = _conversation_request(request)
         api = _provider(request["provider"], resources)
@@ -517,6 +523,7 @@ def _emit_error(error: Exception, resources: _Resources) -> str:
         "retryable": error.retryable if isinstance(error, ProviderError) else False,
         "retry_after": retry_after,
         "os_error": isinstance(error, OSError),
+        "kind": error.kind if isinstance(error, ProviderError) else "",
     })
     return message
 
@@ -536,6 +543,7 @@ def _run(cancel_check: CancelCheck) -> int:
             "retryable": False,
             "retry_after": None,
             "os_error": False,
+            "kind": "",
         })
         return 1
     try:

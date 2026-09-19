@@ -13,6 +13,7 @@
     "max_http_bytes": 2097152,
     "max_request_options_bytes": 65536,
     "max_provider_api_key_chars": 8192,
+    "empty_reply_retries": 2,
     "reserved_request_options": [
       "model",
       "messages",

@@ -90,12 +90,16 @@ class RecordingOpener:
     def __init__(self, response: FakeResponse) -> None:
         """Prepare a successful response and empty request history."""
         self.response = response
+        self.queued: list[FakeResponse] = []
         self.requests: list[Request] = []
         self.timeouts: list[float] = []
         self.error: Exception | None = None
 
     def open(self, fullurl: Request, *, timeout: float) -> FakeResponse:
         """Record one request before returning or failing.
+
+        Queued responses are served first, one per request, before the
+        default response; retry tests use this to vary replies per attempt.
 
         Returns
         -------
@@ -107,6 +111,8 @@ class RecordingOpener:
         self.timeouts.append(timeout)
         if self.error is not None:
             raise self.error
+        if self.queued:
+            return self.queued.pop(0)
         return self.response
 
     def single_request(self) -> Request:

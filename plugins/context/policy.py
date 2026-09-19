@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from raychat.configuration import SETTINGS
 from raychat.service_contracts import (
+    CHAT,
     INSTRUCTIONS,
     MEMORY,
 )
@@ -36,6 +37,22 @@ RESULT_PREFIX = SETTINGS.chat.protocol.result_prefix
 COMPACTION_PREFIX = _PLUGIN_SETTINGS.compaction_prefix
 COMPACTION_SEPARATOR = _PLUGIN_SETTINGS.compaction_separator
 _SUMMARY_LIMITS = _PLUGIN_SETTINGS.summary_limits
+_MODEL_COMPACTION = _PLUGIN_SETTINGS.model_compaction
+
+# Model-written compaction: one bounded provider call summarizes the messages
+# being compacted; the mechanical digest remains the always-available fallback.
+_MODEL_DIGEST_INPUT_CHARS = 150_000
+_MODEL_DIGEST_MESSAGE_CHARS = 2_000
+_MODEL_DIGEST_REPLY_CHARS = 4_000
+_MODEL_DIGEST_INSTRUCTIONS = (
+    "You are compacting an agent transcript. Write a concise working-state "
+    "brief of the exchanges below for the agent to continue from: files "
+    "created or edited (paths and purpose; treat remembered contents as "
+    "stale), capabilities or checks proven with their evidence, decisions "
+    "made and why, the current position in the task, immediate next steps, "
+    "and unresolved errors. Plain text, no preamble, under "
+    f"{_MODEL_DIGEST_REPLY_CHARS} characters.\n\n--- TRANSCRIPT ---\n"
+)
 
 
 def digest_header(message_count: int) -> str:
@@ -49,8 +66,11 @@ def digest_header(message_count: int) -> str:
     """
     return (
         str(COMPACTION_PREFIX)
-        + f"{message_count} older messages summarized; re-read files when exact "
-        "details are needed."
+        + f"{message_count} older messages summarized. Everything below is a "
+        "STALE summary, not current state: file contents, hashes and results "
+        "mentioned here may have changed or may never have been verified. "
+        "Re-read files before editing or claiming what they contain, and "
+        "re-run checks before reporting them as passing."
     )
 
 
@@ -481,6 +501,57 @@ class _Compaction:
             raise RuntimeError(error_message)
         return candidate
 
+    def model_digest(
+        self,
+        items: list[SessionMessage],
+        candidate_with: Callable[[str], Messages],
+    ) -> str | None:
+        """Ask the configured model to write the compaction brief.
+
+        Returns
+        -------
+        str | None
+            A fitting model-written digest, or None so the mechanical
+            digest ladder takes over.
+
+        """
+        if not _MODEL_COMPACTION:
+            return None
+        lines: list[str] = []
+        total = 0
+        for message in items:
+            line = f"[{message.kind}] " + clip(
+                message.content,
+                _MODEL_DIGEST_MESSAGE_CHARS,
+            )
+            total += len(line)
+            if total > _MODEL_DIGEST_INPUT_CHARS:
+                break
+            lines.append(line)
+        try:
+            chat = self.policy.ctx.require_service(CHAT).chat
+            reply = chat(
+                [
+                    {
+                        "role": "user",
+                        "content": _MODEL_DIGEST_INSTRUCTIONS + "\n".join(lines),
+                    },
+                ],
+            )
+        except (RuntimeError, ValueError, TypeError, OSError):
+            # Any provider or contract failure falls back to the mechanical
+            # digest; compaction must never break the turn.
+            return None
+        if not reply.strip():
+            return None
+        digest = (
+            digest_header(len(items)) + "\n" + reply.strip()[:_MODEL_DIGEST_REPLY_CHARS]
+        )
+        candidate = candidate_with(digest)
+        if messages_size(candidate) <= self.policy.session.context_chars:
+            return digest
+        return None
+
     def enrich_digest(
         self,
         items: list[SessionMessage],
@@ -489,6 +560,9 @@ class _Compaction:
     ) -> str | None:
         if not items or minimum is None:
             return None
+        model = self.model_digest(items, candidate_with)
+        if model is not None:
+            return model
         digest_limit = self.policy.session.context_chars
         while digest_limit >= len(COMPACTION_PREFIX):
             try:

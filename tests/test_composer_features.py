@@ -101,8 +101,8 @@ class QueueTests(TypedTestCase):
         self.equal(draft.text, "draft")
         self.require(not queue.items)
 
-    def test_empty_edit_keeps_transaction_open_and_fifo_unchanged(self) -> None:
-        """Check empty edit keeps transaction open and fifo unchanged."""
+    def test_emptied_edit_deletes_the_message_and_keeps_the_rest(self) -> None:
+        """Saving an emptied edit deletes that message and keeps the others."""
         queue = MessageQueue()
         queue.append("one")
         queue.append("two")
@@ -112,11 +112,22 @@ class QueueTests(TypedTestCase):
         draft.clear()
         queue.navigate(draft, -1)
         draft.set_text("updated")
-        with self.rejected(ValueError, "cannot be empty"):
-            queue.finish(draft, save=True)
-        self.require(queue.editing)
-        self.equal([item.text for item in queue.items], ["one", "two"])
-        self.equal([item.identifier for item in queue.items], identifiers)
+        deleted = queue.finish(draft, save=True)
+        self.equal(deleted, 1)
+        self.require(not queue.editing)
+        self.equal([item.text for item in queue.items], ["updated"])
+        self.equal([item.identifier for item in queue.items], [identifiers[0]])
+
+    def test_discarding_an_emptied_edit_deletes_nothing(self) -> None:
+        """Escape keeps every queued message even when an edit was emptied."""
+        queue = MessageQueue()
+        queue.append("one")
+        draft = LineEditor()
+        queue.navigate(draft, -1)
+        draft.clear()
+        deleted = queue.finish(draft, save=False)
+        self.equal(deleted, 0)
+        self.equal([item.text for item in queue.items], ["one"])
 
     def test_shift_arrows_decode_when_split_at_every_byte(self) -> None:
         """Check shift arrows decode when split at every byte."""

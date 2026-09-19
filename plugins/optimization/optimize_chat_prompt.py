@@ -1068,10 +1068,11 @@ def _has_output_preflight(protocol: str) -> bool:
 class DeterministicTaskModel:
     """Small replay model used only by the transparent offline demonstration.
 
-    Without the learned validation rule it prefixes its first action with prose,
-    then recovers after HOST_RESULT.  With the rule it emits the action cleanly
-    and has enough turns left to finish.  This models a common protocol failure
-    while keeping the proof reproducible and network-free.
+    Without the learned validation rule it narrates two candidate action
+    objects — an ambiguous reply the host must reject — then recovers after
+    HOST_RESULT.  With the rule it emits one action cleanly and has enough
+    turns left to finish.  This models a common protocol failure while
+    keeping the proof reproducible and network-free.
     """
 
     def __init__(self, case: Mapping[str, object]) -> None:
@@ -1124,7 +1125,13 @@ class DeterministicTaskModel:
         )
         if protocol_is_strict or host_reported_error:
             return first_action
-        return "I will do that now.\n" + first_action
+        return (
+            "I could reply with "
+            + first_action
+            + " or with "
+            + first_action
+            + "; I will go with the first."
+        )
 
 
 class DeterministicReflectionModel:

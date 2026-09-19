@@ -94,6 +94,12 @@ def _set_command(arguments: list[str]) -> GoalCommand:
     index = 1
     while index < len(arguments):
         argument = arguments[index]
+        if objective_parts:
+            # Options end where the objective begins: later "--" tokens are
+            # objective text (e.g. command-line flags the goal talks about).
+            objective_parts.append(argument)
+            index += 1
+            continue
         if argument == "--judge":
             if profile is not None or index + 1 >= len(arguments):
                 error_message = "Use --judge exactly once followed by a profile."

@@ -19,23 +19,32 @@ if TYPE_CHECKING:
 
     from raychat.sdk import PluginAPI, PluginContext
 
-_ACTION_FIELDS = {"run": ({"argv"}, {"cwd"})}
+_ACTION_FIELDS = {"run": ({"argv"}, {"cwd", "timeout"})}
+# Model-requested timeouts stay within a bound the operator can predict.
+_MAX_ACTION_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
 class _CommandRequest:
     argv: list[str]
     cwd: str
+    timeout: float | None
 
 
 def _request(action: Mapping[str, object]) -> _CommandRequest:
-    validate_fields(action, _ACTION_FIELDS, non_string_fields=("argv",))
+    validate_fields(action, _ACTION_FIELDS, non_string_fields=("argv", "timeout"))
     argv = command_arguments(action.get("argv"))
     cwd = action.get("cwd", ".")
     if not isinstance(cwd, str) or not cwd or "\x00" in cwd:
         message = "cwd must be nonempty and contain no NUL characters."
         raise ValueError(message)
-    return _CommandRequest(argv, cwd)
+    timeout: float | None = None
+    if "timeout" in action:
+        timeout = min(
+            command_timeout(action["timeout"]),
+            _MAX_ACTION_TIMEOUT_SECONDS,
+        )
+    return _CommandRequest(argv, cwd, timeout)
 
 
 def validate_action(action: Mapping[str, object]) -> None:
@@ -55,12 +64,14 @@ def register(api: PluginAPI) -> None:
         request = _request(action)
         raw_options: object = api.context.options
         options = configuration_fields(raw_options, "process options")
-        timeout = command_timeout(
-            options.get(
-                "timeout",
-                SETTINGS.chat.command_timeout_seconds,
-            ),
-        )
+        timeout = request.timeout
+        if timeout is None:
+            timeout = command_timeout(
+                options.get(
+                    "timeout",
+                    SETTINGS.chat.command_timeout_seconds,
+                ),
+            )
         return dict(
             run_command(
                 request.argv,

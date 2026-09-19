@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from raychat.configuration import captured_settings
 from raychat.validation import (
+    boolean_field,
     configuration_fields,
     integer_field,
     settings_fields,
@@ -27,6 +28,7 @@ class ContextSettings:
     compaction_prefix: str
     compaction_separator: str
     summary_limits: Mapping[str, int]
+    model_compaction: bool
 
     @classmethod
     def parse(cls, raw: object, path: str = "context") -> ContextSettings:
@@ -47,10 +49,15 @@ class ContextSettings:
                 "compaction_prefix",
                 "compaction_separator",
                 "summary_limits",
+                "model_compaction",
             ),
         )
         return cls(
             protocol=text_field(fields.get("protocol"), f"{path}.protocol"),
+            model_compaction=boolean_field(
+                fields.get("model_compaction"),
+                f"{path}.model_compaction",
+            ),
             summary_clip_chars=integer_field(
                 fields.get("summary_clip_chars"),
                 f"{path}.summary_clip_chars",

@@ -770,6 +770,7 @@ def _entry_color(kind: str, *, ok: bool | None) -> RGB:
         "result": BLUE,
         "status": MUTED,
         "system": MAGENTA,
+        "thinking": MUTED,
     }.get(kind, INK)
 
 
@@ -784,6 +785,10 @@ def _paint_header(
     progress = state.phase.value.upper()
     if state.step and state.max_steps:
         progress += f"  {state.step}/{state.max_steps}"
+    elif state.step:
+        # A ticking turn counter doubles as a liveness heartbeat when the
+        # step budget is unlimited.
+        progress += f"  {state.step}"
     progress = "[" + progress + "]"
     start = max(14, surface.width - display_width(progress) - 1)
     surface.text(
@@ -1362,12 +1367,18 @@ def compose_frame(
     if state.phase is not Phase.APPROVAL:
         cached_composer_view = composer_view(editor, max(1, composition.width - 6))
         draft_lines = len(cached_composer_view.lines)
+    panel_lines = (
+        composition.panel.required_lines()
+        if composition.panel is not None and state.phase is not Phase.APPROVAL
+        else 0
+    )
     layout = calculate_layout(
         composition.width,
         composition.height,
         options=LayoutOptions(
             show_system=composition.show_system,
             composer_lines=draft_lines,
+            panel_lines=panel_lines,
         ),
     )
     _focus_ray_field(surface, layout.sidebar)
@@ -1417,12 +1428,18 @@ def frame_regions(
     if composition.width < MIN_COLUMNS or composition.height < MIN_ROWS:
         return {}
     lines = len(composer_view(editor, max(1, composition.width - 6)).lines)
+    painted_panel = composition.panel
     layout = calculate_layout(
         composition.width,
         composition.height,
         options=LayoutOptions(
             show_system=composition.show_system,
             composer_lines=lines,
+            panel_lines=(
+                painted_panel.rect.height
+                if painted_panel is not None and painted_panel.rect is not None
+                else 0
+            ),
         ),
     )
     regions = {"header": "".join(surface.chars[: surface.width])}
@@ -2383,7 +2400,19 @@ class _TuiController:
         if kind == "notification":
             self._feedback(str(payload.get("message", "")))
             return
-        if kind in {"request", "result", "done", "error", "approval_required"}:
+        if kind in {
+            "request",
+            "result",
+            "done",
+            "error",
+            "approval_required",
+            "thinking",
+            "aside",
+            "goal_progress",
+            "goal_judge_started",
+            "goal_judge_decision",
+            "goal_retry",
+        }:
             self._apply_semantic_event(kind, payload)
         else:
             self._finish_worker_job(kind, payload)
@@ -2430,6 +2459,12 @@ class _TuiController:
             and self.view.selection.text()
         ):
             self.clipboard_jobs.put((self.view, self.view.selection.text()))
+            return True
+        if event.kind == "control" and event.text == "\x14":  # Ctrl+T
+            expanded = self.view.state.toggle_thinking()
+            self._feedback(
+                "Thinking expanded" if expanded else "Thinking collapsed",
+            )
             return True
         if event.kind in {"interrupt", "eof"}:
             self._request_quit()
@@ -2479,18 +2514,7 @@ class _TuiController:
                 self._feedback("Queue is empty")
             return True
         if self.view.message_queue.editing and event.kind in {"enter", "escape"}:
-            try:
-                self.view.message_queue.finish(
-                    self.view.editor,
-                    save=event.kind == "enter",
-                )
-                self._feedback(
-                    "Queue edits saved"
-                    if event.kind == "enter"
-                    else "Queue edits discarded",
-                )
-            except ValueError as exc:
-                self._feedback(str(exc))
+            self._finish_queue_edit(save=event.kind == "enter")
             return True
         if event.kind == "click" and event.x is not None and event.y is not None:
             selected = self.view.panel.hit(event.x, event.y)
@@ -2516,6 +2540,18 @@ class _TuiController:
         else:
             return False
         return True
+
+    def _finish_queue_edit(self, *, save: bool) -> None:
+        deleted = self.view.message_queue.finish(self.view.editor, save=save)
+        if not save:
+            self._feedback("Queue edits discarded")
+        elif deleted:
+            plural = "s" if deleted > 1 else ""
+            self._feedback(
+                f"Queue edits saved | {deleted} emptied message{plural} deleted",
+            )
+        else:
+            self._feedback("Queue edits saved")
 
     def _process_application_key(self, event: KeyEvent) -> bool:
         if event.kind != "enter" or not self.view.editor.text.strip().startswith("/"):
@@ -2631,6 +2667,11 @@ class _TuiController:
             options=LayoutOptions(
                 show_system=self.show_system,
                 composer_lines=len(draft.lines),
+                panel_lines=(
+                    self.view.panel.required_lines()
+                    if self.view.state.phase is not Phase.APPROVAL
+                    else 0
+                ),
             ),
         ).transcript
         inner_width = max(1, rect.width - 4)

@@ -977,6 +977,13 @@ class GoalModeTests(PackageTestCase):
             goal_module.parse_goal_command("/goal --unknown objective")
         windows = goal_module.parse_goal_command(r"/goal Review C:\temp\file.txt")
         equal(windows.objective, r"Review C:\temp\file.txt")
+        flags = goal_module.parse_goal_command(
+            "/goal Launch chrome with --remote-debugging-port=9222 and verify",
+        )
+        equal(
+            flags.objective,
+            "Launch chrome with --remote-debugging-port=9222 and verify",
+        )
 
     def test_default_main_model_judge_gets_full_transcript_and_continues(self) -> None:
         """Verify default main model judge gets full transcript and continues."""
@@ -1409,6 +1416,148 @@ class GoalModeTests(PackageTestCase):
         equal(len(judge_chat.calls), 2)
         equal([item["stage"] for item in retries], ["judge"])
 
+    def test_decorated_judge_decisions_are_accepted_without_retries(self) -> None:
+        """Fenced, prose-wrapped or extended judge JSON is accepted directly."""
+        replies = (
+            '```json\n{"decision":"complete","feedback":"Verified."}\n```',
+            (
+                'The goal is done. {"decision":"complete","feedback":"Verified."} '
+                "Let me know if you need anything else."
+            ),
+            '{"decision":"complete","feedback":"Verified.","confidence":0.9}',
+            '{"decision":"complete","feedback":"' + "x" * 4096 + '"}',
+        )
+        for reply in replies:
+            with self.subTest(reply=reply[:60]):
+                main = ScriptedChat(['{"action":"done","message":"finished"}'])
+                judge_chat = ScriptedChat([reply])
+
+                def judge_factory(
+                    chat: ScriptedChat[str] = judge_chat,
+                ) -> ScriptedChat[str]:
+                    return chat
+
+                router = models.ModelRouter(
+                    [
+                        models.ModelProfile(
+                            "primary",
+                            "model/main",
+                            judge_factory,
+                            ("judge",),
+                        ),
+                    ],
+                    default_profile="primary",
+                )
+                controller = goal_module.GoalController(goal_module.GoalJudge(router))
+                controller.configure("Finish")
+                session = registered_session(main, self.root)
+                result = run_goal(controller, session, "work")
+                equal(result, "finished")
+                equal(len(judge_chat.calls), 1)
+
+    def test_goal_progress_streams_each_iteration_reply(self) -> None:
+        """Each goal iteration's reply is surfaced live as goal progress."""
+        main = ScriptedChat(
+            [
+                '{"action":"done","message":"not final"}',
+                '{"action":"done","message":"actually final"}',
+            ],
+        )
+        decisions = iter(
+            [
+                '{"decision":"continue","feedback":"One check remains."}',
+                '{"decision":"complete","feedback":"Accepted."}',
+            ],
+        )
+        router = models.ModelRouter(
+            [
+                models.ModelProfile(
+                    "primary",
+                    "model/main",
+                    lambda: lambda _messages: next(decisions),
+                    ("judge",),
+                ),
+            ],
+            default_profile="primary",
+        )
+        controller = goal_module.GoalController(goal_module.GoalJudge(router))
+        controller.configure("Finish")
+        session = registered_session(main, self.root)
+        events: list[tuple[str, Mapping[str, object]]] = []
+        result = run_goal(
+            controller,
+            session,
+            "work",
+            event_callback=lambda kind, payload: events.append((kind, payload)),
+        )
+        equal(result, "actually final")
+        progress = [payload for kind, payload in events if kind == "goal_progress"]
+        equal([item["message"] for item in progress], ["not final", "actually final"])
+        kinds = [kind for kind, _ in events]
+        equal(kinds.count("done"), 1)
+        decision_feedback = [
+            payload["feedback"]
+            for kind, payload in events
+            if kind == "goal_judge_decision"
+        ]
+        equal(decision_feedback, ["One check remains.", "Accepted."])
+        require(kinds.index("goal_progress") < kinds.index("goal_judge_decision"))
+
+    def test_reply_failures_become_model_feedback_and_recover(self) -> None:
+        """Reply-shaped provider failures turn into feedback the model sees."""
+        empty_replies_before_success = 2
+
+        class FlakyChat:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __call__(self, _messages: object) -> str:
+                self.calls += 1
+                if self.calls <= empty_replies_before_success:
+                    error = ProviderError("no assistant text (stub)", retryable=True)
+                    error.kind = "empty_reply"
+                    raise error
+                return '{"action":"done","message":"recovered"}'
+
+        chat = FlakyChat()
+        session = registered_session(chat, self.root)
+        results: list[Mapping[str, object]] = []
+        outcome = session.send(
+            "hello",
+            max_steps=6,
+            event_callback=lambda kind, payload: (
+                results.append(payload) if kind == "result" else None
+            ),
+        )
+        equal(outcome, "recovered")
+        equal(chat.calls, 3)
+        feedback = [item for item in results if item.get("action") is None]
+        equal(len(feedback), 2)
+        for item in feedback:
+            fields = object_field(item.get("result"), "result")
+            require(fields.get("ok") is False)
+            error_text = text_field(fields.get("error"), "error")
+            require("no assistant text" in error_text)
+
+    def test_persistent_reply_failures_escape_after_bounded_feedback(self) -> None:
+        """Reply failures escape to outer recovery once feedback is exhausted."""
+
+        class AlwaysEmptyChat:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __call__(self, _messages: object) -> str:
+                self.calls += 1
+                error = ProviderError("no assistant text (stub)", retryable=True)
+                error.kind = "empty_reply"
+                raise error
+
+        chat = AlwaysEmptyChat()
+        session = registered_session(chat, self.root)
+        with self.rejected(ProviderError, "no assistant text"):
+            session.send("hello", max_steps=10)
+        equal(chat.calls, 4)
+
     def test_replacing_goal_from_decision_callback_is_rejudged(self) -> None:
         """Verify replacing goal from decision callback is rejudged."""
         decisions = iter(
@@ -1591,7 +1740,7 @@ class TransportBoundaryTests(PackageTestCase):
             ("not JSON\n", 0, "invalid output"),
             ('{"type":"final","message":17}\n', 0, "invalid output"),
             ('{"type":"snapshot","snapshot":[]}\n', 0, "invalid output"),
-            ('{"type":"event","event":"tick","payload":{}}\n', 0, "unexpected record"),
+            ('{"type":"event","event":"tick","payload":{}}\n', 0, "no final result"),
             (
                 '{"type":"final","message":"a"}\n{"type":"final","message":"b"}\n',
                 0,
@@ -1625,6 +1774,18 @@ class TransportBoundaryTests(PackageTestCase):
         )
         with mock.patch.object(asyncio, "create_subprocess_exec", new=launcher):
             equal(process_runtime.run_child(None, {}, None), "")
+        require(launcher.processes[0].returncode is not None)
+
+    @staticmethod
+    def test_events_without_a_callback_are_ignored_before_the_final_frame() -> None:
+        """Tolerate child events (such as reasoning) when nobody listens."""
+        launcher = ChildLauncher(
+            "import sys\nsys.stdin.buffer.read()\n"
+            'sys.stdout.write(\'{"type":"event","event":"thinking",'
+            '"payload":{"text":"t"}}\\n{"type":"final","message":"done"}\\n\')\n',
+        )
+        with mock.patch.object(asyncio, "create_subprocess_exec", new=launcher):
+            equal(process_runtime.run_child(None, {}, None), "done")
         require(launcher.processes[0].returncode is not None)
 
     def test_callback_base_exceptions_keep_identity_after_cleanup_failure(self) -> None:
