@@ -783,9 +783,10 @@ def _paint_header(
     logo = "* RAY CHAT" if composition.ascii_only else "◈ RAY/CHAT"
     surface.text(1, 0, logo, style=_STYLE_CYAN_HEADER_BOLD)
     progress = state.phase.value.upper()
-    if state.step and state.max_steps:
+    active = state.phase in {Phase.RUNNING, Phase.APPROVAL, Phase.STOPPING}
+    if active and state.step and state.max_steps:
         progress += f"  {state.step}/{state.max_steps}"
-    elif state.step:
+    elif active and state.step:
         # A ticking turn counter doubles as a liveness heartbeat when the
         # step budget is unlimited.
         progress += f"  {state.step}"
