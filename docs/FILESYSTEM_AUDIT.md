@@ -1650,3 +1650,17 @@ long working directory. No extended-path prefix or system configuration is
 changed. All 74 focused regression tests passed locally before the final helper
 argument cleanup (macOS Python 3.12, 36.224 seconds). Updated native CI is required
 before recording Windows acceptance.
+
+### Portable checkout line endings (2026-09-25)
+
+Revision 7d7386d passes all three native Windows jobs and the Linux jobs in PR
+run 36156895405, including the repaired long-path and candidate-activation tests.
+The complete Linux suite passes 1,074 tests (four Windows-only skips). Comparing
+build reports exposed a separate packaging difference: Windows checkout converted
+`.gitignore` and `pyproject.toml` to CRLF, adding exactly 100 bytes. A local capture
+with only those two transformations reproduced the Windows archive SHA-256
+`c5226391335e74afb8a0b09b375a86bd2719229e2ffa408260e24bd969dfd22f`
+from the Linux archive
+`dc266244bd689d5b294a71654a8256513cdf0fe5a99f056291157a006ffe4dda`.
+Explicit LF attributes now cover both inputs. The builder continues to preserve
+captured source bytes; no platform-dependent rewriting is added to Python code.

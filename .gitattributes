@@ -3,9 +3,11 @@
 *.md text eol=lf
 *.py text eol=lf
 *.txt text eol=lf
+*.toml text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 .gitattributes text eol=lf
+.gitignore text eol=lf
 plugins/optimization/GEPA_LICENSE text eol=lf
 # Two retained upstream prompt lines contain intentional trailing spaces.
 plugins/optimization/gepa/optimize_anything.py whitespace=-blank-at-eol
