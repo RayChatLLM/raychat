@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,7 +15,7 @@ from raychat.plugins import Runtime
 from raychat.sdk import Action, PluginContext, ToolDefinition
 from raychat.session import AgentSession
 from raychat.storage import SessionStore
-from raychat.validation import configuration_fields
+from raychat.validation import array_field, configuration_fields
 from raychat_bootstrap.wire import decode
 from tests.assertions import TypedTestCase
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from raychat.sdk import Messages
 
 _STOPPED_REVIEW = 4
+_ERROR_PRIVILEGE_NOT_HELD = 1314
 
 
 def _review(request: str, status: str) -> str:
@@ -34,12 +36,44 @@ def _review(request: str, status: str) -> str:
 class CoreToolsTests(TypedTestCase):
     """Keep source updates isolated, checked, and available after plugin reload."""
 
+    def test_status_reads_a_closed_bounded_diagnostic_tail(self) -> None:
+        """Retire the read file immediately and preserve a missing-log status."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "diagnostics.log"
+            data = b"old\n" * 10000 + b"\xfflatest\n"
+            path.write_bytes(data)
+            bridge = CoreBridge(io.BytesIO(), io.BytesIO())
+            bridge.diagnostics = path
+            runtime = Runtime(root)
+            install(runtime, bridge)
+            try:
+                status = runtime.execute({"action": "core_status"})
+                self.equal(
+                    status["diagnostics"],
+                    data[-24000:].decode("utf-8", errors="replace"),
+                )
+                path.replace(root / "retired.log")
+                self.equal(
+                    runtime.execute({"action": "core_status"})["diagnostics"],
+                    "",
+                )
+                bridge.diagnostics = root
+                with self.rejected(ValueError, "regular file"):
+                    runtime.execute({"action": "core_status"})
+            finally:
+                runtime.close()
+
     def test_source_inspection_scopes_only_the_current_task_to_core_tools(self) -> None:
         """Reject checkout fallbacks while allowing later ordinary workspace work."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "raychat").mkdir()
-            (root / "raychat" / "example.py").write_text("VALUE = 1\n")
+            (root / "raychat" / "example.py").write_text(
+                "VALUE = 1\n",
+                encoding="utf-8",
+                newline="\n",
+            )
             bridge = CoreBridge(io.BytesIO(), io.BytesIO())
             bridge.source_root = root
             runtime = Runtime(root)
@@ -263,14 +297,29 @@ class CoreToolsTests(TypedTestCase):
                 store.close()
 
     def test_search_does_not_read_symlinks_outside_release(self) -> None:
-        """Apply the source boundary to recursive searches as well as explicit reads."""
+        """Apply the source boundary to searches as well as explicit reads.
+
+        Raises
+        ------
+        OSError
+            If symlink creation fails for a reason other than Windows privilege.
+
+        """
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             root = directory / "release"
             (root / "raychat").mkdir(parents=True)
             outside = directory / "outside.py"
-            outside.write_text("PRIVATE_VALUE = 123\n", encoding="utf-8")
-            (root / "raychat/linked.py").symlink_to(outside)
+            outside.write_text("PRIVATE_VALUE = 123\n", encoding="utf-8", newline="\n")
+            try:
+                (root / "raychat/linked.py").symlink_to(outside)
+            except OSError as error:
+                code: object = getattr(error, "winerror", None)
+                if os.name == "nt" and code == _ERROR_PRIVILEGE_NOT_HELD:
+                    self.skipTest(
+                        "Unprivileged Windows symlink creation is not required",
+                    )
+                raise
             runtime = Runtime(root)
             bridge = CoreBridge(io.BytesIO(), io.BytesIO())
             bridge.source_root = root
@@ -289,7 +338,11 @@ class CoreToolsTests(TypedTestCase):
             root = Path(temporary)
             (root / "raychat").mkdir()
             code = 'def paint():\n    height = 19\n    label = "LIVE RAY FIELD"\n'
-            (root / "raychat/example.py").write_text(code, encoding="utf-8")
+            (root / "raychat/example.py").write_text(
+                code,
+                encoding="utf-8",
+                newline="\n",
+            )
             bridge = CoreBridge(io.BytesIO(), io.BytesIO())
             bridge.source_root = root
             runtime = Runtime(root)
@@ -310,7 +363,11 @@ class CoreToolsTests(TypedTestCase):
             root = Path(temporary)
             (root / "raychat").mkdir()
             path = root / "raychat/example.py"
-            path.write_text('LABEL = "LIVE RAY FIELD"\n', encoding="utf-8")
+            path.write_text(
+                'LABEL = "LIVE RAY FIELD"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
             output = io.BytesIO()
             bridge = CoreBridge(io.BytesIO(), output)
             bridge.source_root = root
@@ -329,11 +386,21 @@ class CoreToolsTests(TypedTestCase):
                 "query": "LIVE RAY FIELD",
             })
             self.require(found["matches"])
+            match = configuration_fields(
+                array_field(found["matches"], "matches")[0],
+                "source match",
+            )
+            self.equal(match["path"], "raychat/example.py")
+            self.equal(
+                configuration_fields(match["read_action"], "read action")["path"],
+                "raychat/example.py",
+            )
             source = runtime.execute({
                 "action": "core_source",
                 "path": "raychat/example.py",
             })
             self.equal(source["source"], path.read_text(encoding="utf-8"))
+            self.equal(source["path"], "raychat/example.py")
             result = runtime.execute({
                 "action": "core_update",
                 "files": [
@@ -349,6 +416,10 @@ class CoreToolsTests(TypedTestCase):
             runtime.execute({"action": "core_recover", "target": "previous"})
             messages = [decode(line + b"\n") for line in output.getvalue().splitlines()]
             self.equal([message["kind"] for message in messages], ["update", "recover"])
+            self.equal(
+                set(configuration_fields(messages[0]["changes"], "changes")),
+                {"raychat/example.py"},
+            )
             runtime.close()
 
     def test_invalid_edits_never_reach_supervisor(self) -> None:
@@ -359,6 +430,7 @@ class CoreToolsTests(TypedTestCase):
             (root / "raychat/example.py").write_text(
                 "x = 'same same'\n",
                 encoding="utf-8",
+                newline="\n",
             )
             output = io.BytesIO()
             bridge = CoreBridge(io.BytesIO(), output)

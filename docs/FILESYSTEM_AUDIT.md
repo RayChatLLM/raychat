@@ -311,6 +311,11 @@ and native security-software/deployment tests.
 
 ## Original requirement ledger
 
+Native evidence labeled **CI dea3fe4** below refers to the fully successful
+[PR run 36158695935](https://github.com/RayChatLLM/raychat/actions/runs/36158695935).
+It proves the selected tests on that revision; later changes still require their
+own CI run, and hosted Windows success does not prove ordinary-user privileges.
+
 | # | Requirement | Evidence / remaining work |
 | --- | --- | --- |
 | 1 | Find every place the project touches files. | Pending full audit; see subsystem inventory above. |
@@ -331,10 +336,10 @@ and native security-software/deployment tests.
 | 16 | Retry publication of the same completed source. | Test verifies identical source path/content across Win32 5/32/33 retries. |
 | 17 | Track whether publication already happened. | Shared publication has no post-success durability step; cleanup errors are reported separately. Release-folder double-failure tests retain original backups; recorded commit decisions prevent rollback after interrupted success. Process-kill recovery also covers partial cleanup. |
 | 18 | Keep read handles short-lived. | Pending full audit; see subsystem inventory above. |
-| 19 | Distinguish shared reading from shared deletion. | Native child-reader test distinguishes POSIX old-inode reads from Windows replacement denial; Windows execution pending. |
+| 19 | Distinguish shared reading from shared deletion. | Native child-reader tests passed on Windows, Linux and macOS in CI dea3fe4, distinguishing POSIX old-inode reads from Windows replacement denial. |
 | 20 | Audit hidden handle owners. | Pending full audit; see subsystem inventory above. |
-| 21 | Give memory mappings their own lifecycle. | Native mmap lifecycle test passes on macOS; Windows execution pending. No runtime mmap consumers found. |
-| 22 | Control subprocess lifetimes and handle inheritance. | Download/transport, command helpers, clipboard and supervised-core/validator lifetimes reviewed above. Existing termination, inherited-pipe and cancellation tests exercise these paths locally; native Windows acceptance remains pending. |
+| 21 | Give memory mappings their own lifecycle. | Native read-only/mmap lifecycle tests passed on all three operating systems in CI dea3fe4. No runtime mmap consumers were found in the existing inventory. |
+| 22 | Control subprocess lifetimes and handle inheritance. | Download/transport, command helpers, clipboard and supervised-core/validator lifetimes reviewed above. Native CI dea3fe4 passed Windows Job Object tests and POSIX termination/inherited-pipe tests; wider owner-lifetime review remains. |
 | 23 | Use immutable versions for long-lived readers. | Plugin runtimes retain private captured generations. Generated catalog profiles pin immutable catalogs and archives, retained for old readers. Remaining subsystems still need lifetime review. |
 | 24 | Choose the concurrency contract explicitly. | Pending full audit; see subsystem inventory above. |
 | 25 | Use a stable sidecar lock. | Memory/workspace/evidence and package writer sidecars are stable. Broader reader coordination remains. |
@@ -356,7 +361,7 @@ and native security-software/deployment tests.
 | 41 | Preserve the primary failure. | Stage failures and owned-directory cleanup retain the primary error. Package rollback preserves publication failures and original backups. Session run/cancellation survives shutdown failure; host cleanup failure survives a second journal cleanup failure. Composition initialization failures survive runtime cleanup failure. Secondary cleanup errors are logged, and cleanup-only failures propagate. Other callers and higher-level paths remain to audit. |
 | 42 | Audit `rmtree()` error handling. | Runtime ignore_errors=True sites migrated to bounded, logged cleanup; remaining strict teardown paths need audit. |
 | 43 | Design orphan recovery. | Package restart recovery reclaims only exact journal-owned containers after acquiring the scope lock; a live parent can reclaim its recorded child stage after reaping. Unknown stages and pre-journal allocations are deliberately retained. Other subsystem recovery paths still need review. |
-| 44 | Use approved, configurable application-data locations. | Pending full audit; see subsystem inventory above. |
+| 44 | Use approved, configurable application-data locations. | Absolute storage.home_directory, default sessions, trust state and explicit session-directory overrides are exercised through the shipped launcher on all three operating systems in CI dea3fe4. Remaining application-data locations still need inventory review. |
 | 45 | Test with antivirus and relevant index/sync software enabled. | Pending full audit; see subsystem inventory above. |
 | 46 | Distinguish security policy from contention. | Pending full audit; see subsystem inventory above. |
 | 47 | Keep read-only handling opt-in. | Only the private stage receives chmod; no live permission repair. Access-denied test verifies this. |
@@ -364,21 +369,21 @@ and native security-software/deployment tests.
 | 49 | Use `Path` and string paths consistently. | Sole runtime chdir is confined to a one-request worker with a filesystem-independent liveness watcher. Remaining path construction inventory still under review. |
 | 50 | Generate portable, collision-safe names. | Optimization IDs now use bounded digest components of typed checkpoint keys. Integration verifies hostile, long and case-colliding IDs remain confined and distinct. Other generated-name sites still need review. |
 | 51 | Do not use `normcase()` as a universal identity test. | Removed all production normcase calls. Skills and existing export paths use samefile; missing export paths conservatively reject case-folded spelling collisions. No race-free identity claim. |
-| 52 | Test long paths in the executable actually shipped. | Pending full audit; see subsystem inventory above. |
+| 52 | Test long paths in the executable actually shipped. | The actual extracted launcher ran with Unicode installation/configuration/workspace/data/session paths longer than 320 characters on Windows, Linux and macOS, Python 3.10/3.12/3.14, in CI dea3fe4. The launch working directory stays short because Windows CreateProcess has a separate limit; no path-prefix or OS-setting changes are used. |
 | 53 | Choose encoding and newlines explicitly. | Runtime/plugin read_text calls, including generated evaluation scripts, specify encoding. Four embedded default-encoding reads were corrected to UTF-8. Broader tooling/newline audit remains. |
-| 54 | Define symlink and junction behavior. | Snapshot link rejection and explicit workspace in-root resolution documented; symlink tests pass locally. Release cleanup skips directory links/reparse points and rejects linked cache entries. A real Windows junction fixture is selected in CI; execution and wider junction coverage remain pending. |
+| 54 | Define symlink and junction behavior. | Snapshot endpoint rejection and intentional in-root resolution are documented. Real Windows package, bootstrap and cleanup junction fixtures passed in CI dea3fe4. Wider source/configuration traversal and link policy review remains. |
 | 55 | State the guarantee precisely. | One-file visibility, serialization and power-loss durability are explicitly distinguished. |
 | 56 | Implement durability to the actual requirement. | Snapshot flush/fsync/close is implemented; parent-directory durability is not claimed. |
 | 57 | Do not treat several replacements as one transaction. | Packages use an undo journal and commit decision, including profile membership with installed packages. Candidate file batches now have their own undo/commit record and restart recovery before source capture. Catalog profiles pin immutable metadata and archives, published before the profile pointer. Process termination and interleaved catalog builders are tested. Remaining multi-file subsystems still need review. |
 | 58 | Keep live databases and logs out of generic replacement helpers. | Session/HTTP/evidence logs retain append protocol. Shared append never retries a partial append. |
 | 59 | Validate nonlocal storage separately. | Network/synchronized storage not validated; excluded from the local-filesystem guarantee. |
-| 60 | Native platform coverage: | macOS Python 3.12: 993 tests passed before the latest snapshot-startup and planning/metadata fixes; the current changes have 156 focused tests and coverage on Python 3.10.19/3.14.3 below. Linux containers at UID 65534: 206 tests passed on each of Python 3.10.21 and 3.14.7 from archive 9. GitHub Actions Windows 3.10/3.12/3.14 passed for committed baseline 1a7d2a3; execution of the current uncommitted changes remains outstanding. |
-| 61 | Reader contention: | Child-held destination and staged-source tests pass locally; native Windows execution pending. |
+| 60 | Native platform coverage: | CI dea3fe4 passed all nine Windows/Linux/macOS and Python 3.10/3.12/3.14 combinations, plus 1,074 complete Linux unit tests. Native subprocess tests are included. Prior Linux UID 65534 and macOS ordinary-user evidence is recorded below; ordinary-privilege Windows acceptance remains unproven on hosted runneradmin. |
+| 61 | Reader contention: | Child-held destination and staged-source publication tests passed on Windows, Linux and macOS in CI dea3fe4. They use pipe ordering, assert bounded Windows failure with old bytes intact, then successful publication after reader close. |
 | 62 | Competing writers: | Thread and four-process increments verified; stale memory instances preserve IDs/updates. Broader snapshot-reader stress pending. |
-| 63 | Lock recovery: | Killed native holder, thread contention and accidental reentry tested locally; native Windows still pending. |
+| 63 | Lock recovery: | Killed native lock holder, thread contention and accidental reentry passed on all three operating systems in CI dea3fe4; recovery retains the persistent sidecar. |
 | 64 | Failure and crash boundaries: | Stage fault injection and process termination covered. Package writers are killed after backup, new tree, receipt, commit record and rollback moves; new managers recover from disk and leave unrelated work intact. Candidate writers and recovery workers are also killed at journal, replacement, commit, restore and cleanup boundaries. Portable-folder writers are now killed at journal, backup, publication, decision, rollback and partial-cleanup boundaries; coordinated access recovers exact recorded trees. Other application reclamation remains pending. |
 | 65 | Cleanup contention: | Mocked transient/permanent Win32 deletion denial, cleanup-only error 145 and primary-failure preservation tested. Native Windows deletion contention remains pending. |
-| 66 | Environment and path edges: | Unicode, missing parents, read-only, mmap, symlinks and mocked disk-full/cross-volume covered. Other path/environment gates pending. |
+| 66 | Environment and path edges: | CI dea3fe4 covers Unicode, missing parents, read-only files, mmap, links/junctions, long-path launcher execution, and mocked disk-full/cross-volume failures. Actual denied directories and cross-volume acceptance remain open. |
 | 67 | Deployment conditions: | Native deployment/software validation outstanding; no exclusions or permission workarounds introduced. |
 
 ## Platform references
@@ -1664,3 +1669,42 @@ from the Linux archive
 `dc266244bd689d5b294a71654a8256513cdf0fe5a99f056291157a006ffe4dda`.
 Explicit LF attributes now cover both inputs. The builder continues to preserve
 captured source bytes; no platform-dependent rewriting is added to Python code.
+
+### Configuration capture and core diagnostic reads (2026-09-25)
+
+Configuration loading now uses the shared regular-file reader with endpoint links
+rejected. The initial byte bound is the observed file size plus one, because the
+configuration document supplies its own `limits.max_config_bytes`; that configured
+limit remains validated after parsing. A changed length fails capture. The opened
+descriptor is checked before reading, including a FIFO substituted after path
+inspection, and closes before JSON parsing or plugin/profile expansion. Operator
+configuration must be quiescent during startup: this does not make an external
+editor participate in a lock protocol or guarantee a snapshot under arbitrary
+same-size in-place writes. Read failures are not retried; native OS exceptions
+retain the existing ConfigurationError chain, and no file is modified by loading.
+
+Core status uses the same helper to read at most the last 24,000 diagnostic bytes,
+seeking and reading on one regular-file descriptor. A missing diagnostic remains
+an empty status field; other read failures propagate. UTF-8 decoding replaces a
+partial or invalid character at the suffix boundary. The reader closes before
+returning status, allowing immediate retirement of the diagnostic file on Windows.
+Concurrent append can expose an incomplete diagnostic line, which is acceptable
+for this display-only suffix; it is not replayed as an operation or state record.
+
+Core source result paths, suggested read actions and supervisor update keys now
+serialize with `Path.as_posix()`. Actual filesystem paths remain native Path
+objects. Existing end-to-end source/edit tests now assert every serialized key,
+and configuration/core-tool tests are included in the native CI matrix. This
+closes the separator mismatch at the core-update wire boundary; broader source
+traversal and source-read lifetime review remains open.
+
+Regression coverage includes replacing a configuration from inside its parser,
+file growth during capture, a bounded child that replaces the selected file with
+a FIFO after inspection, and immediate diagnostic retirement/missing-file reads.
+The FIFO test is POSIX-specific. Existing endpoint link tests remain; Windows
+symlink creation is skipped only when Windows explicitly denies that privilege.
+
+The 25 focused configuration/core-tool tests pass on macOS Python 3.10.19
+(2.369 seconds) and 3.14.3 (2.555 seconds). Strict typing, lint and formatting
+pass without suppressions in `build/filesystem-quality-82/report.json`. Updated
+native CI is the next gate; the prior CI evidence above is not a substitute.
