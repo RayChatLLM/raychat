@@ -7,15 +7,16 @@ import hashlib
 import io
 import json
 import sys
-import tempfile
 import tokenize
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from typing import TextIO
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from raychat.filesystem import run_filesystem_task
+from tools.checker_process import CheckerWorkspace
 
 _MYPY_CONFIGURATION = """[mypy]
 python_version = 3.10
@@ -174,25 +175,17 @@ def _suppression_directives(root: Path, paths: tuple[Path, ...]) -> list[str]:
     return violations
 
 
-def _open_log(path: Path) -> TextIO:
-    return path.open("w", encoding="utf-8")
-
-
-async def _check(root: Path, report: Path, name: str, args: list[str]) -> Check:
+async def _check(
+    workspace: CheckerWorkspace,
+    root: Path,
+    report: Path,
+    name: str,
+    args: list[str],
+) -> Check:
     command = (sys.executable, "-m", *args)
     log = report / f"{name}.txt"
-    stream = await asyncio.to_thread(_open_log, log)
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=root,
-            stdout=stream,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        returncode = await process.wait()
-    finally:
-        await asyncio.to_thread(stream.close)
-    return Check(name, command, returncode, str(log))
+    output = await workspace.run(command, root, log=log)
+    return Check(name, command, output.returncode, str(log))
 
 
 async def _run_checks(root: Path, report: Path, paths: tuple[Path, ...]) -> list[Check]:
@@ -205,16 +198,17 @@ async def _run_checks(root: Path, report: Path, paths: tuple[Path, ...]) -> list
     )
     launcher = root / "raychat.py"
     sources = [str(path) for path in paths]
-    with tempfile.TemporaryDirectory(
+    async with CheckerWorkspace(
         prefix="raychat-strict-verification-",
-    ) as directory:
-        temporary = Path(directory)
+    ) as workspace:
+        temporary = workspace.path
         copied_launcher = temporary / "raychat_launcher.py"
         source_bytes = await asyncio.to_thread(launcher.read_bytes)
-        await asyncio.to_thread(copied_launcher.write_bytes, source_bytes)
+        await run_filesystem_task(lambda: copied_launcher.write_bytes(source_bytes))
         mypy = ["mypy", "--config-file", str(configuration)]
         checks = await asyncio.gather(
             _check(
+                workspace,
                 root,
                 report,
                 "mypy",
@@ -226,6 +220,7 @@ async def _run_checks(root: Path, report: Path, paths: tuple[Path, ...]) -> list
                 ],
             ),
             _check(
+                workspace,
                 root,
                 report,
                 "mypy-launcher",
@@ -237,6 +232,7 @@ async def _run_checks(root: Path, report: Path, paths: tuple[Path, ...]) -> list
                 ],
             ),
             _check(
+                workspace,
                 root,
                 report,
                 "ruff",
@@ -263,6 +259,7 @@ async def _run_checks(root: Path, report: Path, paths: tuple[Path, ...]) -> list
                 ],
             ),
             _check(
+                workspace,
                 root,
                 report,
                 "format",
