@@ -14,7 +14,9 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
+from raychat.filesystem import read_regular
 from raychat.validation import json_object, object_field
+from tests.assertions import TypedTestCase
 from tests.plugin_support import package
 from tests.test_package_system import PackageTestCase
 from tests.transport_support import captured, require
@@ -24,6 +26,7 @@ from tools.smoke_process import SmokeCommand, run_checked
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _LONG_PATH_MINIMUM = 320
+_SYMLINK_PRIVILEGE_MISSING = 1314
 _PATH_PROBE = """
 from contextlib import closing
 from raychat.filesystem import write_bytes
@@ -47,6 +50,204 @@ def register(api):
     api.register_provider('path_probe', lambda args, environment:
         lambda messages: '{"action":"done","message":"offline"}')
 """
+
+
+class PortableSourceTests(TypedTestCase):
+    """Reject unsafe builder inputs before opening or traversing them."""
+
+    def test_allowlist_rejects_nonportable_names_and_collisions(self) -> None:
+        """Apply the same portable path contract to the explicit source list."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Code.py").write_bytes(b"pass\n")
+            for names in (("../outside",), ("NUL",), ("Code.py", "code.py")):
+                with (
+                    self.subTest(names=names),
+                    mock.patch.object(build_portable, "SOURCE_FILES", names),
+                    self.rejected(RuntimeError, "Unsafe source allowlist"),
+                ):
+                    build_portable.source_data(root)
+
+    def test_source_read_rejects_growth_and_same_size_replacement(self) -> None:
+        """A changed pathname cannot masquerade as the captured source version."""
+        for replacement in (b"longer content", b"new"):
+            with (
+                self.subTest(replacement=replacement),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory).resolve()
+                source = root / "source.txt"
+                source.write_bytes(b"old")
+                observed: list[tuple[int, bool]] = []
+
+                def changed(
+                    path: Path,
+                    limit: int,
+                    *,
+                    follow_symlinks: bool,
+                    payload: bytes = replacement,
+                    observations: list[tuple[int, bool]] = observed,
+                ) -> bytes:
+                    observations.append((limit, follow_symlinks))
+                    stage = path.with_name("replacement")
+                    stage.write_bytes(payload)
+                    stage.replace(path)
+                    return read_regular(path, limit, follow_symlinks=follow_symlinks)
+
+                with (
+                    mock.patch.object(build_portable, "SOURCE_FILES", ("source.txt",)),
+                    mock.patch.object(
+                        build_portable,
+                        "read_regular",
+                        side_effect=changed,
+                    ),
+                    self.rejected(RuntimeError, "changed while reading"),
+                ):
+                    build_portable.source_data(root)
+                self.equal(observed, [(4, False)])
+                self.equal(source.read_bytes(), replacement)
+
+    def test_release_read_is_bounded_and_extra_files_are_not_opened(self) -> None:
+        """Oversized and unexpected members fail without unbounded reads."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            member = root / "member"
+            member.write_bytes(b"expected" + b"x" * 10000)
+            observed: list[tuple[int, bool]] = []
+
+            def checked(path: Path, limit: int, *, follow_symlinks: bool) -> bytes:
+                observed.append((limit, follow_symlinks))
+                return read_regular(path, limit, follow_symlinks=follow_symlinks)
+
+            with mock.patch.object(build_portable, "read_regular", side_effect=checked):
+                with self.rejected(RuntimeError, "bytes differ"):
+                    build_portable.verify_release_folder(root, {"member": b"expected"})
+                self.equal(observed, [(9, False)])
+                observed.clear()
+                with self.rejected(RuntimeError, "extra file"):
+                    build_portable.verify_release_folder(root, {})
+                self.equal(observed, [])
+            member.replace(root / "closed-member")
+            with self.rejected(RuntimeError, "missing or unsafe"):
+                build_portable.verify_release_folder(root / "missing", {})
+
+    def test_source_rejects_linked_parents_and_endpoints(self) -> None:
+        """Operator-selected roots may resolve links; source descendants may not.
+
+        Raises
+        ------
+        OSError
+            An unexpected fixture creation failure is not a privilege skip.
+
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            (target / "source.txt").write_bytes(b"original")
+            try:
+                (root / "linked").symlink_to(target, target_is_directory=True)
+                (root / "endpoint.txt").symlink_to(target / "source.txt")
+            except OSError as error:
+                code: object = getattr(error, "winerror", None)
+                if code == _SYMLINK_PRIVILEGE_MISSING:
+                    self.skipTest("Windows account lacks symlink privilege")
+                raise
+            for name in ("linked/source.txt", "endpoint.txt"):
+                with (
+                    self.subTest(name=name),
+                    mock.patch.object(build_portable, "SOURCE_FILES", (name,)),
+                    self.rejected(RuntimeError, "unsafe parent|not a regular file"),
+                ):
+                    build_portable.source_data(root)
+            self.equal((target / "source.txt").read_bytes(), b"original")
+
+    def test_fifo_substitution_does_not_block_source_or_release_read(self) -> None:
+        """Replace a checked regular member with a FIFO in a bounded child."""
+        if os.name != "posix":
+            self.skipTest("POSIX FIFO fixture")
+        script = """
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from raychat.filesystem import read_regular
+from tools import build_portable
+root = Path(sys.argv[1]).resolve()
+member = root / 'member'
+def substituted(path, limit, **kwargs):
+    path.unlink()
+    os.mkfifo(path)
+    return read_regular(path, limit, **kwargs)
+for source in (True, False):
+    member.write_bytes(b'original')
+    try:
+        with patch.object(build_portable, 'SOURCE_FILES', ('member',)), \
+                patch.object(build_portable, 'read_regular', side_effect=substituted):
+            if source:
+                build_portable.source_data(root)
+            else:
+                build_portable.verify_release_folder(root, {'member': b'original'})
+    except RuntimeError as error:
+        assert 'unsafe' in str(error), error
+    else:
+        raise AssertionError('FIFO was accepted')
+    member.unlink()
+"""
+        self._child(script)
+
+    def test_windows_junction_is_rejected_before_traversal(self) -> None:
+        """An unprivileged Windows junction never exposes its target to the builder."""
+        if os.name != "nt":
+            self.skipTest("Native Windows junction fixture")
+        script = """
+import _winapi
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from tools import build_portable
+root = Path(sys.argv[1]).resolve()
+source, external = root / 'source', root / 'external'
+source.mkdir()
+external.mkdir()
+(external / 'sentinel').write_bytes(b'untouched')
+junction = source / 'linked'
+_winapi.CreateJunction(str(external), str(junction))
+original_iterdir = Path.iterdir
+def guarded(path):
+    assert path != junction, 'junction was traversed'
+    return original_iterdir(path)
+try:
+    for capture in (True, False):
+        try:
+            with patch.object(Path, 'iterdir', guarded), \
+                    patch.object(build_portable, 'SOURCE_FILES', ('linked/sentinel',)):
+                if capture:
+                    build_portable.source_data(source)
+                else:
+                    build_portable.verify_release_folder(source, {})
+        except RuntimeError as error:
+            assert 'unsafe parent' in str(error) or 'reparse point' in str(error), error
+        else:
+            raise AssertionError('junction was accepted')
+finally:
+    junction.rmdir()
+assert (external / 'sentinel').read_bytes() == b'untouched'
+"""
+        self._child(script)
+
+    @staticmethod
+    def _child(script: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_checked(
+                SmokeCommand(
+                    (sys.executable, "-B", "-S", "-c", script, directory),
+                    PROJECT_ROOT,
+                    dict(os.environ),
+                    15,
+                    4000,
+                ),
+            )
 
 
 class PortableBuildTests(PackageTestCase):

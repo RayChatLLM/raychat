@@ -6,8 +6,10 @@ import os
 import sys
 from pathlib import Path
 
+from raychat.filesystem import read_regular
+
 from .releases import Release
-from .wire import decode, fields
+from .wire import MAX_MESSAGE, decode, fields
 
 
 def retained_state(path: Path) -> dict[str, object]:
@@ -19,7 +21,7 @@ def retained_state(path: Path) -> dict[str, object]:
         The retained conversations and drafts with old queues removed.
 
     """
-    saved = decode(path.read_bytes())
+    saved = decode(read_regular(path, MAX_MESSAGE + 1, follow_symlinks=False))
     saved["pending_input"] = ""
     saved["decoder"] = {
         "buffer": "",
@@ -88,7 +90,7 @@ def prepare() -> None:
         message = "--core-version requires previous or known-good."
         raise ValueError(message)
     manifest = directory / "recovery.json"
-    saved = decode(manifest.read_bytes())
+    saved = decode(read_regular(manifest, MAX_MESSAGE + 1, follow_symlinks=False))
     target = release(saved["known_good" if version == "known-good" else "previous"])
     arguments: object = saved["argv"]
     if not isinstance(arguments, list) or not all(

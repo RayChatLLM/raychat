@@ -22,6 +22,9 @@ from typing import TYPE_CHECKING, TypedDict
 from raychat.configuration import SETTINGS
 from raychat.filesystem import (
     OwnedTemporaryDirectory,
+    PortablePathIndex,
+    is_link_or_reparse_point,
+    read_regular,
     write_bytes,
 )
 from tools import release_folder
@@ -48,6 +51,39 @@ _LF_SUFFIXES = frozenset(SETTINGS.release.lf_suffixes)
 _LF_NAMES = frozenset(SETTINGS.release.lf_names)
 
 
+def _source_version(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _source_bytes(root: Path, relative: PurePosixPath) -> bytes:
+    source = root
+    for part in relative.parts[:-1]:
+        source /= part
+        if is_link_or_reparse_point(source) or not source.is_dir():
+            raise RuntimeError(
+                "Allowlisted source has an unsafe parent: " + str(source),
+            )
+    source /= relative.name
+    try:
+        before = source.lstat()
+    except FileNotFoundError:
+        raise RuntimeError("Allowlisted source is missing: " + str(relative)) from None
+    if not stat.S_ISREG(before.st_mode) or is_link_or_reparse_point(source):
+        raise RuntimeError("Allowlisted source is not a regular file: " + str(relative))
+    try:
+        data = read_regular(source, before.st_size + 1, follow_symlinks=False)
+    except ValueError as error:
+        raise RuntimeError(
+            "Allowlisted source changed or is unsafe: " + str(relative),
+        ) from error
+    if (
+        _source_version(before) != _source_version(source.lstat())
+        or len(data) != before.st_size
+    ):
+        raise RuntimeError("Allowlisted source changed while reading: " + str(relative))
+    return data
+
+
 def source_data(root: Path) -> dict[str, bytes]:
     """Read only the exact allowlisted regular files with canonical text endings.
 
@@ -66,28 +102,18 @@ def source_data(root: Path) -> dict[str, bytes]:
         error_message = "SOURCE_FILES must remain sorted for reviewability."
         raise RuntimeError(error_message)
 
+    root = root.resolve()
+    index = PortablePathIndex()
     result: dict[str, bytes] = {}
     for relative in SOURCE_FILES:
-        portable = PurePosixPath(relative)
-        if (
-            portable.is_absolute()
-            or ".." in portable.parts
-            or portable.as_posix() != relative
-        ):
-            error_message = f"Unsafe source allowlist path: {relative!r}"
-            raise RuntimeError(error_message)
-        source = root.joinpath(*portable.parts)
         try:
-            metadata = source.lstat()
-        except FileNotFoundError:
-            error_message = f"Allowlisted source is missing: {relative}"
-            raise RuntimeError(error_message) from None
-        if not stat.S_ISREG(metadata.st_mode) or source.is_symlink():
-            error_message = f"Allowlisted source is not a regular file: {relative}"
-            raise RuntimeError(error_message)
-        data = source.read_bytes()
+            portable = index.add(relative)
+        except ValueError as error:
+            error_message = f"Unsafe source allowlist path: {relative!r}"
+            raise RuntimeError(error_message) from error
+        data = _source_bytes(root, portable)
         if (
-            source.suffix.casefold() in _LF_SUFFIXES or source.name in _LF_NAMES
+            portable.suffix.casefold() in _LF_SUFFIXES or portable.name in _LF_NAMES
         ) and b"\r" in data:
             error_message = (
                 f"Text source contains a carriage return: {relative}; "
@@ -281,6 +307,17 @@ def atomic_write(path: Path, data: bytes, protected: set[Path]) -> None:
     write_bytes(path, data)
 
 
+def _release_member(item: Path, relative: str, expected: dict[str, bytes]) -> bytes:
+    if relative not in expected:
+        raise RuntimeError("Release folder contains an extra file: " + relative)
+    try:
+        return read_regular(item, len(expected[relative]) + 1, follow_symlinks=False)
+    except ValueError as error:
+        raise RuntimeError(
+            "Release member changed or is unsafe: " + relative,
+        ) from error
+
+
 def verify_release_folder(path: Path, expected: dict[str, bytes]) -> None:
     """Verify that a release directory contains exactly the expected files.
 
@@ -290,17 +327,23 @@ def verify_release_folder(path: Path, expected: dict[str, bytes]) -> None:
         If the operation violates its validation or integrity contract.
 
     """
-    if path.is_symlink() or not path.is_dir():
+    if not path.is_dir() or is_link_or_reparse_point(path):
         error_message = f"Release folder is missing or unsafe: {path}"
         raise RuntimeError(error_message)
     actual: dict[str, bytes] = {}
-    for item in sorted(path.rglob("*")):
-        if item.is_symlink():
-            error_message = f"Release folder contains a symlink: {item}"
+    pending = [path]
+    while pending:
+        item = pending.pop()
+        info = item.lstat()
+        if is_link_or_reparse_point(item):
+            error_message = f"Release folder contains a link or reparse point: {item}"
             raise RuntimeError(error_message)
-        if item.is_file():
-            actual[item.relative_to(path).as_posix()] = item.read_bytes()
-        elif not item.is_dir():
+        if stat.S_ISDIR(info.st_mode):
+            pending.extend(sorted(item.iterdir(), reverse=True))
+        elif stat.S_ISREG(info.st_mode):
+            relative = item.relative_to(path).as_posix()
+            actual[relative] = _release_member(item, relative, expected)
+        else:
             error_message = f"Release folder contains a special file: {item}"
             raise RuntimeError(error_message)
     if actual.keys() != expected.keys():
