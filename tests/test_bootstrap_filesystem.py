@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import sys
 import tempfile
@@ -12,12 +13,13 @@ from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat.filesystem import read_regular, remove_tree
+from raychat.type_support import override
 from raychat_bootstrap import recovery, releases
 from raychat_bootstrap import supervisor as supervisor_module
 from raychat_bootstrap.releases import Release, Releases
 from raychat_bootstrap.wire import decode, encode
 from tests.assertions import TypedTestCase
-from tests.test_live_recovery_qa import RecoveryHarness
+from tests.test_live_recovery_qa import RecordingCore, RecoveryHarness
 from tools.smoke_process import SmokeCommand, run_checked
 
 if TYPE_CHECKING:
@@ -51,6 +53,18 @@ class _Harness(RecoveryHarness):
 
     async def launch_core(self) -> Core:
         return await self._launch(self.initial, None)
+
+
+class _CloseFailingLog(io.BytesIO):
+    closes = 0
+
+    @override
+    def close(self) -> None:
+        if not self.closed:
+            self.closes += 1
+            super().close()
+            message = "secondary log close"
+            raise OSError(message)
 
 
 class _Gate:
@@ -277,6 +291,66 @@ else:
 
 class BootstrapFilesystemTests(TypedTestCase):
     """Exercise the real capture, launch and validation ownership boundaries."""
+
+    def test_failed_launch_preserves_primary_after_log_close_error(self) -> None:
+        """The private stderr stream closes even when child creation fails."""
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = _Harness(Path(directory))
+            log = _CloseFailingLog()
+            primary = OSError("primary spawn failure")
+            with (
+                mock.patch.object(Path, "open", return_value=log) as opened,
+                mock.patch.object(Release, "verify"),
+                mock.patch.object(supervisor, "_changed_plugins", return_value=False),
+                mock.patch(
+                    "asyncio.create_subprocess_exec",
+                    new=mock.AsyncMock(side_effect=primary),
+                ),
+                self.assertLogs("raychat_bootstrap.supervisor", level="ERROR") as logs,
+                self.rejected(OSError, "primary spawn failure"),
+            ):
+                asyncio.run(supervisor.launch_core())
+            opened.assert_called_once_with("xb")
+            self.require(log.closed)
+            self.equal(log.closes, 1)
+            self.equal(supervisor.children, [])
+            self.require("secondary log close" in "\n".join(logs.output))
+
+    def test_shutdown_failure_survives_log_close_but_success_does_not_hide_it(
+        self,
+    ) -> None:
+        """Waiting and closing retain their separate failure policies."""
+        for failed in (True, False):
+            with (
+                self.subTest(failed=failed),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                supervisor = _Harness(Path(directory))
+                core = RecordingCore(
+                    supervisor.initial,
+                    returncode=None if failed else 0,
+                )
+                log = _CloseFailingLog()
+                core.log = log
+                failure = OSError("primary wait failure")
+                with (
+                    mock.patch.object(
+                        core.process_model,
+                        "wait",
+                        new=mock.AsyncMock(side_effect=failure),
+                    ),
+                    mock.patch(
+                        "raychat_bootstrap.supervisor.logging.getLogger",
+                    ) as logger,
+                    self.rejected(
+                        OSError,
+                        "primary wait" if failed else "secondary log",
+                    ),
+                ):
+                    asyncio.run(supervisor.stop_core(core))
+                self.require(log.closed)
+                self.equal(log.closes, 1)
+                self.equal(logger.call_count, 1 if failed else 0)
 
     def test_cancelled_capture_and_overlay_join_their_writers(self) -> None:
         """A cancelled transition cannot leave a capture or overlay writer active."""

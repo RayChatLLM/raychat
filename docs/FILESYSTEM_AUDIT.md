@@ -1962,3 +1962,38 @@ permission changes or retrying the build. Six regression tests cover nonportable
 names, case collisions, source growth/replacement, bounded verification reads,
 linked parents/endpoints, FIFO substitution and native Windows junctions. They
 join the shared native selection; current-follow-up CI validation is pending.
+
+### Descriptor cleanup, CLI outcomes and configured skill reads
+
+Shared stage, read, append, journal, transcript and lock initialization closes a
+raw descriptor once if wrapping or validation fails. A secondary close error is
+logged with its path while the original failure propagates; stage cleanup is
+still attempted. Raw close is never retried because the descriptor number may
+already have been reused. Owned read/append streams and lock contexts likewise
+preserve an existing operation failure; a close failure after successful work
+still propagates. Four regression tests exercise these combined failures and
+verify actual descriptor release, unchanged destination bytes and surviving
+sidecars. This is error precedence, not a claim that every failed close releases
+its resource successfully.
+
+CLI failure/cancellation codes are preserved through worker and resource shutdown,
+including status 130 returned without an active exception. Secondary shutdown
+errors are logged. Successful work followed by failed shutdown still returns an
+error. Tests join the real worker before injecting its shutdown failure and
+cover raised failures, interrupts, returned failures and success. Supervisor
+child logs use exclusive creation and retain launch/wait failures if log close
+also fails; independent close failures continue to propagate.
+
+Skill discovery uses bounded regular-descriptor reads and closes before decoding.
+Explicit roots, immediate child directories and skill files may intentionally
+follow operator-selected links. Existing-file deduplication uses samefile, with
+no reservation or hostile-parent guarantee. No read retry is added. Three tests
+cover replacement during decoding, deliberate aliases and bounded FIFO
+substitution. The bundled immutable skill archive and catalog/profile graph are
+rebuilt from this source. The shared native suite includes skill discovery and
+bootstrap ownership tests, including both standard Windows/Defender jobs.
+
+Local Python 3.10 and 3.14 each passed 103 focused filesystem, transcript, CLI,
+bootstrap and skill tests (one native-Windows-only skip). Strict typing, lint and
+formatting passed in `build/filesystem-quality-104`. Native CI for this follow-up
+is required before claiming its acceptance.

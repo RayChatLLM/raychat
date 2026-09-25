@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +13,7 @@ from unittest import mock
 
 from raychat.type_support import override
 from tests.plugin_support import plugin_module
+from tools.smoke_process import SmokeCommand, run_checked
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -197,6 +200,88 @@ class SkillStoreTests(_SkillsAssertions):
         store = _rc_skills.SkillStore.discover([skill_file, skill_file])
         self.equal(len(store), 1)
         self.check(condition="café" in store.get("one").content)
+
+    def test_skill_descriptor_closes_before_parsing(self) -> None:
+        """Parsing may replace the source after its bounded bytes are captured."""
+        source = self.write_skill("one", "# Original\n")
+
+        def replaced(raw: bytes, path: Path) -> _rc_skills.Skill:
+            replacement = path.with_name("replacement")
+            replacement.write_bytes(b"# Updated\n")
+            replacement.replace(path)
+            return _rc_skills.Skill(
+                "one",
+                "Original",
+                raw.decode("utf-8"),
+                path.resolve(),
+            )
+
+        with mock.patch.object(_rc_skills, "_decode_skill", replaced):
+            store = _rc_skills.SkillStore.discover([source])
+        self.equal(store.get("one").content, "# Original\n")
+        self.equal(source.read_bytes(), b"# Updated\n")
+
+    def test_configured_directory_and_file_links_are_supported(self) -> None:
+        """Explicit operator aliases still deduplicate by existing file identity.
+
+        Raises
+        ------
+        OSError
+            Unexpected fixture errors are not treated as missing privileges.
+
+        """
+        source = self.write_skill("one", "---\nname: original\n---\n# Original\n")
+        alias = self.root / "alias"
+        selected = self.root / "selected" / "SKILL.md"
+        selected.parent.mkdir()
+        try:
+            alias.symlink_to(source.parent, target_is_directory=True)
+            selected.symlink_to(source)
+        except OSError as error:
+            code: object = getattr(error, "winerror", None)
+            privilege_missing = 1314
+            if code == privilege_missing:
+                self.skipTest("Windows account lacks symlink privilege")
+            raise
+        store = _rc_skills.SkillStore.discover([source, alias, selected])
+        self.equal(len(store), 1)
+        self.equal(store.get("original").source, source.resolve())
+
+    def test_fifo_substitution_cannot_block_skill_discovery(self) -> None:
+        """A bounded child swaps a discovered regular file immediately before open."""
+        if os.name != "posix":
+            self.skipTest("POSIX FIFO fixture")
+        script = """
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from raychat.filesystem import read_regular
+from tests.plugin_support import plugin_module
+store = plugin_module('skills.store')
+source = Path(sys.argv[1]) / 'SKILL.md'
+source.write_bytes(b'# Original\\n')
+def replaced(path, limit):
+    path.unlink()
+    os.mkfifo(path)
+    return read_regular(path, limit)
+try:
+    with patch.object(store, 'read_regular', replaced):
+        store.SkillStore.discover([source])
+except ValueError as error:
+    assert 'regular file' in str(error), error
+else:
+    raise AssertionError('FIFO was accepted')
+"""
+        run_checked(
+            SmokeCommand(
+                (sys.executable, "-B", "-S", "-c", script, str(self.root)),
+                Path(__file__).resolve().parents[1],
+                dict(os.environ),
+                15,
+                4000,
+            ),
+        )
 
     def test_hard_linked_skill_alias_is_deduplicated(self) -> None:
         """Existing-file identity, not spelling, determines duplicate paths."""

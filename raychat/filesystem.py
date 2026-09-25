@@ -48,6 +48,7 @@ _CLEANUP_ERRORS = _SHARING_ERRORS | {145}
 _LOCK_ERRORS = frozenset({errno.EACCES, errno.EAGAIN, errno.EDEADLK})
 WORKSPACE_STAGE_PREFIX = ".raychat-candidate-"
 _Result = TypeVar("_Result")
+_Stream = TypeVar("_Stream", bound="_Closeable")
 _COMPONENT_BYTES = 255
 _CONTROL_END = 32
 _ALLOCATION_ATTEMPTS = 8
@@ -60,6 +61,33 @@ _DEVICE_NAMES = frozenset({
     "CONOUT$",
     *(prefix + digit for prefix in ("COM", "LPT") for digit in "123456789¹²³"),
 })
+
+
+class _Closeable(Protocol):
+    def close(self) -> None: ...
+
+
+@contextmanager
+def _owned_stream(stream: _Stream) -> Iterator[_Stream]:
+    try:
+        yield stream
+    except BaseException:
+        _close_after_failure(stream)
+        raise
+    else:
+        stream.close()
+
+
+def _close_descriptor_after_failure(descriptor: int, path: Path) -> None:
+    # Never retry close: even a failed close may have released the descriptor,
+    # and its number could already identify a different owner's newly opened file.
+    try:
+        os.close(descriptor)
+    except OSError:
+        _LOG.exception(
+            "Descriptor close failed after initialization failure path=%r",
+            str(path),
+        )
 
 
 def portable_relative_path(name: str) -> PurePosixPath:
@@ -471,7 +499,7 @@ def append_owned(path: Path, data: bytes) -> None:
     failure may leave an incomplete final record; readers must tolerate that tail.
 
     """
-    with _open_append(path, readable=False) as stream:
+    with _owned_stream(_open_append(path, readable=False)) as stream:
         _append_all(stream, data)
 
 
@@ -492,7 +520,7 @@ def append_record(path: Path, data: bytes) -> None:
     if not data.endswith(b"\n") or b"\n" in data[:-1]:
         message = "A log record must contain exactly one terminating newline."
         raise ValueError(message)
-    with _open_append(path, readable=True) as stream:
+    with _owned_stream(_open_append(path, readable=True)) as stream:
         discarded = _trim_incomplete_record(stream)
         if discarded:
             _LOG.warning(
@@ -517,7 +545,7 @@ def _open_append(path: Path, *, readable: bool) -> FileIO:
         _require_regular(descriptor)
         return FileIO(descriptor, "ab+" if readable else "ab")
     except BaseException:
-        os.close(descriptor)
+        _close_descriptor_after_failure(descriptor, path)
         raise
 
 
@@ -614,14 +642,14 @@ def read_regular(
         _require_regular(descriptor, expected)
         stream = os.fdopen(descriptor, "rb")
         descriptor = -1
-        with stream:
+        with _owned_stream(stream):
             if from_end:
                 size = stream.seek(0, os.SEEK_END)
                 stream.seek(max(0, size - limit))
             return stream.read(limit)
     finally:
         if descriptor >= 0:
-            os.close(descriptor)
+            _close_descriptor_after_failure(descriptor, path)
 
 
 def _require_regular(descriptor: int, expected: os.stat_result | None = None) -> None:
@@ -667,7 +695,7 @@ def open_journal(path: Path, *, create: bool, mode: int = 0o600) -> BinaryIO:
         _require_regular(descriptor, expected)
         return os.fdopen(descriptor, "r+b")
     except BaseException:
-        os.close(descriptor)
+        _close_descriptor_after_failure(descriptor, path)
         raise
 
 
@@ -694,7 +722,7 @@ def _open_stage(destination: Path) -> tuple[BinaryIO, Path]:
     try:
         return os.fdopen(descriptor, "wb"), temporary
     except BaseException:
-        os.close(descriptor)
+        _close_descriptor_after_failure(descriptor, temporary)
         _cleanup_stage(temporary)
         raise
 
@@ -706,7 +734,7 @@ def _cleanup_stage(temporary: Path) -> None:
         _LOG.exception("Owned stage remains path=%r", str(temporary))
 
 
-def _close_after_failure(stream: BinaryIO) -> None:
+def _close_after_failure(stream: _Closeable) -> None:
     try:
         stream.close()
     except OSError:
@@ -1001,12 +1029,12 @@ class FileLock:
         try:
             stream = FileIO(descriptor, "r+")
         except BaseException:
-            os.close(descriptor)
+            _close_descriptor_after_failure(descriptor, self.path)
             raise
         try:
             self._claim(stream)
         except BaseException:
-            stream.close()
+            _close_after_failure(stream)
             raise
         self.stream = stream
         return self
@@ -1047,8 +1075,11 @@ class FileLock:
         _exc: BaseException | None,
         _traceback: TracebackType | None,
     ) -> None:
-        """Release without suppressing the caller's exception."""
-        self.close()
+        """Release once, preserving an existing failure if close also fails."""
+        if _exc is None:
+            self.close()
+        else:
+            _close_after_failure(self)
 
 
 class _AppendLog(TextIOWrapper):
@@ -1127,12 +1158,7 @@ def _open_transcript(path: Path, mode: int) -> BinaryIO:
         return stream
     finally:
         if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                _LOG.exception(
-                    "Transcript descriptor close failed after initialization failure",
-                )
+            _close_descriptor_after_failure(descriptor, path)
 
 
 def open_private_append(path: Path, *, mode: int = 0o600) -> TextIO:
