@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 _PROBE = """
 import sys
+sys.stdout.reconfigure(newline="\\n")
 from pathlib import Path
 from raychat.filesystem import FileLock
 for path in sys.argv[1:]:
@@ -49,6 +50,7 @@ for path in sys.argv[1:]:
 _SNAPSHOT_READER = """
 import json
 import sys
+sys.stdout.reconfigure(newline="\\n")
 from pathlib import Path
 from unittest.mock import patch
 from raychat.composition import create_runtime
@@ -76,6 +78,7 @@ finally:
 _WRITER = """
 import json
 import sys
+sys.stdout.reconfigure(newline="\\n")
 from pathlib import Path
 from raychat.plugin_manager import PackageManager
 workspace, home, phase = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]

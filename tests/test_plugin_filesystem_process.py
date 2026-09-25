@@ -1454,7 +1454,7 @@ class ExistingEventLoopTests(_WorkspaceFixture):
             )
 
         result = asyncio.run(invoke())
-        self.equal(result["stdout"], "nested loop\n")
+        self.equal(result["stdout"], "nested loop" + os.linesep)
         self.check(condition=result["ok"])
         self.check(condition=len(observations) > 1)
         self.equal(set(observations), {"caller context"})

@@ -104,7 +104,7 @@ class PortableBuildTests(PackageTestCase):
             home = deep / "configured-data"
             workspace = deep / "workspace"
             workspace.mkdir()
-            probe = package(deep / "path_probe", _PATH_PROBE, name="path_probe")
+            package(deep / "path_probe", _PATH_PROBE, name="path_probe")
             config = object_field(json_object(members["raychat.json"]), "configuration")
             object_field(config["storage"], "storage")["home_directory"] = str(home)
             object_field(config["plugins"], "plugins")["profile"] = str(
@@ -115,7 +115,7 @@ class PortableBuildTests(PackageTestCase):
             for item in sorted(app.rglob("*"), reverse=True):
                 item.chmod(0o500 if item.is_dir() else 0o400)
             app.chmod(0o500)
-            self._long_path_launch(app, settings, workspace, probe)
+            self._long_path_launch(app, settings, workspace, root)
             self.equal(
                 (workspace / "published.txt").read_bytes(),
                 b"complete replacement",
@@ -127,7 +127,7 @@ class PortableBuildTests(PackageTestCase):
                 app,
                 settings,
                 workspace,
-                probe,
+                root,
                 session_directory=custom_sessions,
             )
             self.equal(len(list(custom_sessions.rglob("*.jsonl"))), 1)
@@ -139,7 +139,7 @@ class PortableBuildTests(PackageTestCase):
         app: Path,
         settings: Path,
         workspace: Path,
-        probe: Path,
+        launch_directory: Path,
         *,
         session_directory: Path | None = None,
     ) -> None:
@@ -172,7 +172,7 @@ class PortableBuildTests(PackageTestCase):
                     "--workspace",
                     str(workspace),
                     "--plugin",
-                    str(probe),
+                    str(workspace.parent / "path_probe"),
                     "--provider",
                     "path_probe",
                     "--yes",
@@ -182,7 +182,7 @@ class PortableBuildTests(PackageTestCase):
                     "/path-probe",
                     *arguments,
                 ),
-                workspace.parent,
+                launch_directory,
                 environment,
                 30,
                 12000,

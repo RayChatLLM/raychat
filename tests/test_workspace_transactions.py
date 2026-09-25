@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 _WRITER = """
 import json
 import sys
+sys.stdout.reconfigure(newline="\\n")
 from pathlib import Path
 from raychat.workspace_files import workspace_access
 from raychat.workspace_transactions import WorkspaceTransaction

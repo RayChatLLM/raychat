@@ -1625,3 +1625,28 @@ the separate session override and the independently selected workspace.
 
 GitHub authentication is now available. The requested PR and changed-revision
 CI run are the next validation gate; baseline CI is not substituted for them.
+
+### First PR Windows CI findings (2026-09-25)
+
+PR #1 run 36156050986 exposed three portability defects in revision 42060ca.
+Child readiness fixtures emitted platform-native CRLF while their byte protocol
+expected LF. They now explicitly configure their owned stdout for LF; production
+process capture still preserves native output. The existing-loop process test
+expects the native line ending. Candidate plugin activation also compared POSIX
+proposal keys to Windows-native manifest paths, silently missing newly added
+plugins. Manifest lookup and editable-source keys now use `as_posix()`; native
+absolute paths remain the plugin identity keys. Existing activation, rejected
+registration, rollback-conflict and lock-lifetime tests cover that change.
+
+The long-path launcher fixture passed a greater-than-320-character working
+directory to CreateProcess and failed with Windows error 267. It now launches
+from its short private temporary root while retaining long paths for the actual
+application, configuration, workspace, trust state and both session locations.
+Microsoft documents that a current directory longer than MAX_PATH causes
+CreateProcessW to fail:
+https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setcurrentdirectory
+This test therefore does not claim support for launching subprocesses with a
+long working directory. No extended-path prefix or system configuration is
+changed. All 74 focused regression tests passed locally before the final helper
+argument cleanup (macOS Python 3.12, 36.224 seconds). Updated native CI is required
+before recording Windows acceptance.

@@ -215,6 +215,7 @@ class RunOwnershipTests(TypedTestCase):
     async def _competing_run(self, root: Path) -> None:
         script = """
 import sys
+sys.stdout.reconfigure(newline="\\n")
 from pathlib import Path
 from unittest import mock
 from tests.test_gepa_engine import _run, _SEED, optimizer

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 _WRITER = """
 import sys
+sys.stdout.reconfigure(newline="\\n")
 from pathlib import Path
 from unittest.mock import patch
 from raychat.filesystem import write_bytes

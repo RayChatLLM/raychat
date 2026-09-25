@@ -149,7 +149,7 @@ def _editable(pristine: Path, config: SelfHarnessSettings) -> dict[str, str]:
         for path in sorted(workspace_path(pristine, configured_root).rglob("*.py")):
             data = path.read_bytes()
             if len(data) <= remaining:
-                editable[str(path.relative_to(pristine))] = data.decode("utf-8")
+                editable[path.relative_to(pristine).as_posix()] = data.decode("utf-8")
                 remaining -= len(data)
     return editable
 

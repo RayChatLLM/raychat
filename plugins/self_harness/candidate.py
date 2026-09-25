@@ -244,7 +244,9 @@ def _added_plugins(
             if path.is_relative_to(directory):
                 relative = path.relative_to(directory)
                 plugin = directory / relative.parts[0]
-                manifest_name = str((plugin / "plugin.json").relative_to(ctx.workspace))
+                manifest_name = (
+                    (plugin / "plugin.json").relative_to(ctx.workspace).as_posix()
+                )
                 if str(plugin) not in known and manifest_name in changes:
                     added.append(str(plugin))
     return added
