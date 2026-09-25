@@ -181,6 +181,17 @@ branch. `/resume` opens the only saved session or shows the same picker inside
 chat when several exist. `/resume ID` opens a specific saved conversation.
 Selecting the current conversation keeps its history and writer open.
 
+The default application data directory is `.raychat` under your user home.
+To use another approved local location, select a complete configuration with
+`--config PATH` and set `storage.home_directory` to its absolute path. This moves
+user plugin state, trust decisions, default saved sessions, and supervised-core
+recovery data. `--session-dir PATH` overrides only the session location. Workspace
+plugin state remains under the selected workspace's configured plugin directory;
+choose a writable workspace separately with `--workspace PATH`. The installation
+directory does not need to hold application data. Directory or security-policy
+denials are reported; the application does not clear permissions or require
+security-software exclusions.
+
 Only completed turns become reusable context. Resuming does not replay tools or
 goal loops. An active writer lock prevents two processes from modifying the
 same saved session. Child conversations in `/agents` belong to the current

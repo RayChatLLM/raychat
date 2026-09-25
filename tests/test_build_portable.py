@@ -4,19 +4,49 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+import json
 import os
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
+from raychat.validation import json_object, object_field
+from tests.plugin_support import package
 from tests.test_package_system import PackageTestCase
 from tests.transport_support import captured, require
 from tools import build_portable
+from tools.acceptance_support import fixture_provider_environment
 from tools.smoke_process import SmokeCommand, run_checked
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_LONG_PATH_MINIMUM = 320
+_PATH_PROBE = """
+from contextlib import closing
+from raychat.filesystem import write_bytes
+from raychat.sdk import CommandDefinition
+from raychat.storage import SessionStore
+
+def register(api):
+    def publish(args, context):
+        path = api.context.workspace / 'published.txt'
+        write_bytes(path, b'first snapshot')
+        write_bytes(path, b'complete replacement')
+        marker = api.context.workspace / 'custom-session-id'
+        if not marker.exists():
+            for directory in (None, api.context.workspace.parent / 'selected-sessions'):
+                with closing(SessionStore(api.context.workspace, directory)) as store:
+                    store.checkpoint({})
+                    if directory is not None:
+                        write_bytes(marker, store.session_id.encode('ascii'))
+        return 'PORTABLE_PATH_OK'
+    api.register_command(CommandDefinition('path-probe', publish))
+    api.register_provider('path_probe', lambda args, environment:
+        lambda messages: '{"action":"done","message":"offline"}')
+"""
 
 
 class PortableBuildTests(PackageTestCase):
@@ -58,6 +88,106 @@ class PortableBuildTests(PackageTestCase):
         self.equal(first_members, second_members)
         build_portable.verify_archive(first, first_members)
         self.equal(len(hashlib.sha256(first).hexdigest()), 64)
+
+    def test_shipped_launcher_uses_long_configured_data_paths(self) -> None:
+        """Exercise the extracted launcher and snapshot/session IO beyond MAX_PATH."""
+        raw, members = build_portable.build_archive(PROJECT_ROOT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            deep = root
+            while len(str(deep)) <= _LONG_PATH_MINIMUM:
+                deep /= "portable-path-é-0123456789"
+            deep.mkdir(parents=True)
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                archive.extractall(deep)
+            app = deep / build_portable.ARCHIVE_ROOT
+            home = deep / "configured-data"
+            workspace = deep / "workspace"
+            workspace.mkdir()
+            probe = package(deep / "path_probe", _PATH_PROBE, name="path_probe")
+            config = object_field(json_object(members["raychat.json"]), "configuration")
+            object_field(config["storage"], "storage")["home_directory"] = str(home)
+            object_field(config["plugins"], "plugins")["profile"] = str(
+                app / "plugin_catalog/profile.json",
+            )
+            settings = deep / "selected-config.json"
+            settings.write_text(json.dumps(config), encoding="utf-8")
+            for item in sorted(app.rglob("*"), reverse=True):
+                item.chmod(0o500 if item.is_dir() else 0o400)
+            app.chmod(0o500)
+            self._long_path_launch(app, settings, workspace, probe)
+            self.equal(
+                (workspace / "published.txt").read_bytes(),
+                b"complete replacement",
+            )
+            self.equal(len(list((home / "sessions").rglob("*.jsonl"))), 1)
+            require((home / "trust.json").is_file())
+            custom_sessions = deep / "selected-sessions"
+            self._long_path_launch(
+                app,
+                settings,
+                workspace,
+                probe,
+                session_directory=custom_sessions,
+            )
+            self.equal(len(list(custom_sessions.rglob("*.jsonl"))), 1)
+            self.equal(len(list((home / "sessions").rglob("*.jsonl"))), 1)
+            build_portable.verify_release_folder(app, members)
+
+    @staticmethod
+    def _long_path_launch(
+        app: Path,
+        settings: Path,
+        workspace: Path,
+        probe: Path,
+        *,
+        session_directory: Path | None = None,
+    ) -> None:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("RAYCHAT_")
+        }
+        environment.update(fixture_provider_environment())
+        arguments = (
+            (
+                "--session-dir",
+                str(session_directory),
+                "--resume",
+                (workspace / "custom-session-id").read_text(encoding="ascii"),
+            )
+            if session_directory is not None
+            else ()
+        )
+        run_checked(
+            SmokeCommand(
+                (
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-S",
+                    str(app / "raychat.py"),
+                    "--config",
+                    str(settings),
+                    "--workspace",
+                    str(workspace),
+                    "--plugin",
+                    str(probe),
+                    "--provider",
+                    "path_probe",
+                    "--yes",
+                    "--trust-workspace",
+                    "grant",
+                    "--exec",
+                    "/path-probe",
+                    *arguments,
+                ),
+                workspace.parent,
+                environment,
+                30,
+                12000,
+            ),
+        )
 
     @staticmethod
     def test_release_folder_replacement_removes_stale_files() -> None:

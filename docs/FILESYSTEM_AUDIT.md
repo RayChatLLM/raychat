@@ -1594,3 +1594,34 @@ all five offline startup failure/repair phases and restores its terminal
 (`build/filesystem-bootstrap-tui-26/startup/result.json`). These focused results
 supplement the earlier full-suite and full-smoke results; native changed-revision
 Windows execution still requires the requested PR and GitHub CI authentication.
+
+### Shipped-launcher long paths and configured storage (2026-09-25)
+
+`PortableBuildTests.test_shipped_launcher_uses_long_configured_data_paths` extracts
+the actual portable archive below a Unicode path longer than 320 characters and
+runs its `raychat.py` with an isolated interpreter. Application files are made
+read-only in the owned fixture. An offline SDK command exercises completed
+snapshot replacement and creates sessions through the extracted storage API.
+A second launcher invocation resumes the saved custom-directory session using
+`--session-dir` and `--resume`. The test verifies the configured data home contains
+trust state and default sessions, the custom session directory retains its own
+journal, and every application member remains byte-for-byte unchanged.
+
+The fixture deliberately grants trust only to its private workspace. It does not
+change the real user's home or use provider credentials. Noninteractive `--exec`
+is intentionally in-memory unless resuming, so the fixture explicitly seeds its
+saved sessions rather than assuming automatic persistence. POSIX permission bits
+exercise a read-only installation; Windows attribute behavior is not presented
+as an ACL-denial test. Long paths are used without adding extended-path prefixes
+or changing operating-system settings. A Windows failure must be diagnosed from
+the actual CI interpreter/environment rather than skipped as a successful test.
+
+All six portable-builder tests pass on macOS Python 3.12 in 3.623 seconds
+(`/tmp/raychat-long-launch-27c.log`). Strict typing, lint and formatting pass without
+suppressions in `build/filesystem-quality-77/report.json`. The portable CI matrix
+already selects this test class, including Windows Python 3.10, 3.12 and 3.14.
+The README now documents the existing absolute `storage.home_directory` setting,
+the separate session override and the independently selected workspace.
+
+GitHub authentication is now available. The requested PR and changed-revision
+CI run are the next validation gate; baseline CI is not substituted for them.
