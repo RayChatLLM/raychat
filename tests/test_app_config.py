@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import sys
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest import mock
 
 import raychat.ui.renderer as ray_renderer
 import raychat.ui.terminal as terminal_runtime
 from raychat import configuration, sdk
+from raychat.filesystem import read_regular
 from raychat.ui import controller as ray_chat_tui
 from raychat.validation import array_field, json_object, object_field
 from tests.assertions import TypedTestCase
@@ -23,6 +27,7 @@ from tests.plugin_support import (
     registered_session,
 )
 from tools import build_portable
+from tools.smoke_process import SmokeCommand, run_checked
 
 
 def _changed(
@@ -47,6 +52,81 @@ def _changed(
 
 class AppConfigurationTests(TypedTestCase):
     """Check AppConfiguration behavior and failure boundaries."""
+
+    def test_configuration_capture_closes_before_parsing(self) -> None:
+        """A parser can replace the selected input after the snapshot is closed."""
+        original = json_object
+        source = Path(configuration.__file__).resolve().parents[1] / "raychat.json"
+        with tempfile.TemporaryDirectory() as directory:
+            selected = Path(directory) / "selected.json"
+            replacement = Path(directory) / "replacement.json"
+            selected.write_bytes(source.read_bytes())
+            replacement.write_bytes(b"{}")
+
+            def parse(raw: str) -> object:
+                replacement.replace(selected)
+                return original(raw)
+
+            with mock.patch.object(configuration, "json_object", parse):
+                settings = configuration.load_config(selected, expand_plugins=False)
+            self.equal(settings.schema_version, 1)
+            self.equal(selected.read_bytes(), b"{}")
+
+    def test_configuration_growth_during_capture_is_rejected(self) -> None:
+        """Do not parse a truncated prefix when the selected file grows."""
+        original = read_regular
+        with tempfile.TemporaryDirectory() as directory:
+            selected = Path(directory) / "selected.json"
+            selected.write_bytes(b"{}")
+
+            def grow(path: Path, limit: int, *, follow_symlinks: bool) -> bytes:
+                path.write_bytes(b"{}" + b" " * 100)
+                return original(path, limit, follow_symlinks=follow_symlinks)
+
+            with (
+                mock.patch.object(configuration, "read_regular", grow),
+                self.rejected(RuntimeError, "changed size"),
+            ):
+                configuration.load_config(selected)
+
+    def test_fifo_substitution_is_rejected_before_reading(self) -> None:
+        """Bound a real child so a replaced configuration cannot hang startup."""
+        if os.name != "posix":
+            self.skipTest("POSIX FIFO fixture")
+        script = """
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from raychat.configuration import load_config
+from raychat.validation import ConfigurationError
+selected = Path(sys.argv[1])
+original = os.open
+def substituted(path, flags):
+    selected.unlink()
+    os.mkfifo(selected)
+    return original(path, flags)
+with patch('raychat.filesystem.os.open', substituted):
+    try:
+        load_config(selected)
+    except ConfigurationError as error:
+        if not isinstance(error.__cause__, ValueError):
+            raise
+    else:
+        raise AssertionError('Accepted a replaced FIFO')
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            selected = Path(directory) / "selected.json"
+            selected.write_bytes(b"{}")
+            run_checked(
+                SmokeCommand(
+                    (sys.executable, "-B", "-S", "-c", script, str(selected)),
+                    Path(__file__).resolve().parents[1],
+                    dict(os.environ),
+                    10,
+                    4000,
+                ),
+            )
 
     def test_default_configuration_is_complete_and_immutable(self) -> None:
         """Check default configuration is complete and immutable."""

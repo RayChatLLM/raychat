@@ -7,10 +7,12 @@ import hashlib
 import json
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .core_review import verify
+from .filesystem import read_regular
 from .sdk import InstructionContribution, ToolDefinition
 from .storage import SessionStore
 from .validation import array_field, configuration_fields, integer_field, text_field
@@ -122,7 +124,7 @@ def _source(root: Path, action: Mapping[str, object]) -> dict[str, object]:
             integer_field(action.get("end", len(lines)), "end", minimum=start),
         )
         return {
-            "path": str(path.relative_to(root)),
+            "path": path.relative_to(root).as_posix(),
             "sha256": hashlib.sha256(data).hexdigest(),
             "start": start,
             "end": end,
@@ -150,12 +152,12 @@ def _source(root: Path, action: Mapping[str, object]) -> dict[str, object]:
         ):
             if query.casefold() in line.casefold():
                 matches.append({
-                    "path": str(entry.relative_to(root)),
+                    "path": entry.relative_to(root).as_posix(),
                     "line": number,
                     "text": line,
                     "read_action": {
                         "action": "core_source",
-                        "path": str(entry.relative_to(root)),
+                        "path": entry.relative_to(root).as_posix(),
                         "start": max(1, number - 40),
                     },
                 })
@@ -199,7 +201,7 @@ def _changes(root: Path, action: Mapping[str, object]) -> dict[str, bytes]:
     for raw in array_field(action.get("files"), "files"):
         item = configuration_fields(raw, "source edit")
         path = _path(root, item.get("path"))
-        name = str(path.relative_to(root))
+        name = path.relative_to(root).as_posix()
         data = path.read_bytes()
         if name in changes or hashlib.sha256(data).hexdigest() != item.get("sha256"):
             message = "Duplicate or stale source edit; read the active source again."
@@ -254,10 +256,13 @@ def _validate(root: Path, action: dict[str, object]) -> None:
 
 def _status(bridge: CoreBridge) -> dict[str, object]:
     diagnostics = ""
-    if bridge.diagnostics is not None and bridge.diagnostics.is_file():
-        with bridge.diagnostics.open("rb") as stream:
-            stream.seek(max(0, bridge.diagnostics.stat().st_size - 24000))
-            diagnostics = stream.read(24000).decode("utf-8", errors="replace")
+    if bridge.diagnostics is not None:
+        with suppress(FileNotFoundError):
+            diagnostics = read_regular(
+                bridge.diagnostics,
+                24000,
+                from_end=True,
+            ).decode("utf-8", errors="replace")
     return {
         "status": bridge.status,
         "phase": bridge.status,

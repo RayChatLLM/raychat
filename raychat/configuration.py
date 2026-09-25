@@ -6,7 +6,6 @@ import json
 import math
 import os
 import re
-import stat
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -17,6 +16,7 @@ if TYPE_CHECKING:
 
 
 from raychat.distribution import read_distribution
+from raychat.filesystem import read_regular
 from raychat.host_settings import HostSettings
 from raychat.validation import (
     ConfigurationError,
@@ -215,11 +215,18 @@ def _validate_timeouts(settings: HostSettings) -> None:
 
 
 def _read_regular_file(selected: Path) -> bytes:
+    # The document supplies its own size limit. Bound this initial capture by
+    # the observed file size, then validate the configured limit after parsing.
     metadata = selected.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or selected.is_symlink():
+    try:
+        raw = read_regular(selected, metadata.st_size + 1, follow_symlinks=False)
+    except ValueError as exc:
         message = f"RayChat configuration must be a regular file: {selected}"
+        raise ConfigurationError(message) from exc
+    if len(raw) != metadata.st_size:
+        message = f"RayChat configuration changed size while reading: {selected}"
         raise ConfigurationError(message)
-    return selected.read_bytes()
+    return raw
 
 
 def _read_root(selected: Path) -> tuple[dict[str, object], int]:
