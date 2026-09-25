@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,7 +21,10 @@ from .service_contracts import CHAT, ChatService
 if TYPE_CHECKING:
     import argparse
     from collections.abc import Mapping
+    from types import TracebackType
     from typing import TextIO
+
+    from typing_extensions import Self
 
     from .core_bridge import CoreBridge
     from .plugins import Runtime
@@ -95,20 +98,53 @@ class AgentResources:
     protocol: str | None = None
     live: CoreBridge | None = None
 
-    def close(self) -> None:
-        """Close the host and every owned file, including after partial startup."""
-        try:
-            if self.runtime.session is not None:
-                self.runtime.session.close()
-            else:
-                self.runtime.close()
-        finally:
+    def close(self, *, primary_error: BaseException | None = None) -> None:
+        """Attempt host, store and log cleanup, preserving the first failure.
+
+        A supplied primary_error is already propagating from the caller; cleanup
+        failures are logged without replacing it. Otherwise the first close
+        failure propagates after the remaining owners have been attempted. This
+        does not claim that a failed close retired its resource.
+
+        """
+        failure = primary_error
+        host = (
+            self.runtime.session if self.runtime.session is not None else self.runtime
+        )
+        for resource in (host, self.store, self.log):
+            if resource is None:
+                continue
             try:
-                if self.store is not None:
-                    self.store.close()
-            finally:
-                if self.log is not None:
-                    self.log.close()
+                resource.close()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+                else:
+                    logging.getLogger(__name__).exception(
+                        "Resource cleanup failed while preserving an earlier failure",
+                    )
+        if failure is not None and primary_error is None:
+            raise failure
+
+    def __enter__(self) -> Self:
+        """Retain resources until their application consumer exits.
+
+        Returns
+        -------
+        AgentResources
+            This resource owner.
+
+        """
+        return self
+
+    def __exit__(
+        self,
+        _kind: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        """Close after the consumer and preserve its active failure, if any."""
+        self.close(primary_error=error)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -240,9 +276,8 @@ def create_resources(
     resources = AgentResources(runtime, None, protocol=protocol_override)
     try:
         _prepare_resources(args, environ, options, resources)
-    except BaseException:
-        with contextlib.suppress(Exception):
-            resources.close()
+    except BaseException as error:
+        resources.close(primary_error=error)
         raise
     return resources
 

@@ -130,6 +130,7 @@ jobs:
             tests.test_filesystem \
             tests.test_app_config \
             tests.test_core_tools \
+            tests.test_entrypoint.ResourceCleanupTests \
             tests.test_package_system.PackageTransactionTests \
             tests.test_package_sources \
             tests.test_catalog_publication \

@@ -1753,3 +1753,36 @@ guards against traversal, and checks explicit-read rejection. It is selected in
 the existing native CI matrix; this new revision still requires its CI result.
 Strict typing, lint and format passed in `build/filesystem-quality-86`. The final
 23-test core-tool/review selection also passed on local macOS Python 3.12.
+
+
+### Application resource shutdown and exception precedence
+
+`AgentResources` owns the configured runtime/session, session store and optional
+operator-selected transcript stream. Startup assigns each newly opened resource
+to that owner. The CLI and supervised core use it as a context manager around the
+consumer; normal command/TUI shutdown stops and joins workers before leaving that
+scope. This ordering is required: resource closure itself is not a substitute for
+stopping consumers. Direct callers must uphold the same lifetime boundary.
+
+Cleanup attempts the host/session, store and log in that order. If the consumer
+already raised, its exact exception continues to propagate, including
+`KeyboardInterrupt` and `asyncio.CancelledError`; every cleanup failure is logged.
+After successful consumer work, the first cleanup error propagates after the
+remaining owners have been attempted. Later cleanup errors are logged with their
+tracebacks. Partial startup supplies its active error to the same policy instead
+of silently suppressing a failed close. A session may itself close its store;
+the existing store's idempotent close handles the resource owner's later close.
+No close retry, directory deletion, permission mutation or claim of successful
+retirement after a failed close is introduced. Owner/plugin close routines retain
+their own lifetime contracts; a Python callback cannot be forcibly bounded here.
+
+Regression tests exercise runtime/store/log failures together, preserve raised
+operation and cancellation objects, verify startup-error precedence, and check the
+CLI reports the run error. A bounded real child exercises the supervised entry,
+then replaces its closed log and reopens the released session journal. A cleanup
+failure after successful work still propagates. All six focused tests pass on
+local macOS Python 3.10.19 and 3.14.3; the earlier full entrypoint selection passed
+26 tests on Python 3.12 before addition of the isolated child fixture. Strict
+mypy, Ruff and formatting pass in `build/filesystem-quality-88`. The six tests are
+now selected explicitly in every native matrix job; this change still needs its
+own GitHub CI result.
