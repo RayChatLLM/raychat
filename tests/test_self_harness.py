@@ -7,6 +7,7 @@ import errno
 import io
 import json
 import logging
+import os
 import re
 import sys
 import tempfile
@@ -49,6 +50,7 @@ from tests.plugin_support import (
     plugin_module,
     registered_service,
 )
+from tools.smoke_process import SmokeCommand, run_checked
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterable, Mapping
@@ -252,6 +254,77 @@ class _HarnessFixture(_HarnessAssertions):
 
 class SelfHarnessTests(_HarnessFixture):
     """Check recurring evidence, candidate selection and transactional promotion."""
+
+    def test_rejection_log_failure_preserves_the_original_error(self) -> None:
+        """An unavailable evidence log cannot replace a failed workspace capture."""
+        runtime = self.runtime([])
+        runner = plugin_module("self_harness.runner", runtime=runtime)
+        with (
+            patch.object(runner, "copy_workspace", side_effect=OSError("primary copy")),
+            patch.object(runner, "append", side_effect=OSError("secondary evidence")),
+            self.assertLogs(level="ERROR") as logs,
+            self.rejecting(OSError, "primary copy"),
+        ):
+            runtime.command("/self-harness")
+        self.check(condition="secondary evidence" in "\n".join(logs.output))
+        self.check(condition=not self.overlay.exists())
+
+    def test_workspace_copy_skips_directory_links_before_descent(self) -> None:
+        """A Windows junction or POSIX directory link cannot expose its target."""
+        script = """
+import json
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from tests.plugin_support import plugin_module
+evaluation = plugin_module('self_harness.evaluation')
+configuration = plugin_module('self_harness.configuration')
+manifest = Path('plugins/self_harness/plugin.json').read_text(encoding='utf-8')
+defaults = json.loads(manifest)['defaults']
+config = configuration.SelfHarnessSettings.parse(defaults)
+root = Path(sys.argv[1]).resolve()
+root.mkdir()
+source, external, copied = root / 'source', root / 'external', root / 'copied'
+source.mkdir()
+external.mkdir()
+(source / 'local.txt').write_bytes(b'owned')
+(external / 'sentinel').write_bytes(b'external')
+linked = source / 'linked'
+if os.name == 'nt':
+    import _winapi
+    _winapi.CreateJunction(str(external), str(linked))
+else:
+    linked.symlink_to(external, target_is_directory=True)
+original = Path.iterdir
+def guarded(path):
+    assert path != linked, 'linked directory was traversed'
+    return original(path)
+try:
+    with patch.object(Path, 'iterdir', guarded):
+        evaluation.copy_workspace(source, copied, config, lambda: None)
+    assert sorted(path.name for path in copied.iterdir()) == ['local.txt']
+    assert (copied / 'local.txt').read_bytes() == b'owned'
+    assert (external / 'sentinel').read_bytes() == b'external'
+finally:
+    linked.rmdir() if os.name == 'nt' else linked.unlink()
+"""
+        run_checked(
+            SmokeCommand(
+                (
+                    sys.executable,
+                    "-B",
+                    "-S",
+                    "-c",
+                    script,
+                    str(self.root / "copy-test"),
+                ),
+                Path(__file__).resolve().parents[1],
+                dict(os.environ),
+                15,
+                4000,
+            ),
+        )
 
     def test_score_gate_promotes_overlay_in_same_session_without_exposing_holdout(
         self,

@@ -114,7 +114,7 @@ def package(case: Case) -> Path:
     """
     path = case.work / "history_counter"
     path.mkdir()
-    (path / "__init__.py").write_text(PLUGIN)
+    (path / "__init__.py").write_text(PLUGIN, encoding="utf-8")
     (path / "plugin.json").write_text(
         json_text(
             {
@@ -131,6 +131,7 @@ def package(case: Case) -> Path:
                 "defaults": {"label": "ORIGINAL", "step": 1, "reject_count": -1},
             },
         ),
+        encoding="utf-8",
     )
     return path
 
@@ -140,7 +141,7 @@ def settings(path: Path, **values: object) -> None:
     manifest = path / "plugin.json"
     document = read_object(manifest)
     object_field(document["defaults"], "defaults").update(values)
-    manifest.write_text(json_text(document))
+    manifest.write_text(json_text(document), encoding="utf-8")
 
 
 def journals(case: Case) -> list[Path]:
@@ -299,9 +300,12 @@ def _branch_reload(case: Case, path: Path) -> Path:
         settings(path, step=0)
         chat.command_complete("/persist-count", "UPDATED count=22")
         settings(path, step=3)
-        (path / "__init__.py").write_text("def register(:\n")
+        (path / "__init__.py").write_text("def register(:\n", encoding="utf-8")
         chat.command_complete("/persist-count", "UPDATED count=32")
-        (path / "__init__.py").write_text(PLUGIN.replace("count=", "value="))
+        (path / "__init__.py").write_text(
+            PLUGIN.replace("count=", "value="),
+            encoding="utf-8",
+        )
         chat.command_complete("/persist-count", "UPDATED value=35")
         require(
             journal_state(first)[0] == _REPAIRED_COUNTER,
@@ -407,6 +411,7 @@ def rejected_fork(case: Case) -> None:
         after = journal_state(journal)
         (case.output / "rejected-fork-observation.json").write_text(
             json_text({"before": before, "after": after, "target": target}, indent=2),
+            encoding="utf-8",
         )
         require(
             after == before,
@@ -462,6 +467,7 @@ def malformed_session(case: Case) -> None:
         damaged.write_text(
             "\n".join(json_text(item) for item in document)
             + '\n{"broken":"complete record"}\n',
+            encoding="utf-8",
         )
         before = hashlib.sha256(damaged.read_bytes()).hexdigest()
         chat.command_complete("/resume " + damaged.stem, "Invalid session record")
@@ -599,7 +605,9 @@ def concurrent_checkpoint(case: Case, *, persist: bool, complete: bool) -> None:
         chat.command_complete("CHECKPOINT_REPLACEMENT", "ANSWER_CHECKPOINT_REPLACEMENT")
         requests = [
             message_history(json_object(line))
-            for line in (case.work / "requests.jsonl").read_text().splitlines()
+            for line in (case.work / "requests.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
         ]
         visible_prompts = [
             item["content"] for item in requests[-1] if item["role"] == "user"
@@ -803,7 +811,7 @@ def child_checkpoint(case: Case, *, complete: bool) -> None:
     include_child_plugins(case, "history_counter", "probe")
     probe_source = case.probe / "provider.py"
     probe_source.write_text(
-        probe_source.read_text()
+        probe_source.read_text(encoding="utf-8")
         + "\n"
         + """
 _original_register = register
@@ -815,12 +823,13 @@ def register(api: PluginAPI) -> None:
         if event.prompt.startswith('BLOCK_'):
             ctx.state['worker_turns'] = ctx.state.get('worker_turns', 0) + 1
             marker = ctx.workspace / (event.prompt + '.worker-pid')
-            marker.write_text(str(os.getpid()))
+            marker.write_text(str(os.getpid()), encoding='utf-8')
     def status(arguments: str, ctx: PluginContext) -> str:
         return 'WORKER_TURNS_' + str(ctx.state.get('worker_turns', 0))
     api.on(TURN_START, track)
     api.register_command(CommandDefinition('worker-state', status, while_running=True))
 """,
+        encoding="utf-8",
     )
     with child_provider(case) as url:
         _child_checkpoint(case, path, url, complete=complete)
@@ -841,7 +850,7 @@ def _child_checkpoint(case: Case, path: Path, url: str, *, complete: bool) -> No
         wait_file(chat, case.work / "BLOCK_LEFT.started")
         wait_file(chat, case.work / "BLOCK_RIGHT.started")
         worker_pids = [
-            int((case.work / (name + ".worker-pid")).read_text())
+            int((case.work / (name + ".worker-pid")).read_text(encoding="utf-8"))
             for name in ("BLOCK_LEFT", "BLOCK_RIGHT")
         ]
         require(
@@ -855,6 +864,7 @@ def _child_checkpoint(case: Case, path: Path, url: str, *, complete: bool) -> No
         )
         (case.output / "isolated-worker-proof.json").write_text(
             json_text({"ui_pid": chat.process.pid, "child_pids": worker_pids}),
+            encoding="utf-8",
         )
         choose(chat, "left")
         chat.command("/persist-count", "ORIGINAL count=1")
@@ -986,7 +996,10 @@ def main() -> None:
         except (AssertionError, OSError, ValueError) as exc:
             failures.append(name)
             results[name] = {"passed": False, "error": str(exc), "checks": case.checks}
-    (options.output / "result.json").write_text(json_text(results, indent=2))
+    (options.output / "result.json").write_text(
+        json_text(results, indent=2),
+        encoding="utf-8",
+    )
     sys.stdout.write(json_text(results, indent=2) + "\n")
     sys.stdout.flush()
     if failures:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -194,14 +195,20 @@ class _HarnessRun:
             ) as temporary:
                 return self.evaluate(Path(temporary).resolve())
         except BaseException as exc:
-            append(
-                self.log,
-                {
-                    "attempt": self.attempt,
-                    "decision": "rejected",
-                    "reason": type(exc).__name__ + ": " + str(exc),
-                },
-            )
+            try:
+                append(
+                    self.log,
+                    {
+                        "attempt": self.attempt,
+                        "decision": "rejected",
+                        "reason": type(exc).__name__ + ": " + str(exc),
+                    },
+                )
+            except (OSError, RuntimeError, ValueError):
+                logging.getLogger(__name__).exception(
+                    "Failed to record the rejected harness attempt path=%r",
+                    str(self.log),
+                )
             raise
 
     def evaluate(self, root: Path) -> HarnessResult:
