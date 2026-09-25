@@ -7,6 +7,7 @@ import time
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
+from raychat.filesystem import FileLock, append_record, read_regular
 from raychat.protocol import action_name
 from raychat.validation import array_field, json_object, object_field, plain
 
@@ -25,16 +26,10 @@ _SIGNATURE_PARTS = 3
 def append(path: Path, record: Mapping[str, object]) -> None:
     """Append a complete timestamped record without allowing nonfinite JSON values."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as stream:
-        entry: dict[str, object] = {"time": time.time(), **record}
-        stream.write(
-            json.dumps(
-                entry,
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-            + "\n",
-        )
+    entry: dict[str, object] = {"time": time.time(), **record}
+    raw = (json.dumps(entry, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
+    with FileLock(path.with_name(path.name + ".lock"), timeout=0.5):
+        append_record(path, raw)
 
 
 def tail(path: Path, limit: int) -> list[dict[str, object]]:
@@ -43,17 +38,27 @@ def tail(path: Path, limit: int) -> list[dict[str, object]]:
     Returns
     -------
     list[dict[str, object]]
-        The checked result described above.
+        Newline-committed records; an incomplete final record is ignored.
+
+    Raises
+    ------
+    ValueError
+        If the requested byte limit is negative.
 
     """
-    if not path.exists():
+    if limit == 0:
         return []
-    with path.open("rb") as stream:
-        size = stream.seek(0, 2)
-        stream.seek(max(0, size - limit))
-        if size > limit:
-            stream.readline()
-        lines = stream.read(limit).splitlines()
+    if limit < 0:
+        message = "An evidence read requires a nonnegative byte limit."
+        raise ValueError(message)
+    with FileLock(path.with_name(path.name + ".lock"), timeout=0.5):
+        try:
+            raw = read_regular(path, limit + 1, from_end=True)
+        except FileNotFoundError:
+            return []
+    if len(raw) > limit:
+        raw = raw.partition(b"\n")[2]
+    lines = raw.rpartition(b"\n")[0].split(b"\n")
     records: list[dict[str, object]] = []
     for line in lines:
         record = _log_record(line)

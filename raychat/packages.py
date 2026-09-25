@@ -11,6 +11,13 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, TypedDict
 
+from .filesystem import (
+    WORKSPACE_STAGE_PREFIX,
+    PortablePathIndex,
+    is_link_or_reparse_point,
+    portable_relative_path,
+    read_regular,
+)
 from .sdk import API_VERSION, PluginError
 from .validation import (
     ConfigurationError,
@@ -23,12 +30,14 @@ from .validation import (
 )
 
 if TYPE_CHECKING:
+    import os
     from collections.abc import Iterable, Mapping
     from re import Pattern
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 MAX_FILES = 2048
+MAX_ENTRIES = MAX_FILES * 4
 MAX_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 65536
 MAX_INSTRUCTIONS = 8192
@@ -96,25 +105,10 @@ def safe_name(name: object) -> PurePosixPath:
     """
     if not isinstance(name, str):
         raise PluginError("Unsafe package member: " + repr(name))
-    path = PurePosixPath(name)
-    invalid_text = not name or name == "." or any(char in name for char in "\\\x00:")
-    invalid_path = path.is_absolute() or ".." in path.parts or str(path) != name
-    invalid_component = any(
-        part.endswith((" ", "."))
-        or part.split(".")[0].upper()
-        in {
-            "CON",
-            "PRN",
-            "AUX",
-            "NUL",
-            *[f"COM{i}" for i in range(1, 10)],
-            *[f"LPT{i}" for i in range(1, 10)],
-        }
-        for part in path.parts
-    )
-    if invalid_text or invalid_path or invalid_component:
-        raise PluginError("Unsafe package member: " + repr(name))
-    return path
+    try:
+        return portable_relative_path(name)
+    except ValueError as error:
+        raise PluginError("Unsafe package member: " + repr(name)) from error
 
 
 CLIType = Literal["str", "int", "float", "path"]
@@ -458,34 +452,106 @@ def read_manifest(path: str | Path, *, require_current_sdk: bool = True) -> Mani
 
     """
     path = Path(path) / "plugin.json"
-    if path.is_symlink() or not path.is_file():
+    try:
+        raw = _read_member(path, MAX_MANIFEST_BYTES, _member_info(path))
+    except (OSError, ValueError) as error:
         raise PluginError(
             "A package directory requires a regular plugin.json: " + str(path),
-        )
-    with path.open("rb") as stream:
-        raw = stream.read(MAX_MANIFEST_BYTES + 1)
-    if len(raw) > MAX_MANIFEST_BYTES:
-        error_message = "Plugin manifest exceeds 64 KiB."
-        raise PluginError(error_message)
+        ) from error
     return Manifest.parse(json_object(raw), require_current_sdk=require_current_sdk)
 
 
 def _ignored_member(relative: Path, *, ignore_finder_metadata: bool) -> bool:
+    if any(
+        part.casefold().startswith(WORKSPACE_STAGE_PREFIX) for part in relative.parts
+    ):
+        return True
     return any(part in {".git", "__pycache__", ".venv"} for part in relative.parts) or (
         ignore_finder_metadata and ".DS_Store" in relative.parts
     )
 
 
-def _read_member(item: Path, remaining: int) -> bytes:
-    if not stat.S_ISREG(item.stat().st_mode):
+def _member_info(path: Path) -> os.stat_result:
+    info = path.lstat()
+    if is_link_or_reparse_point(path):
+        raise PluginError(
+            "Package links or reparse points are not supported: " + str(path),
+        )
+    if not stat.S_ISREG(info.st_mode) and not stat.S_ISDIR(info.st_mode):
+        raise PluginError(
+            "Package entries must be regular files or directories: " + str(path),
+        )
+    return info
+
+
+def _member_version(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_mode,
+        info.st_nlink,
+    )
+
+
+def _check_member(item: Path, expected: os.stat_result) -> None:
+    if _member_version(_member_info(item)) != _member_version(expected):
+        raise PluginError("Package source changed during capture: " + str(item))
+
+
+def _read_member(item: Path, remaining: int, expected: os.stat_result) -> bytes:
+    if not stat.S_ISREG(expected.st_mode):
         message = "Package members must be regular files."
         raise PluginError(message)
-    with item.open("rb") as stream:
-        data = stream.read(remaining + 1)
+    data = read_regular(item, remaining + 1, follow_symlinks=False)
     if len(data) > remaining:
         message = "Package exceeds its byte limit."
         raise PluginError(message)
+    _check_member(item, expected)
+    if len(data) != expected.st_size:
+        raise PluginError("Package source size changed during capture: " + str(item))
     return data
+
+
+def _package_entries(
+    root: Path,
+    *,
+    ignore_finder_metadata: bool,
+) -> list[tuple[Path, os.stat_result]]:
+    pending = [root]
+    entries: list[tuple[Path, os.stat_result]] = []
+    paths = PortablePathIndex()
+    while pending:
+        item = pending.pop()
+        info = _member_info(item)
+        directory = stat.S_ISDIR(info.st_mode)
+        if item != root:
+            paths.add(item.relative_to(root).as_posix(), directory=directory)
+        elif not directory:
+            message = (
+                "Plugins must be SDK v4 package directories containing plugin.json."
+            )
+            raise PluginError(message)
+        entries.append((item, info))
+        if len(entries) > MAX_ENTRIES:
+            message = "Package exceeds its entry limit."
+            raise PluginError(message)
+        if directory:
+            for child in item.iterdir():
+                if not _ignored_member(
+                    child.relative_to(root),
+                    ignore_finder_metadata=ignore_finder_metadata,
+                ):
+                    pending.append(child)
+                    if len(entries) + len(pending) > MAX_ENTRIES:
+                        message = "Package exceeds its entry limit."
+                        raise PluginError(message)
+    return sorted(entries, key=_entry_path)
+
+
+def _entry_path(entry: tuple[Path, os.stat_result]) -> PurePosixPath:
+    return _portable_path(entry[0])
 
 
 def _portable_path(item: Path) -> PurePosixPath:
@@ -500,6 +566,12 @@ def files(
 ) -> dict[str, bytes]:
     """Read bounded package files while rejecting links and path collisions.
 
+    The operator-selected root may resolve through a link. Descendants must be
+    regular files or directories; reparse points are rejected before traversal.
+    Trusted parents and quiescent sources are required. Metadata revalidation
+    detects observed changes; it is not a transaction with nonparticipating
+    editors or protection against hostile pathname substitution.
+
     Returns
     -------
     dict[str, bytes]
@@ -511,35 +583,42 @@ def files(
         If the directory violates package path, file or byte limits.
 
     """
-    path = Path(path).resolve()
-    if not path.is_dir():
-        error_message = (
-            "Plugins must be SDK v4 package directories containing plugin.json."
+    try:
+        path = Path(path).resolve(strict=True)
+        return _files(
+            path,
+            validate_manifest=validate_manifest,
+            ignore_finder_metadata=ignore_finder_metadata,
         )
-        raise PluginError(
-            error_message,
-        )
+    except (OSError, ValueError) as error:
+        raise PluginError("Cannot capture package source: " + str(path)) from error
+
+
+def _files(
+    path: Path,
+    *,
+    validate_manifest: bool,
+    ignore_finder_metadata: bool,
+) -> dict[str, bytes]:
     result: dict[str, bytes] = {}
     remaining = MAX_BYTES
-    folded: set[str] = set()
-    for item in sorted(path.rglob("*"), key=_portable_path):
-        relative = item.relative_to(path)
-        if _ignored_member(relative, ignore_finder_metadata=ignore_finder_metadata):
-            continue
-        safe_name(relative.as_posix())
-        if relative.as_posix().casefold() in folded:
-            raise PluginError("Case-colliding package member: " + str(relative))
-        folded.add(relative.as_posix().casefold())
-        if item.is_symlink():
-            raise PluginError("Package links are not supported: " + str(relative))
-        if item.is_dir():
+    entries = _package_entries(path, ignore_finder_metadata=ignore_finder_metadata)
+    for item, info in entries:
+        if stat.S_ISDIR(info.st_mode):
             continue
         if len(result) >= MAX_FILES:
             error_message = "Package exceeds its file limit."
             raise PluginError(error_message)
-        data = _read_member(item, remaining)
+        data = _read_member(item, remaining, info)
         remaining -= len(data)
-        result[relative.as_posix()] = data
+        result[item.relative_to(path).as_posix()] = data
+    observed = _package_entries(path, ignore_finder_metadata=ignore_finder_metadata)
+    before = [(item, _member_version(info)) for item, info in entries]
+    after = [(item, _member_version(info)) for item, info in observed]
+    if after != before:
+        raise PluginError(
+            "Package source inventory changed during capture: " + str(path),
+        )
     if validate_manifest:
         Manifest.parse(json_object(result.get("plugin.json", b"{}")))
     return result
@@ -585,13 +664,18 @@ def _archive_members(data: bytes) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
     total = 0
     folded: set[str] = set()
+    paths = PortablePathIndex()
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         if len(archive.infolist()) > MAX_FILES:
             error_message = "Archive exceeds its member limit."
             raise PluginError(error_message)
         for info in archive.infolist():
-            name = info.filename.rstrip("/")
+            name = info.filename[:-1] if info.is_dir() else info.filename
             safe_name(name)
+            try:
+                paths.add(name, directory=info.is_dir())
+            except ValueError as error:
+                raise PluginError("Colliding archive entry: " + name) from error
             mode = info.external_attr >> 16
             if stat.S_ISLNK(mode) or (
                 stat.S_IFMT(mode) not in {0, stat.S_IFREG, stat.S_IFDIR}

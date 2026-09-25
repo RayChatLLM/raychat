@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import stat
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,6 +16,7 @@ from raychat._common import (
     MAX_PROTOCOL_BYTES,
 )
 from raychat.configuration import SETTINGS
+from raychat.filesystem import read_regular
 
 _PARAMETER_BYTES = range(0x30, 0x40)
 _INTERMEDIATE_BYTES = range(0x20, 0x30)
@@ -154,19 +154,7 @@ def load_protocol(path: Path) -> str:
         When the file is oversized, empty, nonregular or contains invalid UTF-8.
 
     """
-    flags = os.O_RDONLY | _file_flag("O_BINARY") | _file_flag("O_NONBLOCK")
-    descriptor = os.open(path, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            error_message = "Protocol file must be a regular file."
-            raise ValueError(error_message)
-        stream = os.fdopen(descriptor, "rb")
-        descriptor = -1
-        with stream:
-            data = stream.read(MAX_PROTOCOL_BYTES + 1)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+    data = read_regular(path, MAX_PROTOCOL_BYTES + 1)
     if len(data) > MAX_PROTOCOL_BYTES:
         error_message = (
             f"Protocol file exceeds the {MAX_PROTOCOL_BYTES}-byte size limit."
@@ -183,11 +171,3 @@ def load_protocol(path: Path) -> str:
         error_message = "Protocol file must contain nonempty text."
         raise ValueError(error_message)
     return protocol
-
-
-def _file_flag(name: str) -> int:
-    value: object = getattr(os, name, 0)
-    if not isinstance(value, int):
-        message = "Invalid platform file flag: " + name
-        raise TypeError(message)
-    return value

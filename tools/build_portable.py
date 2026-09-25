@@ -8,21 +8,23 @@ Every member has a fixed timestamp, POSIX mode, path separator, and ordering.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import io
 import json
 import os
-import shutil
 import stat
 import sys
-import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, TypedDict
 
 from raychat.configuration import SETTINGS
+from raychat.filesystem import (
+    OwnedTemporaryDirectory,
+    write_bytes,
+)
+from tools import release_folder
 from tools.build_plugin_catalog import build_catalog
 from tools.smoke_process import SmokeCommand, run_checked
 
@@ -276,21 +278,7 @@ def atomic_write(path: Path, data: bytes, protected: set[Path]) -> None:
             error_message,
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
+    write_bytes(path, data)
 
 
 def verify_release_folder(path: Path, expected: dict[str, bytes]) -> None:
@@ -330,70 +318,6 @@ def verify_release_folder(path: Path, expected: dict[str, bytes]) -> None:
             raise RuntimeError(error_message)
 
 
-class _FolderReplacement:
-    def __init__(self, path: Path, members: dict[str, bytes]) -> None:
-        self.path = path
-        self.members = members
-        self.staging = Path(
-            tempfile.mkdtemp(
-                prefix=f".{path.name}.staging-",
-                dir=str(path.parent),
-            ),
-        )
-        self.backup: Path | None = None
-        self.committed = False
-
-    def write_staging(self) -> None:
-        for relative, data in self.members.items():
-            target = self.staging.joinpath(*PurePosixPath(relative).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-        verify_release_folder(self.staging, self.members)
-
-    def replace(self) -> None:
-        self.write_staging()
-        if self.path.exists():
-            self.backup = Path(
-                tempfile.mkdtemp(
-                    prefix=f".{self.path.name}.previous-",
-                    dir=str(self.path.parent),
-                ),
-            )
-            self.backup.rmdir()
-            self.path.replace(self.backup)
-        self.staging.replace(self.path)
-        verify_release_folder(self.path, self.members)
-        self.committed = True
-        if self.backup is not None:
-            previous = self.backup
-            self.backup = None
-            shutil.rmtree(previous)
-
-    def rollback(self) -> None:
-        if self.backup is not None and self.backup.exists():
-            if self.path.exists():
-                shutil.rmtree(self.path)
-            self.backup.replace(self.path)
-            self.backup = None
-        elif not self.committed and self.path.exists() and not self.staging.exists():
-            shutil.rmtree(self.path)
-
-    def cleanup(self) -> None:
-        if self.staging.exists():
-            shutil.rmtree(self.staging)
-        if self.backup is not None and self.backup.exists():
-            shutil.rmtree(self.backup)
-
-    def install(self) -> None:
-        try:
-            self.replace()
-        except BaseException:
-            self.rollback()
-            raise
-        finally:
-            self.cleanup()
-
-
 def replace_release_folder(
     path: Path,
     members: dict[str, bytes],
@@ -415,7 +339,12 @@ def replace_release_folder(
         message = "The release folder target must be a directory or absent."
         raise ValueError(message)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _FolderReplacement(path, members).install()
+    with release_folder.access(path) as target:
+        release_folder.publish(
+            target,
+            members,
+            lambda folder: verify_release_folder(folder, members),
+        )
 
 
 def smoke_archive(raw: bytes, *, output: Path | None = None) -> SmokeReport:
@@ -439,7 +368,7 @@ def smoke_archive(raw: bytes, *, output: Path | None = None) -> SmokeReport:
         PYTHONIOENCODING="utf-8",
         PYTHONUTF8="1",
     )
-    with tempfile.TemporaryDirectory(prefix="raychat-portable-smoke-") as directory:
+    with OwnedTemporaryDirectory(prefix="raychat-portable-smoke-") as directory:
         extraction = Path(directory)
         with zipfile.ZipFile(io.BytesIO(raw), "r") as archive:
             archive.extractall(extraction)
@@ -602,7 +531,8 @@ def _check_existing(args: _Arguments, raw: bytes, members: dict[str, bytes]) -> 
         )
         raise RuntimeError(message)
     verify_archive(existing, members)
-    verify_release_folder(args.folder, members)
+    with release_folder.access(args.folder) as folder:
+        verify_release_folder(folder, members)
 
 
 def _build(args: _Arguments, root: Path) -> BuildReport:

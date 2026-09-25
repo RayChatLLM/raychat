@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Protocol, TypedDict
 
 import raychat.protocol as _rc_protocol
 from raychat import configuration
+from raychat.filesystem import destinations_conflict
 from raychat.provider_settings import provider_settings
 from raychat.sdk import ProviderService, ServiceSlot
 from raychat.service_contracts import OptimizationComponent
@@ -1557,12 +1558,13 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _execute_cli(args: CLIArguments) -> int:
-    if args.output is not None and args.report is not None:
-        output_key = os.path.normcase(str(args.output.resolve()))
-        report_key = os.path.normcase(str(args.report.resolve()))
-        if output_key == report_key:
-            error_message = "--output and --report must be different paths."
-            raise ValueError(error_message)
+    if (
+        args.output is not None
+        and args.report is not None
+        and destinations_conflict(args.output, args.report)
+    ):
+        error_message = "--output and --report must be different paths."
+        raise ValueError(error_message)
     if args.command == "demo":
         run = run_offline_demo(
             max_candidate_proposals=args.max_proposals,

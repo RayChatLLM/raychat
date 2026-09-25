@@ -5,8 +5,8 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import logging
 import os
-import sys
 import time
 import traceback
 import uuid
@@ -22,6 +22,8 @@ from urllib.request import HTTPHandler, HTTPSHandler, build_opener
 
 from raychat.http_replay import ReplayRequest, parse_sent_request, write_curl
 from raychat.type_support import override
+
+from .filesystem import append_owned
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -92,18 +94,7 @@ class _Trace:
         self.event("start", host=host, port=port, tls=tls, pid=os.getpid())
 
     def append(self, name: str, data: bytes) -> None:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        if sys.platform == "win32":
-            flags |= os.O_BINARY
-        descriptor = os.open(self.directory / name, flags, 0o600)
-        with io.FileIO(descriptor, "ab") as stream:
-            view = memoryview(data)
-            while view:
-                written: object = stream.write(view)
-                if not isinstance(written, int) or written <= 0:
-                    message = "Could not write raw HTTP debug capture."
-                    raise OSError(message)
-                view = view[written:]
+        append_owned(self.directory / name, data)
 
     def event(self, event: str, **details: object) -> None:
         now = time.time_ns()
@@ -122,15 +113,22 @@ class _Trace:
         self.append("connection.log", line.encode("utf-8"))
 
     def error(self, phase: str, error: BaseException) -> None:
-        self.event(
-            "error",
-            phase=phase,
-            type=type(error).__name__,
-            message=str(error),
-            traceback="".join(
-                traceback.format_exception(type(error), error, error.__traceback__),
-            ),
-        )
+        try:
+            self.event(
+                "error",
+                phase=phase,
+                type=type(error).__name__,
+                message=str(error),
+                traceback="".join(
+                    traceback.format_exception(type(error), error, error.__traceback__),
+                ),
+            )
+        except (OSError, ValueError):
+            logging.getLogger(__name__).exception(
+                "HTTP failure diagnostic could not be recorded phase=%r type=%s",
+                phase,
+                type(error).__name__,
+            )
 
     def request_location(self, target: str) -> tuple[str, str | None]:
         connection_url = _origin(self.host, self.port, tls=self.tls)

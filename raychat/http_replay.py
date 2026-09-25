@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import io
-import os
+import hashlib
 import shlex
-import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from .filesystem import write_bytes, write_immutable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -34,19 +34,7 @@ class ReplayRequest:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if sys.platform == "win32":
-        flags |= os.O_BINARY
-    with io.FileIO(os.open(path, flags, 0o600), "wb") as stream:
-        if os.name == "posix":
-            os.fchmod(stream.fileno(), 0o600)
-        pending = memoryview(data)
-        while pending:
-            written: object = stream.write(pending)
-            if not isinstance(written, int) or written <= 0:
-                message = "Could not write the HTTP replay artifact."
-                raise OSError(message)
-            pending = pending[written:]
+    write_bytes(path, data)
 
 
 def _body_argument(body: bytes, path: Path) -> str:
@@ -109,6 +97,9 @@ def write_curl(directory: Path, request: ReplayRequest) -> None:
     POSIX commands inline UTF-8 bodies of at most 4096 bytes without NUL or curl's
     leading ``@`` file marker. PowerShell always uses the body file to avoid native
     argument encoding changes. Credentials are unredacted; curl computes framing.
+    Each command pins an immutable body before publication. Retain older bodies
+    for previously copied commands; request-body.bin is a convenience snapshot.
+    The two command files publish independently and are each complete replays.
 
     """
     arguments = [
@@ -133,8 +124,10 @@ def write_curl(directory: Path, request: ReplayRequest) -> None:
     arguments.extend(_headers(request))
     powershell = list(arguments)
     if request.body is not None:
-        path = (directory / "request-body.bin").resolve()
-        _write_private(path, request.body)
+        name = "request-body-" + hashlib.sha256(request.body).hexdigest() + ".bin"
+        path = directory.resolve() / name
+        write_immutable(path, request.body)
+        _write_private(directory / "request-body.bin", request.body)
         arguments.extend(("--data-binary", _body_argument(request.body, path)))
         powershell.extend(("--data-binary", "@" + str(path)))
     command = " ".join(_quote(argument) for argument in arguments) + "\n"

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypedDict
 
+from raychat.filesystem import portable_component, write_bytes
+
 from . import checkpoint, serialization
 from .adapter import DataInst, RolloutOutput
 from .data_loader import ComparableHashable, DataId
@@ -934,14 +936,18 @@ class GEPAState(Generic[RolloutOutput, DataId]):
                     task_dir = (
                         Path(run_dir)
                         / "generated_best_outputs_valset"
-                        / f"task_{val_id}"
+                        / ("task_" + portable_component(checkpoint.key(val_id)))
                     )
                     task_dir.mkdir(parents=True, exist_ok=True)
                     output_path = (
                         task_dir / f"iter_{self.i + 1}_prog_{program_idx}.json"
                     )
-                    with output_path.open("w", encoding="utf-8") as fout:
-                        json.dump(output, fout, indent=4, default=json_default)
+                    write_bytes(
+                        output_path,
+                        json.dumps(output, indent=4, default=json_default).encode(
+                            "utf-8",
+                        ),
+                    )
         elif score == prev_score:
             pareto_front = self.program_at_pareto_front_valset.setdefault(val_id, set())
             pareto_front.add(program_idx)
@@ -1177,10 +1183,14 @@ def write_eval_scores_to_directory(
 ) -> None:
     """Write initial validation scores under their example directories."""
     for val_id, score in scores.items():
-        task_dir = Path(output_dir) / f"task_{val_id}"
+        task_dir = Path(output_dir) / (
+            "task_" + portable_component(checkpoint.key(val_id))
+        )
         task_dir.mkdir(parents=True, exist_ok=True)
-        with (task_dir / "iter_0_prog_0.json").open("w", encoding="utf-8") as f:
-            json.dump(score, f, indent=4, default=json_default)
+        write_bytes(
+            task_dir / "iter_0_prog_0.json",
+            json.dumps(score, indent=4, default=json_default).encode("utf-8"),
+        )
 
 
 def write_eval_outputs_to_directory(
@@ -1190,15 +1200,19 @@ def write_eval_outputs_to_directory(
     """Write generated rollout outputs (not scalar scores) to disk.
 
     Structure:
-      {output_dir}/task_{val_id}/iter_0_prog_0.json
+      {output_dir}/task_item-{sha256(encoded_id)}/iter_0_prog_0.json
 
     This directory is used to store best outputs for inspection/reuse.
     """
     for val_id, output in outputs.items():
-        task_dir = Path(output_dir) / f"task_{val_id}"
+        task_dir = Path(output_dir) / (
+            "task_" + portable_component(checkpoint.key(val_id))
+        )
         task_dir.mkdir(parents=True, exist_ok=True)
-        with (task_dir / "iter_0_prog_0.json").open("w", encoding="utf-8") as f:
-            json.dump(output, f, indent=4, default=json_default)
+        write_bytes(
+            task_dir / "iter_0_prog_0.json",
+            json.dumps(output, indent=4, default=json_default).encode("utf-8"),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

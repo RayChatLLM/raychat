@@ -6,7 +6,6 @@ import base64
 import importlib.abc
 import importlib.util
 import sys
-import tempfile
 import threading
 import uuid
 import weakref
@@ -16,6 +15,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, TypedDict
 
+from raychat.filesystem import OwnedTemporaryDirectory
 from raychat.packages import MAX_BYTES, MAX_FILES, Manifest, safe_name
 from raychat.packages import digest as _digest
 from raychat.packages import files as source_files
@@ -175,7 +175,8 @@ class SourceTree:
         if len(sources) > MAX_FILES or sum(map(len, sources.values())) > MAX_BYTES:
             error_message = "Plugin source exceeds the configured size limit."
             raise ValueError(error_message)
-        self._temporary = tempfile.TemporaryDirectory(prefix="raychat-generation-")
+        self._temporary = OwnedTemporaryDirectory(prefix="raychat-generation-")
+        self._retained = False
         self.directory = Path(self._temporary.name).resolve()
         try:
             self.code = self._compile_sources(sources)
@@ -302,8 +303,20 @@ class SourceTree:
         loaded.register = register
         return loaded
 
+    def retain(self, *, reason: str) -> None:
+        """Keep modules and files when resource shutdown cannot be established.
+
+        Retention is permanent for this generation. Context cleanup, retirement
+        and finalization must not remove files that a surviving consumer needs.
+
+        """
+        self._retained = True
+        self._temporary.retain(reason=reason)
+
     def retire(self) -> None:
         """Remove generation modules, unregister its finder and release files."""
+        if self._retained:
+            return
         for name in list(sys.modules):
             if name == self.prefix or name.startswith(self.prefix + "."):
                 sys.modules.pop(name, None)

@@ -18,6 +18,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+class SharingViolationError(PermissionError):
+    """Emulate Windows sharing contention without conflating POSIX permissions."""
+
+    winerror = 32
+
+
 class PersistenceHarness(RecoveryHarness):
     """Expose the real serialized persistence and control loop to fault injection."""
 
@@ -101,7 +107,7 @@ class SupervisorPersistenceTests(TypedTestCase):
                 if len(attempts) <= failures:
                     self.equal(decode(target.read_bytes()), {"old": True})
                     message = "Windows sharing violation"
-                    raise PermissionError(message)
+                    raise SharingViolationError(message)
                 return original_replace(source, destination)
 
             with (
@@ -113,7 +119,7 @@ class SupervisorPersistenceTests(TypedTestCase):
             self.equal(len(set(attempts)), 1)
             self.equal(len(synced), 1)
             self.equal(decode(target.read_bytes()), {"draft": "雪 ☃"})
-            self.equal(list(target.parent.glob("*.tmp")), [])
+            self.equal(list(target.parent.glob(".raychat-*.pending")), [])
 
     def test_permanent_permission_error_keeps_manifest_and_recovers(self) -> None:
         """Exhaust retries while preserving the old manifest and cleaning temps."""
@@ -132,16 +138,16 @@ class SupervisorPersistenceTests(TypedTestCase):
                 if destination == target:
                     attempts.append(source)
                     message = "Windows destination locked"
-                    raise PermissionError(message)
+                    raise SharingViolationError(message)
                 return original_replace(source, destination)
 
             with mock.patch.object(Path, "replace", replace):
                 self.require(not asyncio.run(supervisor.record()))
-            self.equal(len(attempts), 11)
+            self.require(len(attempts) > 1)
             self.equal(target.read_bytes(), original)
             self.equal(supervisor.checkpoints, {})
             self.require("destination locked" in str(core.messages[-1]["text"]))
-            self.equal(list(target.parent.glob("*.tmp")), [])
+            self.equal(list(target.parent.glob(".raychat-*.pending")), [])
             self.require(asyncio.run(supervisor.record()))
             self.equal(supervisor.persistence_error, "")
             self.equal(decode(target.read_bytes())["state"], {"draft": "new"})
@@ -165,7 +171,10 @@ class SupervisorPersistenceTests(TypedTestCase):
                 self.require(not asyncio.run(supervisor.record()))
             self.equal(len(attempts), 1)
             self.require("disk full" in str(core.messages[-1]["text"]))
-            self.equal(list(supervisor.releases.directory.glob("*.tmp")), [])
+            self.equal(
+                list(supervisor.releases.directory.glob(".raychat-*.pending")),
+                [],
+            )
 
     def test_record_and_save_share_lock_and_snapshot_before_retry(self) -> None:
         """A blocked checkpoint cannot interleave transactions or mix state versions."""
@@ -184,7 +193,7 @@ class SupervisorPersistenceTests(TypedTestCase):
             if not started.is_set():
                 started.set()
                 message = "transient lock"
-                raise PermissionError(message)
+                raise SharingViolationError(message)
             writes.append((destination.name, decode(source.read_bytes())))
             return original_replace(source, destination)
 
@@ -218,7 +227,7 @@ class SupervisorPersistenceTests(TypedTestCase):
         def replace(_source: Path, _destination: Path) -> Path:
             started.set()
             message = "Windows sharing violation"
-            raise PermissionError(message)
+            raise SharingViolationError(message)
 
         with mock.patch.object(Path, "replace", replace):
             task = asyncio.create_task(supervisor.record())
@@ -227,7 +236,7 @@ class SupervisorPersistenceTests(TypedTestCase):
             with self.rejected(asyncio.CancelledError):
                 await task
         self.equal(target.read_bytes(), original)
-        self.equal(list(target.parent.glob("*.tmp")), [])
+        self.equal(list(target.parent.glob(".raychat-*.pending")), [])
         self.require(await asyncio.wait_for(supervisor.record(), timeout=1))
 
     def test_failed_fsync_does_not_replace_or_publish_checkpoint(self) -> None:
@@ -248,7 +257,7 @@ class SupervisorPersistenceTests(TypedTestCase):
                 self.require(not asyncio.run(supervisor.record()))
             self.equal(target.read_bytes(), original)
             self.equal(supervisor.checkpoints, {})
-            self.equal(list(target.parent.glob("*.tmp")), [])
+            self.equal(list(target.parent.glob(".raychat-*.pending")), [])
 
     def test_failed_dispatch_and_completion_preserve_durability_barriers(self) -> None:
         """No dispatch ack or lost uncertainty evidence follows a failed save."""

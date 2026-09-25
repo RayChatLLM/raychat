@@ -13,10 +13,12 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
+from raychat.filesystem import run_filesystem_task, write_bytes_async
 from raychat.provider_settings import provider_settings
 from raychat.ui.terminal import TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
@@ -221,21 +223,7 @@ class Supervisor:
     @staticmethod
     async def _replace(path: Path, data: bytes) -> None:
         """Flush and close before replacing; tolerate short Windows sharing locks."""
-        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-        try:
-            with temporary.open("wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            # Eleven attempts over at most half a second of retry sleeps.
-            for _attempt in range(10):
-                if _replace_if_available(temporary, path):
-                    return
-                await asyncio.sleep(0.05)
-            temporary.replace(path)
-        finally:
-            with contextlib.suppress(OSError):
-                temporary.unlink(missing_ok=True)
+        await write_bytes_async(path, data)
 
     def _persistence_failure(self, error: OSError) -> None:
         self.persistence_error = f"Recovery state could not be saved: {error}"
@@ -268,9 +256,10 @@ class Supervisor:
             core.captured.set()
 
     def _changed_plugins(self, release: Release) -> list[str]:
-        if self.current is None:
+        current = self.current
+        if current is None:
             return []
-        previous = self.current.release.path / "plugins"
+        previous = current.release.path / "plugins"
         updated = release.path / "plugins"
         names = {
             path.name
@@ -295,7 +284,10 @@ class Supervisor:
         recover_history: bool | Literal["retained"] = False,
         safe: bool = False,
     ) -> Core:
-        release.verify()
+        await run_filesystem_task(release.verify)
+        changed_plugins = await run_filesystem_task(
+            partial(self._changed_plugins, release),
+        )
         log = (self.releases.directory / ("core-" + uuid.uuid4().hex + ".log")).open(
             "ab",
         )
@@ -349,7 +341,7 @@ class Supervisor:
             probe=probe,
             workspace=str(workspace),
             recover_history=recover_history,
-            changed_plugins=self._changed_plugins(release),
+            changed_plugins=changed_plugins,
         )
         core.reader = asyncio.create_task(self._reader(core))
         return core
@@ -465,17 +457,21 @@ class Supervisor:
             ).items()
         }
         source = text_field(message.get("source", ""), "source path", allow_empty=True)
-        candidate = await asyncio.to_thread(
-            self.releases.capture,
-            Path(source) if source else self.releases.source,
-            changes,
+        candidate = await run_filesystem_task(
+            partial(
+                self.releases.capture,
+                Path(source) if source else self.releases.source,
+                changes,
+            ),
         )
         overlay = message.get("overlay")
         if overlay is not None:
-            await asyncio.to_thread(
-                (candidate / "harness.txt").write_text,
-                text_field(overlay, "overlay", allow_empty=True),
-                encoding="utf-8",
+            await run_filesystem_task(
+                partial(
+                    (candidate / "harness.txt").write_text,
+                    text_field(overlay, "overlay", allow_empty=True),
+                    encoding="utf-8",
+                ),
             )
         self._status("Update: validating imports, types, tests and packaging")
         release = await self.releases.validate(
@@ -604,7 +600,9 @@ class Supervisor:
             backup = self.releases.directory / "recovery-before-safe.json"
             backup_saved = await self._save(backup, self.last_state)
             try:
-                saved = retained_state(Path(self.checkpoints[target.identity]))
+                saved = await run_filesystem_task(
+                    partial(retained_state, Path(self.checkpoints[target.identity])),
+                )
                 replacement = await self._restore_state(target, saved, retained=True)
                 status = "Core recovered from retained state; stale queued work removed"
             except Exception:
@@ -972,22 +970,6 @@ class Supervisor:
         if self.start_error:
             sys.stderr.write("Error: " + self.start_error + "\n")
         return result
-
-
-def _replace_if_available(temporary: Path, destination: Path) -> bool:
-    """Attempt atomic replacement without waiting on transient sharing locks.
-
-    Returns
-    -------
-    bool
-        Whether replacement succeeded rather than encountering a permission error.
-
-    """
-    try:
-        temporary.replace(destination)
-    except PermissionError:
-        return False
-    return True
 
 
 def _workspace(argv: Sequence[str]) -> Path:

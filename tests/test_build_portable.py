@@ -63,21 +63,28 @@ class PortableBuildTests(PackageTestCase):
     def test_release_folder_replacement_removes_stale_files() -> None:
         """Verify release folder replacement removes stale files."""
         with tempfile.TemporaryDirectory() as temporary:
-            target = Path(temporary) / "release"
+            target = Path(temporary).resolve() / "release"
             target.mkdir()
             (target / "stale.txt").write_text("stale", encoding="utf-8")
             members = {
                 "PORTABLE_MANIFEST.json": b"{}\n",
                 "nested/source.py": b"print('ok')\n",
             }
-            build_portable.replace_release_folder(target, members, set())
+            with mock.patch.object(
+                Path,
+                "rmdir",
+                side_effect=AssertionError("Do not recycle names"),
+            ):
+                build_portable.replace_release_folder(target, members, set())
             build_portable.verify_release_folder(target, members)
             require(not ((target / "stale.txt").exists()))
+            require(list(target.parent.glob(".release.transaction*")) == [])
+            require((target.parent / ".release.lock").is_file())
 
     def test_release_folder_rolls_back_if_final_verification_fails(self) -> None:
         """Verify release folder rolls back if final verification fails."""
         with tempfile.TemporaryDirectory() as temporary:
-            target = Path(temporary) / "release"
+            target = Path(temporary).resolve() / "release"
             target.mkdir()
             original = target / "original.txt"
             original.write_text("keep me", encoding="utf-8")
@@ -104,6 +111,38 @@ class PortableBuildTests(PackageTestCase):
                 )
 
             self.equal(original.read_text(encoding="utf-8"), "keep me")
+
+    def test_failed_rollback_retains_original_backup_and_primary_error(self) -> None:
+        """A second replacement failure must not garbage-collect the old release."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "release"
+            target.mkdir()
+            (target / "original.txt").write_bytes(b"keep me")
+            original_replace = Path.replace
+
+            def replace(source: Path, destination: Path) -> Path:
+                if destination == target:
+                    message = (
+                        "rollback failed"
+                        if source.name == "original"
+                        else "publish failed"
+                    )
+                    raise OSError(message)
+                return original_replace(source, destination)
+
+            with (
+                mock.patch.object(Path, "replace", replace),
+                self.rejected(OSError, "publish failed"),
+            ):
+                build_portable.replace_release_folder(
+                    target,
+                    {"new.txt": b"new"},
+                    set(),
+                )
+            backups = list(root.glob(".raychat-release-*"))
+            self.equal(len(backups), 1)
+            self.equal((backups[0] / "original/original.txt").read_bytes(), b"keep me")
 
 
 class SmokeProcessTests(PackageTestCase):

@@ -24,7 +24,6 @@ import math
 import os
 import secrets
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -35,7 +34,13 @@ from typing import TYPE_CHECKING, Generic, TypedDict, TypeVar
 
 import raychat.composition as _rc_composition
 import raychat.protocol as _rc_protocol
+from raychat import filesystem
 from raychat.configuration import SETTINGS
+from raychat.filesystem import (
+    OwnedTemporaryDirectory,
+    destinations_conflict,
+    write_bytes,
+)
 from raychat.provider_settings import ProviderSettings, provider_settings
 from raychat.sdk import (
     Action,
@@ -1504,6 +1509,9 @@ class _CaseRun:
     def execute(self, root: Path, chat: Chat) -> None:
         """Run the composed agent and retain failures as diagnostic evidence.
 
+        OS errors from session setup, persistence and shutdown propagate.
+        Tool-level errors are already recorded by the session as action results.
+
         Raises
         ------
         ProviderCallError
@@ -1534,7 +1542,7 @@ class _CaseRun:
             )
         except ProviderCallError:
             raise
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        except (RuntimeError, TypeError, ValueError) as exc:
             self.failure = f"{type(exc).__name__}: {exc}"
 
 
@@ -1723,7 +1731,7 @@ def evaluate_case(
     expected_actions = _expected_actions(fixture)
     artifacts: list[VerifiedArtifact] = []
     run = _CaseRun(example=fixture, protocol=protocol)
-    with tempfile.TemporaryDirectory(prefix="chat-prompt-eval-") as directory:
+    with OwnedTemporaryDirectory(prefix="chat-prompt-eval-") as directory:
         root = Path(directory)
         _prepare_case_files(root, fixture)
         run.execute(root, chat_factory(fixture))
@@ -2629,7 +2637,7 @@ def _is_typing_guard(node: ast.expr, guards: set[str], modules: set[str]) -> boo
     )
 
 
-def _active_import_names(tree: ast.AST) -> set[str]:
+def _active_import_names(tree: ast.AST, *, shared_filesystem: bool = False) -> set[str]:
     guards, modules = _typing_guard_names(tree)
     names: set[str] = set()
     pending = [tree]
@@ -2640,7 +2648,8 @@ def _active_import_names(tree: ast.AST) -> set[str]:
         elif isinstance(node, ast.Import):
             names.update(alias.name.partition(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module.partition(".")[0])
+            if not (shared_filesystem and node.module == "raychat.filesystem"):
+                names.add(node.module.partition(".")[0])
         else:
             pending.extend(ast.iter_child_nodes(node))
     return names
@@ -2658,7 +2667,21 @@ def external_engine_imports(root: Path | None = None) -> list[str]:
     source_root = root if root is not None else Path(__file__).parent / "gepa"
     names: set[str] = set()
     for path in source_root.rglob("*.py"):
-        names.update(_active_import_names(ast.parse(path.read_text(encoding="utf-8"))))
+        names.update(
+            _active_import_names(
+                ast.parse(path.read_text(encoding="utf-8")),
+                shared_filesystem=root is None,
+            ),
+        )
+    if root is None:
+        # The private engine shares the host's dependency-free filesystem policy.
+        # Audit that implementation and its package initializer too; do not exempt
+        # arbitrary host imports or merely allowlist an unchecked dependency root.
+        helper = Path(filesystem.__file__)
+        for path in (helper, helper.parent / "__init__.py"):
+            names.update(
+                _active_import_names(ast.parse(path.read_text(encoding="utf-8"))),
+            )
     return sorted(names - sys.stdlib_module_names)
 
 
@@ -2806,7 +2829,10 @@ def verify_launch_port() -> LaunchVerification:
 
 
 def write_protocol(path: Path, protocol: str) -> None:
-    """Write a bounded append-only protocol without newline translation.
+    """Publish a complete protocol snapshot whose text preserves the base prefix.
+
+    Explicit exports use last-writer-wins publication. Reports publish separately
+    and identify the measured protocol by digest; they are not a file transaction.
 
     Raises
     ------
@@ -2832,11 +2858,11 @@ def write_protocol(path: Path, protocol: str) -> None:
             error_message,
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    write_bytes(path, data)
 
 
 def write_json_report(path: Path, report: Mapping[str, object]) -> None:
-    """Write a portable UTF-8/LF proof report without platform translation."""
+    """Publish an independent last-writer-wins UTF-8/LF proof report snapshot."""
     payload = dict(report)
     raw = (
         json.dumps(
@@ -2849,7 +2875,7 @@ def write_json_report(path: Path, report: Mapping[str, object]) -> None:
         + "\n"
     ).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(raw)
+    write_bytes(path, raw)
 
 
 @dataclass(frozen=True)
@@ -3188,7 +3214,7 @@ class _Arguments(argparse.Namespace):
     show_prompt: bool
     cases: int
     delay_ms: float
-    output: Path | None
+    output: Path | None = None
     report: Path | None = None
 
 
@@ -3268,6 +3294,16 @@ def _live_command(args: _Arguments) -> tuple[Mapping[str, object], bool]:
     return report, ok
 
 
+def _validate_exports(args: _Arguments) -> None:
+    if (
+        args.output is not None
+        and args.report is not None
+        and destinations_conflict(args.output, args.report)
+    ):
+        message = "--output and --report must be different paths."
+        raise ValueError(message)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run a provenance check, demonstration or hosted optimization.
 
@@ -3287,6 +3323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "live": _live_command,
     }
     try:
+        _validate_exports(args)
         report, ok = handlers[args.handler](args)
         if args.report is not None:
             write_json_report(args.report, report)

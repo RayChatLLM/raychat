@@ -5,8 +5,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
+import stat
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -15,7 +17,7 @@ from typing import TYPE_CHECKING, NoReturn, TypedDict
 
 from raychat.configuration import SETTINGS
 
-from .file_lock import lock_stream
+from .filesystem import FileLock, open_journal, read_regular
 from .sdk import SessionMessage
 from .validation import ConfigurationError, integer_field, json_object, object_field
 
@@ -96,26 +98,28 @@ def _validate_message(data: Mapping[str, object]) -> None:
 
 def _candidate(path: Path) -> tuple[int, str] | None:
     try:
-        if _ID.fullmatch(path.stem) and not path.is_symlink() and path.is_file():
-            return path.stat().st_mtime_ns, path.stem
+        metadata = path.lstat()
+        if _ID.fullmatch(path.stem) and stat.S_ISREG(metadata.st_mode):
+            return metadata.st_mtime_ns, path.stem
     except FileNotFoundError:
         return None
     return None
 
 
 def _preview(path: Path, session_id: str) -> str:
-    if path.is_symlink():
+    if not stat.S_ISREG(path.lstat().st_mode):
         return session_id
+    with FileLock(path.with_name(path.name + ".lock")):
+        raw = read_regular(path, _STORAGE.preview_bytes, follow_symlinks=False)
+        modified = path.stat().st_mtime
     stamp = (
         datetime
-        .fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        .fromtimestamp(modified, tz=timezone.utc)
         .astimezone()
         .strftime("%Y-%m-%d %H:%M")
     )
-    with path.open("rb") as stream:
-        raw = stream.read(_STORAGE.preview_bytes)
     title = "Empty conversation"
-    for line in raw.splitlines():
+    for line in raw[: raw.rfind(b"\n") + 1].splitlines():
         record = object_field(json_object(line), "preview record")
         data = record.get("data", {})
         if record.get("type") == "message":
@@ -155,32 +159,46 @@ class SessionStore:
             error_message = "Invalid session ID."
             raise ValueError(error_message)
         self.path = self.folder / (self.session_id + _STORAGE.session_suffix)
-        if session_id is not None and not self.path.exists():
-            error_message = "Session does not exist in this workspace."
-            raise ValueError(error_message)
-        if self.path.is_symlink():
-            error_message = "Session must not be a symlink."
-            raise ValueError(error_message)
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(self.path, flags, _STORAGE.file_mode)
-        self.stream = os.fdopen(descriptor, "r+b")
+        self._writer = FileLock(self.path.with_name(self.path.name + ".writer.lock"))
+        self._io = FileLock(self.path.with_name(self.path.name + ".lock"), timeout=0.5)
+        self._lock()
+        try:
+            with self._io:
+                self._open_log(create=session_id is None)
+        except BaseException:
+            self._writer.close()
+            raise
+
+    def _open_log(self, *, create: bool) -> None:
+        try:
+            self.stream = open_journal(
+                self.path,
+                create=create,
+                mode=_STORAGE.file_mode,
+            )
+        except FileNotFoundError as error:
+            message = "Session does not exist in this workspace."
+            raise ValueError(message) from error
         self.entries: dict[str, SessionRecord] = {}
         self.head: str | None = None
         self.committed: str | None = None
         self.failed = False
         try:
-            self._lock()
             self._load()
         except BaseException:
-            self.stream.close()
+            try:
+                self.stream.close()
+            except OSError:
+                logging.getLogger(__name__).exception(
+                    "Failed to close session journal %r",
+                    str(self.path),
+                )
             raise
 
     def _lock(self) -> None:
         try:
-            lock_stream(self.stream)
-        except OSError:
+            self._writer.acquire()
+        except RuntimeError:
             error_message = "Session already has an active writer."
             raise RuntimeError(error_message) from None
 
@@ -292,18 +310,21 @@ class SessionStore:
             The new journal record identifier.
 
         """
-        with self._mutex:
-            record: SessionRecord = {
-                "id": uuid.uuid4().hex,
-                "parent_id": self.head,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "type": kind,
-                "data": copy.deepcopy(dict(data)),
-            }
-            self._write(record)
-            self.entries[record["id"]] = record
-            self.head = record["id"]
-            return self.head
+        with self._mutex, self._io:
+            return self._append(kind, data)
+
+    def _append(self, kind: str, data: Mapping[str, object]) -> str:
+        record: SessionRecord = {
+            "id": uuid.uuid4().hex,
+            "parent_id": self.head,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": kind,
+            "data": copy.deepcopy(dict(data)),
+        }
+        self._write(record)
+        self.entries[record["id"]] = record
+        self.head = record["id"]
+        return self.head
 
     def _durable_append(
         self,
@@ -326,7 +347,7 @@ class SessionStore:
         entry = None
         try:
             self.head = parent
-            entry = self.append(kind, data)
+            entry = self._append(kind, data)
             self._sync()
         except BaseException:
             self.head = previous
@@ -345,7 +366,7 @@ class SessionStore:
 
     def commit(self, snapshot: Mapping[str, object]) -> None:
         """Durably select the completed turn and its plugin state."""
-        with self._mutex:
+        with self._mutex, self._io:
             self.committed = self._durable_append(
                 "turn_commit",
                 {"state": snapshot["state"]},
@@ -354,7 +375,7 @@ class SessionStore:
 
     def checkpoint(self, state: Mapping[str, object]) -> None:
         """Persist explicit command state while retaining pending turn history."""
-        with self._mutex:
+        with self._mutex, self._io:
             working, committed = self.head, self.committed
             self.committed = self._durable_append(
                 "state",
@@ -406,7 +427,7 @@ class SessionStore:
 
     def fork(self, entry_id: str) -> None:
         """Durably select an existing completed turn as a new branch point."""
-        with self._mutex:
+        with self._mutex, self._io:
             self._validate_fork(entry_id)
             self._durable_append("select", {"target": entry_id}, parent=entry_id)
             self.head = self.committed = entry_id
@@ -446,8 +467,18 @@ class SessionStore:
     def close(self) -> None:
         """Close the journal and release its exclusive writer lock."""
         with self._mutex:
-            if not self.stream.closed:
-                self.stream.close()
+            if self.stream.closed:
+                self._writer.close()
+                return
+            with self._io:
+                self._close_log()
+
+    def _close_log(self) -> None:
+        try:
+            self.stream.close()
+        finally:
+            if self.stream.closed:
+                self._writer.close()
 
     @classmethod
     def list_sessions(
@@ -501,7 +532,7 @@ class SessionStore:
         directory: str | Path | None,
         session_id: str,
     ) -> str:
-        """Read a bounded preview without taking a writer lock or changing data.
+        """Read a bounded preview under an immediate, short-lived journal lock.
 
         Returns
         -------
@@ -518,6 +549,7 @@ class SessionStore:
             return _preview(path, checked_id)
         except (
             OSError,
+            RuntimeError,
             ValueError,
             TypeError,
             AttributeError,
