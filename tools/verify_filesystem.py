@@ -9,6 +9,7 @@ SUITES = (
     "tests.test_filesystem_process",
     "tests.test_app_config",
     "tests.test_bootstrap_filesystem.BootstrapReadTests",
+    "tests.test_bootstrap_filesystem.BootstrapFilesystemTests",
     "tests.test_core_tools",
     "tests.test_entrypoint.ResourceCleanupTests",
     "tests.test_presentation",
@@ -34,6 +35,7 @@ SUITES = (
     "tests.test_package_recovery",
     "tests.test_plugin_filesystem_process",
     "tests.test_plugin_memory",
+    "tests.test_plugin_skills.SkillStoreTests",
 )
 
 

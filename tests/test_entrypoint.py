@@ -25,6 +25,7 @@ from raychat.storage import SessionStore
 from raychat.type_support import override
 from raychat.ui.terminal import InteractiveTerminal, TerminalSession
 from raychat.validation import array_field, json_object, object_field
+from raychat.workers import AgentWorker
 from tests.assertions import TypedTestCase
 from tests.environment_support import provider_environment
 from tests.plugin_support import (
@@ -502,6 +503,76 @@ class ResumeTests(_EntrypointFixture):
 
 class ResourceCleanupTests(_EntrypointFixture):
     """Keep run/startup failures and release owned files after shutdown errors."""
+
+    def test_returned_failure_and_cancellation_survive_resource_cleanup(self) -> None:
+        """Nonzero status is a completed outcome even without a raised exception."""
+        for status in (1, 130):
+            runtime = _FailingRuntime(self.root)
+            log = _ObservedLog()
+            resources = AgentResources(runtime, None, log)
+            with (
+                self.subTest(status=status),
+                mock.patch.object(
+                    entrypoint,
+                    "create_resources",
+                    return_value=resources,
+                ),
+                mock.patch.object(entrypoint, "run_exec", return_value=status),
+                self.assertLogs("raychat.entrypoint", level="ERROR") as logs,
+            ):
+                self.equal(self.main(["--exec", "/plugins"]), status)
+            self.equal(runtime.close_calls, 1)
+            self.require(log.closed)
+            self.require("plugin close failed" in "\n".join(logs.output))
+
+    def test_worker_cleanup_preserves_failure_interrupt_and_success_policy(
+        self,
+    ) -> None:
+        """Join the real worker before injecting its reported shutdown failure."""
+        for result in (
+            0,
+            1,
+            130,
+            KeyboardInterrupt(),
+            ValueError("primary exec failure"),
+        ):
+            with self.subTest(result=result):
+                self._worker_cleanup_failure(result)
+
+    def _worker_cleanup_failure(self, result: int | BaseException) -> None:
+        join = AgentWorker.join
+        joined: list[AgentWorker] = []
+
+        def failed_join(worker: AgentWorker, timeout: float | None = None) -> bool:
+            join(worker, timeout)
+            joined.append(worker)
+            message = "secondary worker cleanup"
+            raise RuntimeError(message)
+
+        def receive(_worker: AgentWorker, _job: int) -> int:
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        self.err.seek(0)
+        self.err.truncate()
+        with (
+            mock.patch.object(AgentWorker, "join", failed_join),
+            mock.patch.object(entrypoint, "_receive_exec_result", receive),
+            mock.patch("raychat.entrypoint.logging.getLogger") as logger,
+        ):
+            observed = self.main(["--exec", "/plugins"])
+        self.equal(len(joined), 1)
+        self.require(not joined[0].is_alive)
+        expected = 130 if isinstance(result, KeyboardInterrupt) else result
+        self.equal(observed, expected if isinstance(expected, int) and expected else 1)
+        if isinstance(result, ValueError):
+            self.equal(self.err.getvalue(), "Error: primary exec failure\n")
+        elif result == 0:
+            self.require("secondary worker cleanup" in self.err.getvalue())
+        else:
+            self.equal(self.err.getvalue(), "")
+        self.equal(logger.call_count, 0 if result == 0 else 1)
 
     def test_close_preserves_first_error_after_store_and_log_failures(self) -> None:
         """Attempt every owner and report secondary failures without masking."""

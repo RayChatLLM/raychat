@@ -310,7 +310,7 @@ class Supervisor:
             partial(self._changed_plugins, release),
         )
         log = (self.releases.directory / ("core-" + uuid.uuid4().hex + ".log")).open(
-            "ab",
+            "xb",
         )
         environment = {
             **os.environ,
@@ -341,7 +341,12 @@ class Supervisor:
                 limit=MAX_MESSAGE + 1,
             )
         except BaseException:
-            log.close()
+            try:
+                log.close()
+            except OSError:
+                logging.getLogger(__name__).exception(
+                    "Child diagnostic close failed after launch failure",
+                )
             raise
         core = Core(process, release, log)
         self.children.append(core)
@@ -378,30 +383,42 @@ class Supervisor:
     async def _stop(core: Core, *, force: bool = False) -> None:
         core.expected_exit = True
         try:
-            if core.process.returncode is None:
-                if not force:
-                    try:
-                        core.send("retire")
-                    except (BrokenPipeError, ConnectionError, OSError, RuntimeError):
-                        force = True
-                if force and core.process.returncode is None:
-                    with contextlib.suppress(ProcessLookupError):
-                        core.process.kill()
-                try:
-                    await asyncio.wait_for(core.process.wait(), timeout=10)
-                except asyncio.TimeoutError:
-                    with contextlib.suppress(ProcessLookupError):
-                        core.process.kill()
-                    await asyncio.wait_for(core.process.wait(), timeout=10)
-            if core.reader is not None:
-                try:
-                    await asyncio.wait_for(core.reader, timeout=2)
-                except asyncio.TimeoutError:
-                    core.reader.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await core.reader
-        finally:
+            await Supervisor._retire_core(core, force=force)
+        except BaseException:
+            try:
+                core.log.close()
+            except OSError:
+                logging.getLogger(__name__).exception(
+                    "Child diagnostic close failed after shutdown failure",
+                )
+            raise
+        else:
             core.log.close()
+
+    @staticmethod
+    async def _retire_core(core: Core, *, force: bool) -> None:
+        if core.process.returncode is None:
+            if not force:
+                try:
+                    core.send("retire")
+                except (BrokenPipeError, ConnectionError, OSError, RuntimeError):
+                    force = True
+            if force and core.process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    core.process.kill()
+            try:
+                await asyncio.wait_for(core.process.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    core.process.kill()
+                await asyncio.wait_for(core.process.wait(), timeout=10)
+        if core.reader is not None:
+            try:
+                await asyncio.wait_for(core.reader, timeout=2)
+            except asyncio.TimeoutError:
+                core.reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await core.reader
 
     async def _stop_live_children(self) -> None:
         """Kill every unreaped child while preserving the original failure."""

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from raychat.filesystem import read_regular
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
@@ -113,6 +115,11 @@ class SkillStore:
     def discover(cls, roots: Iterable[str | Path]) -> Self:
         """Discover configured skills in deterministic path order.
 
+        Operator-selected roots, immediate child directories and skill files may
+        intentionally follow links. Read only regular descriptors, close before
+        parsing, and never retry a read. Sources must remain quiescent during
+        discovery; existing-file deduplication does not reserve their identities.
+
         Returns
         -------
         Self
@@ -140,8 +147,7 @@ class SkillStore:
         skills: list[Skill] = []
         total = 0
         for source in candidates:
-            with source.open("rb") as stream:
-                raw = stream.read(MAX_SKILL_BYTES + 1)
+            raw = read_regular(source, MAX_SKILL_BYTES + 1)
             if len(raw) > MAX_SKILL_BYTES:
                 error_message = f"Skill exceeds {MAX_SKILL_BYTES} bytes: {source}"
                 raise ValueError(error_message)

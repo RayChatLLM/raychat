@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest import mock
 
+from raychat import filesystem
 from raychat.filesystem import (
     FileLock,
     OwnedTemporaryDirectory,
@@ -40,9 +41,10 @@ from raychat.filesystem import (
 )
 from raychat.type_support import override
 from tests.assertions import TypedTestCase
+from tests.transport_support import captured
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from _typeshed import ReadableBuffer
 
@@ -581,6 +583,155 @@ sys.stdin.readline()
             bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(completion, 5)
             await bounded
             self.equal(active.returncode, 0)
+
+
+class FilesystemCloseTests(TypedTestCase):
+    """Close once and retain the operation error when cleanup also fails."""
+
+    def test_failed_wrapping_preserves_error_and_attempts_all_cleanup(self) -> None:
+        """Every shared descriptor owner reports secondary close errors separately."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "file"
+            target.write_bytes(b"original")
+            operations: tuple[tuple[str, Callable[[], object]], ...] = (
+                ("stage", lambda: write_bytes(target, b"new")),
+                ("read", lambda: read_regular(target, 20)),
+                ("journal", lambda: filesystem.open_journal(target, create=False)),
+                ("append", lambda: filesystem.append_owned(target, b"new")),
+                ("lock", lambda: FileLock(root / "file.lock").acquire()),
+                ("transcript", lambda: filesystem.open_private_append(target)),
+            )
+            closed: list[int] = []
+            original_close = os.close
+
+            def failed_close(descriptor: int) -> None:
+                closed.append(descriptor)
+                original_close(descriptor)
+                message = "secondary descriptor close"
+                raise OSError(message)
+
+            for name, operation in operations:
+                primary = OSError("primary wrapping failure")
+                with (
+                    self.subTest(owner=name),
+                    mock.patch.object(os, "fdopen", side_effect=primary),
+                    mock.patch.object(filesystem, "FileIO", side_effect=primary),
+                    mock.patch.object(os, "close", failed_close),
+                    self.assertLogs("raychat.filesystem", level="ERROR") as logs,
+                ):
+                    observed = captured(OSError, operation)
+                self.require(observed is primary)
+                self.equal(len(closed), 1)
+                with self.rejected(OSError):
+                    os.fstat(closed.pop())
+                self.require("secondary descriptor close" in "\n".join(logs.output))
+                self.equal(list(root.glob(".raychat-*.pending")), [])
+                self.equal(target.read_bytes(), b"original")
+
+    def test_read_and_append_preserve_primary_when_stream_close_fails(self) -> None:
+        """The same owned stream is closed once after a failed read or append."""
+        for operation in ("read", "append", "record"):
+            with self.subTest(operation=operation):
+                self._failed_stream(operation, fail_operation=True)
+
+    def test_close_failure_after_success_is_not_silenced(self) -> None:
+        """A successful read or append still reports a failed final close."""
+        for operation in ("read", "append", "record"):
+            with self.subTest(operation=operation):
+                self._failed_stream(operation, fail_operation=False)
+
+    def _failed_stream(self, operation: str, *, fail_operation: bool) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "file"
+            target.write_bytes(b"original\n")
+            primary = OSError("primary IO failure") if fail_operation else None
+            stream = _CloseFailingBuffer(primary)
+
+            def wrap(descriptor: int, _mode: str) -> _CloseFailingBuffer:
+                os.close(descriptor)
+                return stream
+
+            def run() -> None:
+                if operation == "read":
+                    read_regular(target, 20)
+                elif operation == "append":
+                    filesystem.append_owned(target, b"new")
+                else:
+                    filesystem.append_record(target, b"new\n")
+
+            with (
+                mock.patch.object(os, "fdopen", wrap),
+                mock.patch.object(filesystem, "FileIO", wrap),
+                mock.patch("raychat.filesystem._LOG.exception") as log,
+            ):
+                observed = captured(OSError, run)
+            if primary is not None:
+                self.require(observed is primary)
+                self.equal(log.call_count, 1)
+            else:
+                self.equal(str(observed), "secondary stream close")
+                self.equal(log.call_count, 0)
+            self.equal(stream.closes, 1)
+            self.require(stream.closed)
+            self.equal(target.read_bytes(), b"original\n")
+
+    def test_lock_context_preserves_primary_and_releases_os_ownership(self) -> None:
+        """A failed close is neither retried nor allowed to mask consumer failure."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "file.lock"
+            lock = FileLock(path)
+            close = lock.close
+            primary = ValueError("primary lock consumer")
+            closes: list[None] = []
+
+            def failed_close() -> None:
+                closes.append(None)
+                close()
+                message = "secondary lock close"
+                raise OSError(message)
+
+            def run() -> None:
+                with lock:
+                    raise primary
+
+            with (
+                mock.patch.object(lock, "close", failed_close),
+                self.assertLogs("raychat.filesystem", level="ERROR") as logs,
+            ):
+                observed = captured(ValueError, run)
+            self.require(observed is primary)
+            self.equal(closes, [None])
+            self.require("secondary lock close" in "\n".join(logs.output))
+            with FileLock(path):
+                self.require(path.is_file())
+
+
+class _CloseFailingBuffer(io.BytesIO):
+    def __init__(self, primary: OSError | None) -> None:
+        super().__init__()
+        self.primary = primary
+        self.closes = 0
+
+    @override
+    def read(self, size: int | None = -1, /) -> bytes:
+        if self.primary is not None:
+            raise self.primary
+        return super().read(size)
+
+    @override
+    def write(self, data: ReadableBuffer, /) -> int:
+        if self.primary is not None:
+            raise self.primary
+        return super().write(data)
+
+    @override
+    def close(self) -> None:
+        if not self.closed:
+            self.closes += 1
+            super().close()
+            message = "secondary stream close"
+            raise OSError(message)
 
 
 class FilesystemBoundaryTests(TypedTestCase):
