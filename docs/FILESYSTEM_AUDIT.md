@@ -1837,3 +1837,34 @@ is not required. The final presentation/filesystem/evidence selection passes all
 60 tests on local macOS Python 3.10.19 and 3.14.3. Strict typing/lint/format passes
 in `build/filesystem-quality-92`. The presentation tests are selected in all native
 CI jobs; the log change still requires its own GitHub CI result.
+
+### Standard-user Windows and antivirus acceptance
+
+`tools.verify_filesystem` defines the shared native filesystem test selection.
+The normal Windows/Linux/macOS matrix and the dedicated Windows standard-user
+jobs run that same selection. The extra jobs cover Python 3.10 and 3.14. Their
+PowerShell setup refuses to run outside an ephemeral GitHub-hosted Windows VM.
+It creates one local Users-group account, archives the tested commit into a unique
+installation tree, and grants that account read/execute access. Only its private
+data/profile/temp directory receives Modify access. The child checks its actual
+SID and rejects any Administrators-group token, including a deny-only membership.
+It also requires a real installation write to fail with access denied before
+running Python. Existing repository and interpreter permissions remain unchanged.
+
+A second pass enables Defender realtime, behavior, script, downloaded-content and
+archive scanning, disables automatic exclusions, and removes inherited path,
+process and extension exclusions on that disposable VM. The job records the
+actual runner image and Defender status/preferences, requiring active antivirus
+and realtime protection before and after the tests. Failure to enable protection
+fails the job; ordinary native CI success is not treated as antivirus evidence.
+This does not establish coverage for other antivirus products, indexing/sync
+software, Controlled Folder Access, or nonlocal storage.
+
+Each pass has a ten-minute process deadline. On failure the parent terminates the
+child process tree and waits up to thirty seconds; test subprocesses retain their
+own explicit joining contracts. The parent preserves the first error if teardown
+also fails. It removes the temporary account after process retirement and retains
+the uniquely owned source/data tree until VM disposal, avoiding cleanup of any
+uncertain consumer. Uploaded reports contain identity, test output, and Defender
+state; the generated password is never printed or persisted. These new conditions
+require a successful run of the new jobs before they count as validated evidence.
