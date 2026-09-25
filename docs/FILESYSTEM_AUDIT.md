@@ -1868,3 +1868,23 @@ the uniquely owned source/data tree until VM disposal, avoiding cleanup of any
 uncertain consumer. Uploaded reports contain identity, test output, and Defender
 state; the generated password is never printed or persisted. These new conditions
 require a successful run of the new jobs before they count as validated evidence.
+
+`tests.test_filesystem_process` extends that shared selection with three real
+interpreters: two writers and one coordinated reader compete for the stable
+sidecar over thirty pipe-ordered rounds. Every read must match one complete
+256-KiB payload; no timing sleeps establish the test ordering. A separate real
+child holds a scratch file open. Windows deletion must report sharing contention,
+retain the content, preserve a primary failure during final tree cleanup, and
+succeed after the child closes and exits. Unrelated active files remain intact.
+POSIX checks its different open-file deletion behavior. Every child is reaped
+before fixture teardown. These tests still require native CI validation.
+
+The provisioned Windows account also receives a read-only ACL fixture and a
+private writable tree on the runner's second local volume. Denied-directory
+publication must keep the old destination, completed stage and modes unchanged,
+and return within the test deadline. Staged snapshot creation in that directory
+must fail as well. The cross-volume test requires distinct device identities and
+one actual `Path.replace` attempt ending in EXDEV, preserving both files. Ordinary
+POSIX jobs exercise denied directory permissions; second-volume coverage is
+reported only where that fixture is explicitly provisioned. Local execution
+without it records a skip, never simulated cross-volume acceptance.
