@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -616,7 +616,9 @@ class FilesystemCloseTests(TypedTestCase):
                 with (
                     self.subTest(owner=name),
                     mock.patch.object(os, "fdopen", side_effect=primary),
-                    mock.patch.object(filesystem, "FileIO", side_effect=primary),
+                    mock.patch.object(filesystem, "FileIO", side_effect=primary)
+                    if name in {"append", "lock"}
+                    else nullcontext(),
                     mock.patch.object(os, "close", failed_close),
                     self.assertLogs("raychat.filesystem", level="ERROR") as logs,
                 ):

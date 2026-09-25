@@ -2025,3 +2025,12 @@ preceding skill change exposed a CRLF assumption in the new closure test, not a
 reader failure: the reader retained the original bytes correctly. That fixture
 now writes explicit LF bytes. Acceptance of the corrected revision still depends
 on its own complete native CI run.
+
+The marker-publication tests now inject a partial write through the stage's
+binary writer, checking that public markers remain absent after the first byte
+is flushed; the old Path.write_text interception no longer matches the shared
+writer. The evidence-lock child loads the parent's exact captured evidence
+module rather than installing a second complete plugin catalog before reporting
+ready. Its pipe ordering, acquisition deadline and contention assertions are
+unchanged. The transcript descriptor-failure probe now reaches transcript
+wrapping itself, while the sidecar owner is independently tested.
