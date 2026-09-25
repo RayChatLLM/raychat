@@ -601,6 +601,11 @@ def download(url: str) -> bytes:
 def read_bytes(path: str | Path) -> bytes:
     """Read a bounded package file before archive validation.
 
+    Operator-selected file links are followed intentionally. The opened object
+    must be regular; POSIX FIFOs are opened nonblocking and rejected. The
+    descriptor closes before archive parsing. This read has no retry or
+    permission repair and cannot interrupt an already-blocking native OS call.
+
     Returns
     -------
     bytes
@@ -609,11 +614,15 @@ def read_bytes(path: str | Path) -> bytes:
     Raises
     ------
     PluginError
-        If the file exceeds the package byte limit.
+        If the input is nonregular or exceeds the package byte limit.
 
     """
-    with Path(path).open("rb") as stream:
-        data = stream.read(MAX_BYTES + 1)
+    try:
+        data = read_regular(Path(path), MAX_BYTES + 1)
+    except ValueError as error:
+        raise PluginError(
+            "Package input must be a regular file: " + str(path),
+        ) from error
     if len(data) > MAX_BYTES:
         error_message = "Package input exceeds its byte limit."
         raise PluginError(error_message)
