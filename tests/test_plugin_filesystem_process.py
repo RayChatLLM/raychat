@@ -26,6 +26,8 @@ from raychat.validation import (
     string_list_field,
     text_field,
 )
+from raychat.workspace_files import workspace_access
+from raychat.workspace_transactions import JOURNAL_NAME, WorkspaceTransaction
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -165,6 +167,52 @@ class _WorkspaceFixture(_Assertions):
     def tearDown(self) -> None:
         """Remove the workspace after all operation checks finish."""
         self.temporary.cleanup()
+
+
+class WorkspaceRecoveryTests(_WorkspaceFixture):
+    """Recover interrupted batches before direct filesystem service operations."""
+
+    def test_read_list_and_write_recover_before_observing_workspace_files(self) -> None:
+        """Each entry point observes restored originals before performing its action."""
+        for operation in ("read", "list", "write"):
+            with self.subTest(operation=operation):
+                root = self.root / operation
+                root.mkdir()
+                note = root / "note.txt"
+                note.write_bytes(b"before")
+                with workspace_access(root, update=True):
+                    transaction = WorkspaceTransaction.begin(
+                        root,
+                        {"note.txt": b"candidate", "extra.txt": b"candidate"},
+                        {"note.txt": b"before", "extra.txt": None},
+                    )
+                    transaction.apply()
+                action: dict[str, object] = {
+                    "action": operation,
+                    "path": "." if operation == "list" else "note.txt",
+                }
+                if operation == "write":
+                    action["content"] = "operator"
+                result = _rc_filesystem.execute_filesystem(action, root)
+                if operation == "read":
+                    self.equal(result["content"], "before")
+                elif operation == "list":
+                    self.equal(result["entries"], [".raychat", "note.txt"])
+                self.equal(
+                    note.read_bytes(),
+                    b"operator" if operation == "write" else b"before",
+                )
+                self.check(condition=not (root / "extra.txt").exists())
+                self.check(condition=not (root / JOURNAL_NAME).exists())
+
+    def test_workspace_transaction_record_is_reserved(self) -> None:
+        """Filesystem requests cannot replace their own recovery metadata."""
+        with self.rejecting(ValueError, "transaction record"):
+            _rc_filesystem.execute_filesystem(
+                {"action": "write", "path": JOURNAL_NAME, "content": "forged"},
+                self.root,
+            )
+        self.check(condition=not (self.root / JOURNAL_NAME).exists())
 
 
 class WorkspaceFilesystemTests(_WorkspaceFixture):
@@ -387,7 +435,7 @@ class WorkspaceFilesystemTests(_WorkspaceFixture):
         before_mode = path.stat().st_mode
 
         with (
-            mock.patch.object(os, "replace", side_effect=OSError("failed")),
+            mock.patch.object(Path, "replace", side_effect=OSError("failed")),
             self.rejecting(OSError, "failed"),
         ):
             registered_execute(
@@ -550,7 +598,7 @@ class WorkspaceFilesystemTests(_WorkspaceFixture):
         }
 
         with (
-            mock.patch.object(os, "replace", side_effect=OSError("failed")),
+            mock.patch.object(Path, "replace", side_effect=OSError("failed")),
             self.rejecting(OSError, "failed"),
         ):
             registered_execute(action, self.root, 1)

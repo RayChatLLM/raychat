@@ -510,12 +510,28 @@ class AgentSession:
         self.runtime.emit(SESSION_RESET, Lifecycle(), strict=True)
 
     def close(self) -> None:
-        """Release the plugin host and persistence store."""
+        """Attempt host and store cleanup once, preserving the first failure.
+
+        A store cleanup failure is logged if host cleanup already failed.
+        Neither failure implies that all resources have been retired.
+
+        """
+        failed = False
         try:
             self.runtime.close()
+        except BaseException:
+            failed = True
+            raise
         finally:
             if self.store is not None:
-                self.store.close()
+                try:
+                    self.store.close()
+                except BaseException:
+                    if not failed:
+                        raise
+                    logging.getLogger(__name__).exception(
+                        "Session store cleanup failed after host cleanup failure",
+                    )
 
     def run(self, prompt: str, **kwargs: Unpack[SendOptions]) -> str:
         """Run a prompt through the active host's orchestration policy.

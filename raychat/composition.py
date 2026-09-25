@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,7 +30,6 @@ from .validation import array_field, configuration_fields
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
-    from types import ModuleType
 
     from .sdk import Chat, SessionHost
 
@@ -38,6 +39,7 @@ def package_manager(
     *,
     trusted: bool = False,
     install_profile: bool = True,
+    defer_state: bool = False,
 ) -> PackageManager:
     """Create a package manager and optionally install the configured profile.
 
@@ -51,6 +53,7 @@ def package_manager(
         workspace,
         Path.home() / SETTINGS.storage.home_directory,
         trusted=trusted,
+        defer_state=defer_state,
     )
     if install_profile and SETTINGS.plugins.profile:
         manager.ensure_profile(read_distribution(SETTINGS.plugins.profile))
@@ -106,7 +109,7 @@ def _capture_package(
     package: SourceTree | Path,
     settings: Mapping[str, object],
     trees: list[SourceTree],
-) -> ModuleType:
+) -> SourceTree:
     if isinstance(package, SourceTree):
         tree = package
     else:
@@ -119,15 +122,15 @@ def _capture_package(
             ),
         )
         trees.append(tree)
-    return tree.entrypoint()
+    return tree
 
 
-def _load_runtime(
+def _capture_runtime(
     runtime: Runtime,
     manager: PackageManager,
     setup: _RuntimeSetup,
     trees: list[SourceTree],
-) -> None:
+) -> list[SourceTree]:
     selected = (
         None if setup.plugins is None else tuple(str(name) for name in setup.plugins)
     )
@@ -154,8 +157,18 @@ def _load_runtime(
         runtime.options["plugin_settings"],
         "plugin settings",
     )
-    modules = [_capture_package(available[name], settings, trees) for name in ordered]
-    runtime.load(modules)
+    return [_capture_package(available[name], settings, trees) for name in ordered]
+
+
+def _load_runtime(
+    runtime: Runtime,
+    manager: PackageManager,
+    setup: _RuntimeSetup,
+    trees: list[SourceTree],
+) -> None:
+    with manager.source_read() if setup.source is None else nullcontext():
+        captured = _capture_runtime(runtime, manager, setup, trees)
+    runtime.load([tree.entrypoint() for tree in captured])
     for tree in trees:
         if tree not in runtime.source_trees:
             tree.retire()
@@ -165,20 +178,29 @@ def _create_runtime(workspace: str | Path, setup: _RuntimeSetup) -> Runtime:
     options = dict(setup.resources)
     options.setdefault("plugin_settings", PLUGIN_OVERRIDES)
     runtime = Runtime(workspace, options)
-    manager = setup.manager
-    if manager is None:
-        manager = package_manager(
-            workspace,
-            install_profile=setup.source is None and setup.plugins != [],
-        )
-    manager.attach(runtime)
     trees: list[SourceTree] = []
     try:
+        manager = setup.manager
+        if manager is None:
+            manager = package_manager(
+                workspace,
+                install_profile=setup.source is None and setup.plugins != [],
+                defer_state=setup.source is not None,
+            )
+        manager.attach(runtime, inherit_disabled=setup.source is None)
         _load_runtime(runtime, manager, setup, trees)
     except BaseException:
-        runtime.close()
+        try:
+            runtime.close()
+        except BaseException:
+            logging.getLogger(__name__).exception(
+                "Runtime cleanup failed after composition failure",
+            )
+            for tree in trees:
+                tree.retain(reason="runtime initialization cleanup failed")
         for tree in trees:
-            tree.retire()
+            if tree not in runtime.source_trees:
+                tree.retire()
         raise
     return runtime
 
@@ -254,6 +276,10 @@ def create_session(
 ) -> AgentSession:
     """Compose one session with checked options and explicit runtime ownership.
 
+    A runtime created here is closed if session initialization fails. Supplied
+    runtimes and stores remain the caller's responsibility on failure; ownership
+    transfers to the session only after construction succeeds.
+
     Returns
     -------
     AgentSession
@@ -264,21 +290,32 @@ def create_session(
         name: value for name, value in options.items() if name not in SESSION_FIELDS
     }
     checked = session_options(options)
+    owns_runtime = runtime is None
     if runtime is None:
         resources["timeout"] = checked.get(
             "timeout",
             SETTINGS.chat.command_timeout_seconds,
         )
         runtime = _runtime_options(workspace, plugins, resources)
-    if "protocol" not in checked:
-        defaults = session_options({
-            "protocol": runtime.services.get(
-                "default_protocol",
-                SETTINGS.chat.bare_protocol,
-            ),
-        })
-        checked["protocol"] = defaults["protocol"]
-    return AgentSession(chat, workspace, runtime=runtime, **checked)
+    try:
+        if "protocol" not in checked:
+            defaults = session_options({
+                "protocol": runtime.services.get(
+                    "default_protocol",
+                    SETTINGS.chat.bare_protocol,
+                ),
+            })
+            checked["protocol"] = defaults["protocol"]
+        return AgentSession(chat, workspace, runtime=runtime, **checked)
+    except BaseException:
+        if owns_runtime:
+            try:
+                runtime.close()
+            except BaseException:
+                logging.getLogger(__name__).exception(
+                    "Runtime cleanup failed after session initialization failure",
+                )
+        raise
 
 
 def create_session_from_options(
@@ -314,6 +351,9 @@ def run_session(
 ) -> str:
     """Run a prompt through the same plugins used by interactive sessions.
 
+    Cleanup runs once. A cleanup failure propagates after a successful run;
+    after a failed run it is logged without replacing the original exception.
+
     Returns
     -------
     str
@@ -325,7 +365,18 @@ def run_session(
         name: value for name, value in options.items() if name not in SEND_FIELDS
     }
     session = create_session_from_options(chat, workspace, remaining)
+    failed = False
     try:
         return session.run(prompt, **controls)
+    except BaseException:
+        failed = True
+        raise
     finally:
-        session.close()
+        try:
+            session.close()
+        except BaseException:
+            if not failed:
+                raise
+            logging.getLogger(__name__).exception(
+                "Session cleanup failed after a run failure",
+            )

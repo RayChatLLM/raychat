@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .filesystem import read_regular
 from .packages import NAME, Manifest
 from .sdk import PluginError
 from .validation import (
@@ -31,10 +32,11 @@ class Distribution:
 
 
 def _profile(path: Path) -> tuple[str, Path, tuple[str, ...]]:
-    if path.stat().st_size > _MAX_PROFILE_BYTES:
+    data = read_regular(path, _MAX_PROFILE_BYTES + 1)
+    if len(data) > _MAX_PROFILE_BYTES:
         message = "Installation profile exceeds 64 KiB."
         raise PluginError(message)
-    fields = object_field(json_object(path.read_bytes()), "installation profile")
+    fields = object_field(json_object(data), "installation profile")
     if (
         fields.keys() != {"schema", "id", "catalog", "packages"}
         or fields["schema"] != 1
@@ -55,10 +57,11 @@ def _profile(path: Path) -> tuple[str, Path, tuple[str, ...]]:
 
 
 def _catalog(path: Path) -> dict[str, Manifest]:
-    if path.stat().st_size > _MAX_CATALOG_BYTES:
+    data = read_regular(path, _MAX_CATALOG_BYTES + 1)
+    if len(data) > _MAX_CATALOG_BYTES:
         message = "Installation catalog exceeds 1 MiB."
         raise PluginError(message)
-    fields = object_field(json_object(path.read_bytes()), "installation catalog")
+    fields = object_field(json_object(data), "installation catalog")
     if fields.get("schema") != 1:
         message = "Invalid installation catalog."
         raise PluginError(message)

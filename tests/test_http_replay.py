@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shlex
 import stat
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from raychat.http_replay import ReplayRequest, parse_sent_request, write_curl
 from tests.assertions import TypedTestCase
@@ -123,7 +125,9 @@ class HTTPReplayTests(TypedTestCase):
             with self.subTest(body=body), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 write_curl(directory, _request(body=body))
-                path = directory / "request-body.bin"
+                path = directory / (
+                    "request-body-" + hashlib.sha256(body).hexdigest() + ".bin"
+                )
                 self.equal(
                     _arguments(directory)["--data-binary"],
                     ["@" + str(path.resolve())],
@@ -189,7 +193,9 @@ class HTTPReplayTests(TypedTestCase):
             self.equal(_arguments(directory)["--data-binary"], [boundary.decode()])
             body = ("雪" * 1366).encode()
             write_curl(directory, _request(body=body))
-            path = directory / "request-body.bin"
+            path = directory / (
+                "request-body-" + hashlib.sha256(body).hexdigest() + ".bin"
+            )
             self.equal(
                 _arguments(directory)["--data-binary"],
                 ["@" + str(path.resolve())],
@@ -216,7 +222,12 @@ class HTTPReplayTests(TypedTestCase):
             directory = Path(temporary)
             write_curl(directory, request)
             script = (directory / "curl.ps1").read_text(encoding="utf-8-sig")
-            body_path = "@" + str((directory / "request-body.bin").resolve())
+            body_path = "@" + str(
+                (
+                    directory
+                    / ("request-body-" + hashlib.sha256(body).hexdigest() + ".bin")
+                ).resolve(),
+            )
             self.require(script.startswith("curl.exe `\n"))
             self.require(
                 "'X-Quoted: can''t $env:HOME `literal`\nnext line 雪'" in script,
@@ -251,6 +262,65 @@ class HTTPReplayTests(TypedTestCase):
             request = replace(_request(), url="https://example.invalid/\0")
             with self.rejected(ValueError, "NUL"):
                 write_curl(directory, request)
+            self.require(not (directory / "curl.txt").exists())
+
+    def test_old_commands_keep_their_body_after_each_publication_failure(self) -> None:
+        """Every exposed command points at its own complete immutable payload."""
+        for blocked in ("request-body.bin", "curl.txt", "curl.ps1"):
+            with (
+                self.subTest(blocked=blocked),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                self._failed_publication(Path(temporary), blocked)
+
+    def _failed_publication(self, directory: Path, blocked: str) -> None:
+        previous, following = b"\0old request", b"\0new request"
+        write_curl(directory, _request(body=previous))
+        body_path = Path(_arguments(directory)["--data-binary"][0][1:])
+        powershell = (directory / "curl.ps1").read_bytes()
+        replace_path = Path.replace
+
+        def fail(stage: Path, target: Path) -> Path:
+            if target.name == blocked:
+                message = "injected export failure"
+                raise OSError(message)
+            return replace_path(stage, target)
+
+        with (
+            mock.patch.object(Path, "replace", fail),
+            self.rejected(OSError, "export failure"),
+        ):
+            write_curl(directory, _request(body=following))
+        self.equal(body_path.read_bytes(), previous)
+        self.equal((directory / "curl.ps1").read_bytes(), powershell)
+        current = Path(_arguments(directory)["--data-binary"][0][1:])
+        self.equal(
+            current.read_bytes(),
+            following if blocked == "curl.ps1" else previous,
+        )
+        self.equal(list(directory.glob(".raychat-*.pending")), [])
+        write_curl(directory, _request(body=following))
+        current = Path(_arguments(directory)["--data-binary"][0][1:])
+        self.equal(current.read_bytes(), following)
+        self.equal(body_path.read_bytes(), previous)
+
+    def test_linked_immutable_body_is_rejected_without_following_its_target(
+        self,
+    ) -> None:
+        """Absolute command paths must not resolve away endpoint link rejection."""
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            body = b"sensitive body"
+            target = directory / "external.bin"
+            target.write_bytes(b"original")
+            name = "request-body-" + hashlib.sha256(body).hexdigest() + ".bin"
+            try:
+                (directory / name).symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symbolic links are unavailable for this account.")
+            with self.rejected(ValueError, "regular, nonlinked"):
+                write_curl(directory, _request(body=body))
+            self.equal(target.read_bytes(), b"original")
             self.require(not (directory / "curl.txt").exists())
 
 

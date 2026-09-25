@@ -9,21 +9,22 @@ and deterministic ZIP, then verifies and smoke-tests the exact written output.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import json
+import logging
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NoReturn, TypedDict
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 from raychat.configuration import SETTINGS
-from tools import build_portable
+from raychat.filesystem import is_link_or_reparse_point
+from tools import build_portable, release_folder
 
 # Do not recreate bytecode while cleaning and packaging, even if the caller
 # omitted Python's -B option.
@@ -43,18 +44,94 @@ _CLEANUP_EXCLUDED_TOP_LEVEL = frozenset(
 )
 
 
+def _walk_error(error: OSError) -> NoReturn:
+    raise error
+
+
 def _tree_bytes(path: Path) -> int:
     total = 0
-    for directory, directory_names, file_names in os.walk(path, followlinks=False):
-        directory_names[:] = [
-            name
-            for name in directory_names
-            if not (Path(directory) / name).is_symlink()
-        ]
+    for directory, directory_names, file_names in os.walk(
+        path,
+        followlinks=False,
+        onerror=_walk_error,
+    ):
+        if "pyvenv.cfg" in {name.casefold() for name in file_names}:
+            message = f"Refusing to remove a cache containing an environment: {path!s}"
+            raise RuntimeError(message)
+        for name in (*directory_names, *file_names):
+            entry = Path(directory) / name
+            if is_link_or_reparse_point(entry):
+                message = f"Refusing to remove a linked cache entry: {entry!s}"
+                raise RuntimeError(message)
         for name in file_names:
-            with contextlib.suppress(FileNotFoundError):
-                total += (Path(directory) / name).lstat().st_size
+            total += (Path(directory) / name).lstat().st_size
     return total
+
+
+def _cleanup_protected(root: Path, preserve: Sequence[Path]) -> tuple[Path, ...]:
+    paths = [
+        *(root / name for name in _CLEANUP_EXCLUDED_TOP_LEVEL),
+        Path(SETTINGS.chat.workspace),
+        Path(SETTINGS.release.archive_path),
+        Path(SETTINGS.release.folder_path),
+        Path.home() / SETTINGS.storage.home_directory,
+        *preserve,
+    ]
+    return tuple(_resolve_output(path, root).resolve() for path in paths)
+
+
+def _within(path: Path, parent: Path) -> bool:
+    # Exclusion is deliberately conservative on case-sensitive filesystems too.
+    # This is a protection rule, not a claim that both paths identify one file.
+    child_parts = tuple(part.casefold() for part in path.parts)
+    parent_parts = tuple(part.casefold() for part in parent.parts)
+    return child_parts[: len(parent_parts)] == parent_parts
+
+
+def _cache_directories(
+    current: Path,
+    names: list[str],
+    protected: tuple[Path, ...],
+) -> Iterator[Path]:
+    for name in list(names):
+        if name.startswith(release_folder.STAGE_PREFIX):
+            names.remove(name)
+            continue
+        target = current / name
+        if any(_within(target, item) for item in protected):
+            names.remove(name)
+            continue
+        if is_link_or_reparse_point(target):
+            if name in CACHE_DIRECTORY_NAMES:
+                message = (
+                    f"Refusing to remove a symlinked cache or reparse point: {target!s}"
+                )
+                raise RuntimeError(message)
+            names.remove(name)
+            continue
+        if name not in CACHE_DIRECTORY_NAMES:
+            continue
+        names.remove(name)
+        if not any(_within(item, target) for item in protected):
+            yield target
+
+
+def _remove_cache_file(target: Path, protected: tuple[Path, ...]) -> int | None:
+    if not (
+        target.suffix.casefold() in CACHE_FILE_SUFFIXES
+        or target.name in CACHE_FILE_NAMES
+        or target.name.startswith(".coverage.")
+    ) or any(_within(target, item) for item in protected):
+        return None
+    try:
+        if is_link_or_reparse_point(target):
+            message = f"Refusing to remove a linked cache file: {target!s}"
+            raise RuntimeError(message)
+        size = target.lstat().st_size
+        target.unlink()
+    except FileNotFoundError:
+        return None
+    return size
 
 
 class CacheCleanup(TypedDict):
@@ -72,6 +149,7 @@ class ReleaseReport(TypedDict):
     archive_bytes: int
     archive_sha256: str
     cache_cleanup: CacheCleanup
+    cleanup_errors: list[str]
     folder: str
     member_count: int
     smoke_tested: bool
@@ -79,8 +157,17 @@ class ReleaseReport(TypedDict):
     source_file_count: int
 
 
-def clean_caches(root: Path = PROJECT_ROOT) -> CacheCleanup:
-    """Remove recognized caches without entering release, VCS, or user data.
+def clean_caches(
+    root: Path = PROJECT_ROOT,
+    *,
+    preserve: Sequence[Path] = (),
+) -> CacheCleanup:
+    """Remove recognized caches in an operator-owned, quiescent checkout.
+
+    Exclude configured protected roots, runtime workspace/home, release outputs,
+    environment roots and explicit preserved paths. Never follow directory links
+    or reparse points. Inspection and deletion errors stop cleanup; there are no
+    retries or permission changes. The caller must stop all checkout consumers.
 
     Returns
     -------
@@ -89,8 +176,6 @@ def clean_caches(root: Path = PROJECT_ROOT) -> CacheCleanup:
 
     Raises
     ------
-    RuntimeError
-        If the operation violates its validation or integrity contract.
     ValueError
         If the operation violates its validation or integrity contract.
 
@@ -101,47 +186,32 @@ def clean_caches(root: Path = PROJECT_ROOT) -> CacheCleanup:
         raise ValueError(error_message)
     removed: list[str] = []
     removed_bytes = 0
+    protected = _cleanup_protected(root, preserve)
 
     for directory, directory_names, file_names in os.walk(
         root,
         topdown=True,
         followlinks=False,
+        onerror=_walk_error,
     ):
         current = Path(directory)
-        if current == root:
-            directory_names[:] = [
-                name
-                for name in directory_names
-                if name not in _CLEANUP_EXCLUDED_TOP_LEVEL
-            ]
+        if "pyvenv.cfg" in {name.casefold() for name in file_names} or any(
+            _within(current, item) for item in protected
+        ):
+            directory_names.clear()
+            continue
 
-        for name in list(directory_names):
-            if name not in CACHE_DIRECTORY_NAMES:
-                continue
-            target = current / name
-            if target.is_symlink():
-                error_message = f"Refusing to remove a symlinked cache: {target}"
-                raise RuntimeError(error_message)
+        for target in _cache_directories(current, directory_names, protected):
             removed_bytes += _tree_bytes(target)
             shutil.rmtree(target)
-            directory_names.remove(name)
             removed.append(target.relative_to(root).as_posix() + "/")
 
         for name in file_names:
             target = current / name
-            is_cache = (
-                target.suffix.casefold() in CACHE_FILE_SUFFIXES
-                or name in CACHE_FILE_NAMES
-                or name.startswith(".coverage.")
-            )
-            if not is_cache:
-                continue
-            try:
-                removed_bytes += target.lstat().st_size
-                target.unlink()
-            except FileNotFoundError:
-                continue
-            removed.append(target.relative_to(root).as_posix())
+            size = _remove_cache_file(target, protected)
+            if size is not None:
+                removed_bytes += size
+                removed.append(target.relative_to(root).as_posix())
 
     return {
         "removed_bytes": removed_bytes,
@@ -154,14 +224,36 @@ def _resolve_output(path: Path, root: Path) -> Path:
     return path if path.is_absolute() else root / path
 
 
+def _final_cleanup(
+    root: Path,
+    preserve: Sequence[Path],
+) -> tuple[CacheCleanup, list[str]]:
+    try:
+        return clean_caches(root, preserve=preserve), []
+    except (OSError, RuntimeError, ValueError) as exc:
+        logging.getLogger(__name__).warning(
+            "Release verification succeeded; final cache cleanup failed",
+            exc_info=True,
+        )
+        return (
+            {"removed_bytes": 0, "removed_count": 0, "removed_paths": []},
+            [f"{type(exc).__name__}: {exc}"],
+        )
+
+
 def create_release(
     *,
     root: Path = PROJECT_ROOT,
     output: Path = Path(SETTINGS.release.archive_path),
     folder: Path = Path(SETTINGS.release.folder_path),
     smoke: bool = SETTINGS.release.smoke_test,
+    preserve: Sequence[Path] = (),
 ) -> ReleaseReport:
     """Clean, build, verify, and optionally smoke-test a complete release.
+
+    Initial cleanup failures abort before publication. Final cleanup failures are
+    logged and returned separately after successful output verification; counts
+    cover completed cleanup passes only. No publication or build is repeated.
 
     Returns
     -------
@@ -177,7 +269,8 @@ def create_release(
     root = root.resolve(strict=True)
     output = _resolve_output(output, root)
     folder = _resolve_output(folder, root)
-    cleanup = clean_caches(root)
+    cleanup_paths = (*preserve, output, folder)
+    cleanup = clean_caches(root, preserve=cleanup_paths)
     raw, members = build_portable.build_archive(root)
     protected = {
         root.joinpath(*PurePosixPath(relative).parts).resolve()
@@ -192,14 +285,16 @@ def create_release(
         error_message = "Written ZIP differs from the verified release bytes."
         raise RuntimeError(error_message)
     build_portable.verify_archive(written, members)
-    build_portable.verify_release_folder(folder, members)
+    with release_folder.access(folder) as target:
+        build_portable.verify_release_folder(target, members)
 
     # A caller that did not use -B must still finish with a cache-clean tree.
-    final_cleanup = clean_caches(root)
+    final_cleanup, cleanup_errors = _final_cleanup(root, cleanup_paths)
     return {
         "archive": str(output),
         "archive_bytes": len(written),
         "archive_sha256": hashlib.sha256(written).hexdigest(),
+        "cleanup_errors": cleanup_errors,
         "cache_cleanup": {
             "removed_bytes": cleanup["removed_bytes"] + final_cleanup["removed_bytes"],
             "removed_count": cleanup["removed_count"] + final_cleanup["removed_count"],
@@ -229,6 +324,14 @@ def _parser() -> argparse.ArgumentParser:
         default=Path(SETTINGS.release.folder_path),
         help="unpacked release-folder path, relative to the project root",
     )
+    preserve_defaults: list[Path] = []
+    parser.add_argument(
+        "--preserve",
+        type=Path,
+        action="append",
+        default=preserve_defaults,
+        help="protect a file or directory from cache cleanup (repeatable)",
+    )
     parser.add_argument(
         "--no-smoke",
         action="store_true",
@@ -243,6 +346,7 @@ class _Arguments(argparse.Namespace):
     output: Path = Path(SETTINGS.release.archive_path)
     folder: Path = Path(SETTINGS.release.folder_path)
     no_smoke: bool = not SETTINGS.release.smoke_test
+    preserve: list[Path] = field(default_factory=list)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -261,6 +365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output=args.output,
             folder=args.folder,
             smoke=not args.no_smoke,
+            preserve=args.preserve,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         sys.stderr.write(f"Release failed: {exc}\n")

@@ -198,6 +198,18 @@ class SkillStoreTests(_SkillsAssertions):
         self.equal(len(store), 1)
         self.check(condition="café" in store.get("one").content)
 
+    def test_hard_linked_skill_alias_is_deduplicated(self) -> None:
+        """Existing-file identity, not spelling, determines duplicate paths."""
+        source = self.write_skill("one", "# One\nShared inode.\n")
+        alias = self.root / "alias" / "SKILL.md"
+        alias.parent.mkdir()
+        try:
+            alias.hardlink_to(source)
+        except OSError:
+            self.skipTest("Hard links unavailable on this filesystem")
+        store = _rc_skills.SkillStore.discover([source, alias])
+        self.equal(len(store), 1)
+
     def test_duplicate_names_are_case_insensitive(self) -> None:
         """Duplicate names are case insensitive."""
         first = self.write_skill("one", "---\nname: Same\n---\nFirst.\n")

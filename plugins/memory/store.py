@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 import re
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeGuard
 
@@ -16,6 +13,7 @@ if TYPE_CHECKING:
     from raychat.service_contracts import MemoryEntry, MemoryPage
 
 from raychat.configuration import SETTINGS
+from raychat.filesystem import FileLock, read_regular, write_bytes
 from raychat.validation import (
     ConfigurationError,
     array_field,
@@ -149,23 +147,17 @@ class MemoryStore:
         return [by_id[memory_id] for memory_id in sorted(by_id)], next_id
 
     def load(self) -> None:
-        """Read and validate all stored records before replacing in-memory state.
+        """Read and validate all stored records before replacing in-memory state."""
+        with FileLock(self.path.with_name(self.path.name + ".lock"), timeout=0.5):
+            self._load()
 
-        Raises
-        ------
-        ValueError
-            If the input or semantic history violates this operation's contract.
-
-        """
-        if not self.path.exists():
+    def _load(self) -> None:
+        try:
+            raw = read_regular(self.path, MAX_MEMORY_FILE_BYTES + 1)
+        except FileNotFoundError:
             self._items = []
             self._next_id = 1
             return
-        if not self.path.is_file():
-            error_message = f"Memory path is not a regular file: {self.path}"
-            raise ValueError(error_message)
-        with self.path.open("rb") as stream:
-            raw = stream.read(MAX_MEMORY_FILE_BYTES + 1)
         if len(raw) > MAX_MEMORY_FILE_BYTES:
             error_message = f"Memory file exceeds {MAX_MEMORY_FILE_BYTES} bytes."
             raise ValueError(error_message)
@@ -187,23 +179,7 @@ class MemoryStore:
             error_message = f"Memory file would exceed {MAX_MEMORY_FILE_BYTES} bytes."
             raise ValueError(error_message)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{self.path.name}.",
-            suffix=".tmp",
-            dir=str(self.path.parent),
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-            if os.name == "posix":
-                temporary.chmod(SETTINGS.storage.file_mode)
-            temporary.replace(self.path)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                temporary.unlink()
+        write_bytes(self.path, raw, mode=SETTINGS.storage.file_mode)
 
     def all(self) -> list[MemoryEntry]:
         """Return detached copies of every stored entry in identifier order.
@@ -250,39 +226,41 @@ class MemoryStore:
             If the input or semantic history violates this operation's contract.
 
         """
-        content = _memory_content(content).strip()
-        if not content or len(content) > MAX_MEMORY_CHARS:
-            error_message = (
-                f"Memory content must contain 1-{MAX_MEMORY_CHARS} characters."
-            )
-            raise ValueError(
-                error_message,
-            )
-        if not _is_valid_memory_text(content):
-            error_message = (
-                "Memory content must be valid Unicode text without control "
-                "characters other than tab or newlines."
-            )
-            raise ValueError(
-                error_message,
-            )
-        if len(self._items) >= MAX_MEMORY_ITEMS:
-            error_message = (
-                f"Memory is full ({MAX_MEMORY_ITEMS} entries); forget one first."
-            )
-            raise ValueError(
-                error_message,
-            )
-        if self._next_id >= MAX_MEMORY_ID:
-            error_message = "Memory ID space is exhausted."
-            raise ValueError(error_message)
-        item: MemoryEntry = {"id": self._next_id, "content": content}
-        items = self.all()
-        items.append(item)
-        self._save(items, self._next_id + 1)
-        self._items = items
-        self._next_id += 1
-        return item.copy()
+        with FileLock(self.path.with_name(self.path.name + ".lock"), timeout=0.5):
+            self._load()
+            content = _memory_content(content).strip()
+            if not content or len(content) > MAX_MEMORY_CHARS:
+                error_message = (
+                    f"Memory content must contain 1-{MAX_MEMORY_CHARS} characters."
+                )
+                raise ValueError(
+                    error_message,
+                )
+            if not _is_valid_memory_text(content):
+                error_message = (
+                    "Memory content must be valid Unicode text without control "
+                    "characters other than tab or newlines."
+                )
+                raise ValueError(
+                    error_message,
+                )
+            if len(self._items) >= MAX_MEMORY_ITEMS:
+                error_message = (
+                    f"Memory is full ({MAX_MEMORY_ITEMS} entries); forget one first."
+                )
+                raise ValueError(
+                    error_message,
+                )
+            if self._next_id >= MAX_MEMORY_ID:
+                error_message = "Memory ID space is exhausted."
+                raise ValueError(error_message)
+            item: MemoryEntry = {"id": self._next_id, "content": content}
+            items = self.all()
+            items.append(item)
+            self._save(items, self._next_id + 1)
+            self._items = items
+            self._next_id += 1
+            return item.copy()
 
     def remove(self, memory_id: str | int) -> bool:
         """Atomically remove an existing identifier while preserving monotonic IDs.
@@ -293,13 +271,15 @@ class MemoryStore:
             The validated result of this operation.
 
         """
-        parsed_id = parse_memory_id(memory_id)
-        items = [item for item in self._items if item["id"] != parsed_id]
-        if len(items) == len(self._items):
-            return False
-        self._save(items, self._next_id)
-        self._items = items
-        return True
+        with FileLock(self.path.with_name(self.path.name + ".lock"), timeout=0.5):
+            self._load()
+            parsed_id = parse_memory_id(memory_id)
+            items = [item for item in self._items if item["id"] != parsed_id]
+            if len(items) == len(self._items):
+                return False
+            self._save(items, self._next_id)
+            self._items = items
+            return True
 
     def context(self, max_chars: int = MAX_MEMORY_CONTEXT_CHARS) -> str:
         """Render complete recent memories within the requested character budget.

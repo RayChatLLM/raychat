@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import errno
 import io
 import json
+import logging
 import re
 import sys
 import tempfile
 import threading
 import unittest
 from concurrent.futures import CancelledError, ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -18,7 +22,9 @@ from unittest.mock import patch
 from raychat.composition import create_session
 from raychat.core_bridge import CoreBridge
 from raychat.event_types import AFTER_TOOL, AfterTool
-from raychat.sdk import HTTP_PROVIDER, CancelCheck
+from raychat.filesystem import OwnedTemporaryDirectory
+from raychat.plugin_manager import PLUGIN_MANAGER
+from raychat.sdk import HTTP_PROVIDER, CancelCheck, PluginError
 from raychat.service_contracts import (
     CHAT,
     PROCESS_RUNNER,
@@ -34,7 +40,9 @@ from raychat.validation import (
     string_list_field,
     text_field,
 )
+from raychat.workspace_files import workspace_access
 from raychat_bootstrap.wire import decode
+from tests.assertions import TypedTestCase
 from tests.plugin_support import (
     ScriptedChat,
     create_runtime,
@@ -43,7 +51,7 @@ from tests.plugin_support import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Awaitable, Iterable, Mapping
     from types import TracebackType
 
     from plugins.optimization import optimize_chat_prompt as benchmark
@@ -60,6 +68,18 @@ else:
     benchmark = plugin_module("optimization.optimize_chat_prompt")
 
 SIGNATURE = ["verifier:missing-check", "causal", "verification"]
+
+_PROMOTION_LOCK_PROBE = """
+import sys
+from pathlib import Path
+from raychat.filesystem import FileLock
+for value in sys.argv[1:]:
+    try:
+        with FileLock(Path(value), timeout=0.02):
+            print('available', flush=True)
+    except RuntimeError:
+        print('blocked', flush=True)
+"""
 
 
 class _OptionalAttempt(TypedDict, total=False):
@@ -435,6 +455,216 @@ class SelfHarnessTests(_HarnessFixture):
         self.equal(self.attempts()[-1]["decision"], "rejected")
 
 
+class CandidatePromotionTests(_HarnessFixture):
+    """Keep candidate ownership through activation and preserve rollback conflicts."""
+
+    def _locks(self, runtime: Runtime) -> list[Path]:
+        manager = runtime.context("self_harness").require_service(PLUGIN_MANAGER)
+        return [
+            *(path / "plugins.mutex" for path in manager.state_roots.values()),
+            self.root / ".raychat/filesystem.lock",
+        ]
+
+    async def _probe(self, paths: list[Path]) -> bytes:
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-B",
+            "-S",
+            "-c",
+            _PROMOTION_LOCK_PROBE,
+            *(str(path) for path in paths),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            close_fds=True,
+        )
+        try:
+            completion: Awaitable[tuple[bytes, bytes]] = child.communicate()
+            bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(completion, 10)
+            output, errors = await bounded
+            self.equal(child.returncode, 0)
+            self.check(condition=not errors or b"lock failed" in errors)
+            return output
+        finally:
+            if child.returncode is None:
+                child.kill()
+            await asyncio.wait_for(child.communicate(), 5)
+
+    def test_locks_cover_publication_and_release_after_activation(self) -> None:
+        """Real child readers cannot acquire any participating lock during publish."""
+        runtime = self.runtime([self.proposal()])
+        replace = Path.replace
+        probes: list[bytes] = []
+
+        def publish(stage: Path, target: Path) -> Path:
+            result = replace(stage, target)
+            if target == self.overlay.resolve():
+                probes.append(asyncio.run(self._probe(self._locks(runtime))))
+                with workspace_access(self.root):
+                    self.equal(self.overlay.read_bytes(), b"GOOD")
+                with (
+                    self.rejecting(RuntimeError, "already active"),
+                    workspace_access(self.root, update=True),
+                ):
+                    self.fail("Nested update acquired the workspace")
+            return result
+
+        with patch.object(Path, "replace", publish):
+            runtime.command("/self-harness")
+        self.equal(probes, [b"blocked\nblocked\nblocked\n"])
+        self.equal(asyncio.run(self._probe(self._locks(runtime))), b"available\n" * 3)
+        self.equal(list(self.root.rglob(".raychat-candidate-*")), [])
+
+    def test_interruption_after_replace_restores_original_or_retires_new_file(
+        self,
+    ) -> None:
+        """Track the stage's identity before the call can publish and then raise."""
+        for original in (None, b"OLD"):
+            with self.subTest(original=original):
+                self._interrupted_publication(original)
+
+    def _interrupted_publication(self, original: bytes | None) -> None:
+        if original is not None:
+            self.overlay.parent.mkdir(parents=True, exist_ok=True)
+            self.overlay.write_bytes(original)
+        runtime = self.runtime([self.proposal()])
+        replace = Path.replace
+        interrupted: list[Path] = []
+
+        def publish(stage: Path, target: Path) -> Path:
+            result = replace(stage, target)
+            if target == self.overlay.resolve() and not interrupted:
+                interrupted.append(stage)
+                message = "interrupted after candidate publication"
+                raise OSError(message)
+            return result
+
+        with (
+            patch.object(Path, "replace", publish),
+            self.rejecting(OSError, "interrupted after candidate"),
+        ):
+            runtime.command("/self-harness")
+        current = self.overlay.read_bytes() if self.overlay.exists() else None
+        self.equal(current, original)
+        self.equal(runtime.generation, 0)
+        self.equal(len(interrupted), 1)
+        self.equal(list(self.root.rglob(".raychat-candidate-*")), [])
+        self.equal(
+            asyncio.run(self._probe(self._locks(runtime))),
+            b"available\n" * 3,
+        )
+
+    def test_staging_failure_cannot_publish_a_partial_candidate(self) -> None:
+        """Every completed private stage precedes the first public replacement."""
+        runtime = self.runtime([
+            self.proposal(
+                files={
+                    ".raychat/plugins/added/__init__.py": "def register(api): pass\n",
+                    ".raychat/plugins/added/plugin.json": self.manifest("added"),
+                },
+            ),
+        ])
+        replace = Path.replace
+        staged: list[Path] = []
+        failure_stage = 2
+
+        def publish(stage: Path, target: Path) -> Path:
+            if target.name == "incoming" and target.parent.name.startswith(
+                ".raychat-candidate-",
+            ):
+                staged.append(target)
+                if len(staged) == failure_stage:
+                    raise OSError(errno.ENOSPC, "candidate staging disk full")
+            return replace(stage, target)
+
+        with (
+            patch.object(Path, "replace", publish),
+            self.rejecting(OSError, "candidate staging disk full"),
+        ):
+            runtime.command("/self-harness")
+        self.check(condition=not self.overlay.exists())
+        self.check(
+            condition=not (self.root / ".raychat/plugins/added/__init__.py").exists(),
+        )
+        self.equal(list(self.root.rglob(".raychat-candidate-*")), [])
+        self.equal(asyncio.run(self._probe(self._locks(runtime))), b"available\n" * 3)
+
+    def test_case_aliases_are_rejected_before_publishing(self) -> None:
+        """Candidate spelling differences must not map two writes to one file."""
+        runtime = self.runtime([
+            self.proposal(
+                files={
+                    ".raychat/plugins/added/a.py": "VALUE = 1\n",
+                    ".raychat/plugins/added/A.py": "VALUE = 2\n",
+                },
+            ),
+        ])
+        with self.rejecting(ValueError, "paths alias"):
+            runtime.command("/self-harness")
+        self.check(condition=not self.overlay.exists())
+        self.check(condition=not (self.root / ".raychat/plugins/added").exists())
+        self.equal(asyncio.run(self._probe(self._locks(runtime))), b"available\n" * 3)
+
+    def test_commit_cleanup_preserves_a_recreated_container(self) -> None:
+        """A reused private pathname does not transfer its new owner's files."""
+        runtime = self.runtime([self.proposal()])
+        replace = Path.replace
+        markers: list[Path] = []
+
+        def publish(stage: Path, target: Path) -> Path:
+            result = replace(stage, target)
+            if target == self.overlay.resolve():
+                container = stage.parent
+                replace(container, container.with_name(container.name + "-retained"))
+                container.mkdir()
+                marker = container / "unrelated.txt"
+                marker.write_bytes(b"unrelated owner")
+                markers.append(marker)
+            return result
+
+        with patch.object(Path, "replace", publish):
+            runtime.command("/self-harness")
+        self.equal(len(markers), 1)
+        self.equal(markers[0].read_bytes(), b"unrelated owner")
+        self.equal(self.overlay.read_bytes(), b"GOOD")
+        self.equal(runtime.generation, 1)
+        self.equal(asyncio.run(self._probe(self._locks(runtime))), b"available\n" * 3)
+
+    def test_failed_registration_preserves_external_content_change(self) -> None:
+        """A failed generation retains an external edit and its undo record."""
+        self._conflicting_registration("EXTERNAL EDIT")
+
+    def test_failed_registration_preserves_external_identity_change(self) -> None:
+        """A recreated same-content file is still owned by its external writer."""
+        self._conflicting_registration("GOOD")
+
+    def _conflicting_registration(self, content: str) -> None:
+        self.overlay.unlink(missing_ok=True)
+        runtime = self.runtime([
+            self.proposal(
+                files={
+                    ".raychat/plugins/broken/__init__.py": (
+                        "def register(api):\n"
+                        "    target = api.context.workspace / '.raychat/harness.md'\n"
+                        "    replacement = target.with_name('external.md')\n"
+                        f"    replacement.write_text({content!r}, encoding='utf-8')\n"
+                        "    replacement.replace(target)\n"
+                        "    raise RuntimeError('rejected registration')\n"
+                    ),
+                    ".raychat/plugins/broken/plugin.json": self.manifest("broken"),
+                },
+            ),
+        ])
+        with self.rejecting(PluginError, "rollback conflicts with an intervening edit"):
+            runtime.command("/self-harness")
+        self.equal(self.overlay.read_text(encoding="utf-8"), content)
+        self.equal(runtime.generation, 0)
+        self.equal(asyncio.run(self._probe(self._locks(runtime))), b"available\n" * 3)
+        self.check(condition=bool(list(self.root.rglob(".raychat-candidate-*"))))
+        self.check(
+            condition=(self.root / ".raychat/candidate.transaction.json").is_file(),
+        )
+
+
 class SelfHarnessIsolationTests(_HarnessFixture):
     """Check evaluator authority, cancellation and sealed evidence boundaries."""
 
@@ -602,6 +832,166 @@ class SelfHarnessIsolationTests(_HarnessFixture):
             self.rejecting(benchmark.ProviderCallError),
         ):
             experiment.evaluate("", "http://localhost", "test")
+
+
+class _MeasurementRuntime:
+    """Expose runtime lifecycle failures without starting provider or child work."""
+
+    def __init__(
+        self,
+        events: list[str],
+        primary: BaseException | None,
+        cleanup: BaseException | None,
+    ) -> None:
+        self.events = events
+        self.primary = primary
+        self.cleanup = cleanup
+        self.services: dict[str, object] = {}
+
+    def command(self, _command: str, **_options: object) -> str:
+        self.events.append("command")
+        if self.primary is not None:
+            raise self.primary
+        return "done"
+
+    def close(self) -> None:
+        self.events.append("close")
+        if self.cleanup is not None:
+            raise self.cleanup
+
+
+class ExperimentPublicationTests(TypedTestCase):
+    """Keep report publication errors separate from experiment failures."""
+
+    def test_report_failure_preserves_primary_and_previous_report(self) -> None:
+        """A failed report replace is fatal alone and secondary to an existing error."""
+        registered_service("optimization", HTTP_PROVIDER)
+        environment = {
+            "RAYCHAT_AUTH_TOKEN": "test-token",
+            "RAYCHAT_MODEL": "test-model",
+            "RAYCHAT_BASE_URL": "https://provider.example/v1",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "report.json"
+            output.write_bytes(b"previous report")
+            for primary in (None, RuntimeError("provider failed"), KeyboardInterrupt()):
+                disk_error = OSError(errno.ENOSPC, "report disk full")
+                with (
+                    self.subTest(primary=primary),
+                    patch.dict("os.environ", environment, clear=True),
+                    patch.object(
+                        experiment,
+                        "_gateway",
+                        return_value=nullcontext[str]("url"),
+                    ),
+                    patch.object(experiment, "_measure", side_effect=primary),
+                    patch.object(Path, "replace", side_effect=disk_error) as replace,
+                    patch.object(
+                        logging.getLogger(experiment.__name__),
+                        "exception",
+                    ) as logged,
+                ):
+                    try:
+                        experiment.main(["--output", str(output)])
+                    except (OSError, RuntimeError, KeyboardInterrupt) as error:
+                        self.require(
+                            error is (primary if primary is not None else disk_error),
+                        )
+                    else:
+                        self.fail("Expected experiment or report failure")
+                    self.equal(replace.call_count, 1)
+                    self.equal(logged.call_count, int(primary is not None))
+                self.equal(output.read_bytes(), b"previous report")
+                self.equal(list(output.parent.iterdir()), [output])
+
+    def test_measurement_cleanup_precedes_diagnostics_and_preserves_failures(
+        self,
+    ) -> None:
+        """Close once on every exit and retain scratch if shutdown cannot complete."""
+        registered_service("optimization", HTTP_PROVIDER)
+        primary = RuntimeError("experiment failed")
+        cancelled = KeyboardInterrupt()
+        diagnostic = OSError(errno.EACCES, "attempt log denied")
+        shutdown = RuntimeError("runtime shutdown failed")
+        cases = (
+            (None, None, None),
+            (None, diagnostic, None),
+            (primary, diagnostic, None),
+            (cancelled, diagnostic, None),
+            (None, None, shutdown),
+            (primary, None, shutdown),
+            (cancelled, None, shutdown),
+        )
+        for run_error, read_error, close_error in cases:
+            with self.subTest(errors=(run_error, read_error, close_error)):
+                self._measurement_case(run_error, read_error, close_error)
+
+    def _measurement_case(
+        self,
+        run_error: BaseException | None,
+        read_error: OSError | None,
+        close_error: BaseException | None,
+    ) -> None:
+        events: list[str] = []
+        runtime = _MeasurementRuntime(events, run_error, close_error)
+        environment = {
+            "RAYCHAT_AUTH_TOKEN": "test-token",
+            "RAYCHAT_MODEL": "test-model",
+            "RAYCHAT_BASE_URL": "https://provider.example/v1",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            scratch = OwnedTemporaryDirectory(prefix="measure-", parent=parent)
+            root = Path(scratch.name)
+            output = parent / "report.json"
+
+            def read(_path: Path, _limit: int, **_options: object) -> bytes:
+                events.append("read")
+                self.equal(events[-2], "close")
+                if read_error is not None:
+                    raise read_error
+                return b'{"decision":"accepted"}\n{"incomplete":'
+
+            with (
+                patch.dict("os.environ", environment, clear=True),
+                patch.object(
+                    experiment,
+                    "_gateway",
+                    return_value=nullcontext[str]("http://127.0.0.1/chat"),
+                ),
+                patch.object(
+                    experiment,
+                    "OwnedTemporaryDirectory",
+                    return_value=scratch,
+                ),
+                patch.object(experiment, "create_runtime", return_value=runtime),
+                patch.object(experiment, "_prepare_workspace"),
+                patch.object(experiment, "evaluate", return_value=dict[str, object]()),
+                patch.object(experiment, "read_regular", side_effect=read),
+                patch("sys.stdout", new=io.StringIO()),
+            ):
+                expected = run_error or close_error or read_error
+                try:
+                    experiment.main(["--output", str(output)])
+                except (OSError, RuntimeError, KeyboardInterrupt) as error:
+                    self.require(error is expected)
+                else:
+                    self.require(expected is None)
+            self.equal(events.count("close"), 1)
+            self.equal(root.exists(), close_error is not None)
+            report = object_field(json_object(output.read_bytes()), "report")
+            if close_error is None and read_error is None:
+                self.equal(report["attempts"], [{"decision": "accepted"}])
+            if close_error is not None:
+                self.require("read" not in events)
+                self.require("runtime shutdown failed" in str(report["cleanup_error"]))
+
+    def test_provider_setup_failure_closes_created_runtime(self) -> None:
+        """Even setup before the first command belongs to the runtime cleanup scope."""
+        provider = registered_service("optimization", HTTP_PROVIDER)
+        setup_error = RuntimeError("provider setup failed")
+        with patch.object(provider.ChatAPI, "__init__", side_effect=setup_error):
+            self._measurement_case(setup_error, None, None)
 
 
 class GatewayRequestTests(_HarnessAssertions):

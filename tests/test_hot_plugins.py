@@ -117,6 +117,54 @@ def register(api):
         return runtime
 
 
+class SourceCaptureTests(_HotPluginFixture):
+    """Capture complete reload candidates before executing their entrypoints."""
+
+    def test_invalid_later_candidate_does_not_execute_earlier_entrypoint(self) -> None:
+        """A compile failure leaves the active generation and import effects alone."""
+        first = self.plugin("first")
+        second = self.plugin("second")
+        runtime = self.runtime(first, second)
+        marker = self.root / "imported.txt"
+        entrypoint = first / "__init__.py"
+        entrypoint.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
+            + entrypoint.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (second / "__init__.py").write_text("def broken(\n", encoding="utf-8")
+
+        with self.rejected(PluginError, "Cannot compile plugin 'second'"):
+            runtime.reload()
+
+        self.require(not marker.exists())
+        self.equal(runtime.generation, 0)
+        self.equal(runtime.command("/first"), "1")
+        self.equal(runtime.command("/second"), "1")
+
+    def test_import_cannot_change_a_later_candidates_captured_code(self) -> None:
+        """Source mutation during import rejects the update after immutable loading."""
+        first = self.plugin("first")
+        second = self.plugin("second")
+        runtime = self.runtime(first, second)
+        entrypoint = first / "__init__.py"
+        entrypoint.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(second / '__init__.py')!r}).write_text("
+            "\"raise RuntimeError('uncaptured code executed')\\n\", encoding='utf-8')\n"
+            + entrypoint.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        with self.rejected(PluginError, "Plugin source changed during loading"):
+            runtime.reload()
+
+        self.equal(runtime.generation, 0)
+        self.equal(runtime.command("/first"), "1")
+        self.equal(runtime.command("/second"), "1")
+
+
 class HotPluginTests(_HotPluginFixture):
     """Check live plugin replacement and concurrent runtime ownership."""
 

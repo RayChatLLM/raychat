@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,16 +126,13 @@ class SkillStore:
 
         """
         candidates: list[Path] = []
-        seen_paths: set[str] = set()
         for raw_root in roots:
             root = Path(raw_root).expanduser()
             possible = _root_candidates(root)
             for path in possible:
-                identity = os.path.normcase(str(path.resolve()))
-                if identity not in seen_paths:
-                    seen_paths.add(identity)
+                if not any(path.samefile(candidate) for candidate in candidates):
                     candidates.append(path)
-        candidates.sort(key=_path_identity)
+        candidates.sort(key=_path_sort)
         if len(candidates) > MAX_SKILLS:
             error_message = f"At most {MAX_SKILLS} skills may be configured."
             raise ValueError(error_message)
@@ -275,8 +271,9 @@ def _frontmatter(lines: list[str], source: Path) -> tuple[dict[str, str], int]:
     return metadata, body_start
 
 
-def _path_identity(path: Path) -> str:
-    return os.path.normcase(str(path.resolve()))
+def _path_sort(path: Path) -> tuple[str, str]:
+    text = str(path.resolve())
+    return text.casefold(), text
 
 
 def _path_order(path: Path) -> str:

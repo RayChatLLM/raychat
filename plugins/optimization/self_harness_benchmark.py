@@ -9,9 +9,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import sys
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 import raychat
 from raychat.composition import create_runtime
+from raychat.filesystem import OwnedTemporaryDirectory, read_regular
 from raychat.provider_settings import ProviderSettings, provider_settings
 from raychat.sdk import Messages, ProviderError, ProviderService, ServiceSlot
 from raychat.service_contracts import CHAT, ChatService, OptimizationComponent
@@ -34,11 +35,14 @@ from . import optimize_chat_prompt as benchmark
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
+    from raychat.plugins import Runtime
     from raychat.sdk import Chat
     from raychat.service_contracts import OptimizationBindings
 
 _provider = ServiceSlot[ProviderService]("http_provider")
+_LOG = logging.getLogger(__name__)
 _MAX_REQUEST_BYTES = 16 * 1024 * 1024
+_MAX_ATTEMPT_BYTES = 16 * 1024 * 1024
 _PROPOSER_MARKER = "SELF_HARNESS_PROPOSER"
 
 
@@ -106,6 +110,7 @@ class _ExperimentProgress(TypedDict, total=False):
     error: str
     calls: list[ProviderCall]
     elapsed_seconds: float
+    cleanup_error: str
 
 
 class ExperimentReport(_ExperimentProgress):
@@ -444,12 +449,13 @@ def _prepare_workspace(workspace: Path, endpoint: str, model: str) -> None:
         "from raychat.composition import create_runtime\n"
         "from raychat.service_contracts import OPTIMIZATION\n"
         'runtime=create_runtime(plugins=["optimization"], '
-        'source=json.loads(Path("sources.json").read_text()))\n'
+        'source=json.loads(Path("sources.json").read_text(encoding="utf-8")))\n'
         "evaluate=OPTIMIZATION.validate(runtime.services[OPTIMIZATION.name]).load("
         '"self_harness_benchmark").evaluate\n'
-        "config=json.loads(Path('endpoint.json').read_text())\n"
+        "config=json.loads(Path('endpoint.json').read_text(encoding='utf-8'))\n"
         "path=Path('.raychat/harness.md')\n"
-        "print(json.dumps(evaluate(path.read_text() if path.exists() else '',"
+        "print(json.dumps(evaluate(path.read_text(encoding='utf-8') "
+        "if path.exists() else '',"
         "config['url'],config['model'])))\n"
     )
     (workspace / "evaluator.py").write_text(script, encoding="utf-8")
@@ -459,8 +465,52 @@ def _notify(kind: str, payload: Mapping[str, object]) -> None:
     _progress(str(payload.get("message", kind)))
 
 
-def _measure(workspace: Path, endpoint: str, report: ExperimentReport) -> None:
-    _prepare_workspace(workspace, endpoint, report["model"])
+def _attempts(workspace: Path) -> list[dict[str, object]]:
+    # The owned runtime has stopped before this diagnostic snapshot is read.
+    log = workspace / ".raychat/self-harness/attempts.jsonl"
+    try:
+        raw = read_regular(log, _MAX_ATTEMPT_BYTES + 1, follow_symlinks=False)
+    except FileNotFoundError:
+        return []
+    if len(raw) > _MAX_ATTEMPT_BYTES:
+        message = "Benchmark attempt history exceeds its diagnostic byte limit."
+        raise ValueError(message)
+    return [
+        object_field(json_object(line), "attempt")
+        for line in raw.splitlines(keepends=True)
+        if line.endswith(b"\n")
+    ]
+
+
+def _finish_measurement(
+    runtime: Runtime,
+    scratch: OwnedTemporaryDirectory,
+    report: ExperimentReport,
+    primary: BaseException | None,
+) -> None:
+    try:
+        runtime.close()
+    except BaseException as error:
+        scratch.retain(reason="benchmark runtime shutdown failed")
+        report["cleanup_error"] = f"{type(error).__name__}: {error}"
+        if primary is None:
+            raise
+        _LOG.exception("Benchmark runtime shutdown failed after experiment failure")
+        return
+    try:
+        report["attempts"] = _attempts(Path(scratch.name))
+    except (OSError, TypeError, ValueError):
+        if primary is None:
+            raise
+        _LOG.exception("Benchmark attempt history failed after experiment failure")
+
+
+@contextmanager
+def _measurement_runtime(
+    scratch: OwnedTemporaryDirectory,
+    report: ExperimentReport,
+) -> Iterator[Runtime]:
+    workspace = Path(scratch.name).resolve()
     plugin_names = ["filesystem", "process", "context", "self_harness"]
     harness_options: dict[str, object] = {
         "editable_roots": [],
@@ -473,19 +523,36 @@ def _measure(workspace: Path, endpoint: str, report: ExperimentReport) -> None:
         plugins=plugin_names,
         self_harness=harness_options,
     )
-    services: object = runtime.services
-    chat = _provider.get().ChatAPI(
-        endpoint,
-        report["model"],
-        "",
-        120,
-        request_options={},
-    )
-    object_field(services, "runtime.services")[CHAT.name] = ChatService(
-        chat,
-        lambda: chat,
-    )
+    primary: BaseException | None = None
     try:
+        yield runtime
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        _finish_measurement(runtime, scratch, report, primary)
+
+
+def _measure(
+    scratch: OwnedTemporaryDirectory,
+    endpoint: str,
+    report: ExperimentReport,
+) -> None:
+    workspace = Path(scratch.name).resolve()
+    _prepare_workspace(workspace, endpoint, report["model"])
+    with _measurement_runtime(scratch, report) as runtime:
+        services: object = runtime.services
+        chat = _provider.get().ChatAPI(
+            endpoint,
+            report["model"],
+            "",
+            120,
+            request_options={},
+        )
+        object_field(services, "runtime.services")[CHAT.name] = ChatService(
+            chat,
+            lambda: chat,
+        )
         _progress("Running fixed baseline and one proposed candidate.")
         report["message"] = runtime.command("/self-harness", notify=_notify)
         path = workspace / ".raychat/harness.md"
@@ -503,23 +570,22 @@ def _measure(workspace: Path, endpoint: str, report: ExperimentReport) -> None:
             evaluate(overlay, endpoint, report["model"], sealed=True)
             for _ in range(report["repetitions"])
         ]
-    finally:
-        log = workspace / ".raychat/self-harness/attempts.jsonl"
-        report["attempts"] = (
-            [
-                object_field(json_object(line), "attempt")
-                for line in log.read_text(encoding="utf-8").splitlines()
-            ]
-            if log.exists()
-            else []
-        )
-        runtime.close()
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Run one provider-backed proposal and write its complete experiment report.
 
     Provider failures abort the run and remain visible in the final report.
+
+    Raises
+    ------
+    OSError
+        If report publication fails after an otherwise successful experiment.
+    TypeError
+        If a successful experiment produces an unserializable report.
+    ValueError
+        If a successful experiment produces invalid report values.
+
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
@@ -532,21 +598,29 @@ def main(argv: Sequence[str] | None = None) -> None:
     options.update(temperature=0, max_tokens=8192)
     state = _GatewayState(provider=provider, settings=settings, options=options)
     report = _initial_report(state, args.repetitions)
+    primary: BaseException | None = None
     try:
-        with (
-            _gateway(state) as endpoint,
-            tempfile.TemporaryDirectory(prefix="raychat-efficacy-") as temporary,
-        ):
-            _measure(Path(temporary).resolve(), endpoint, report)
-    except Exception as exc:
+        with _gateway(state) as endpoint:
+            scratch = OwnedTemporaryDirectory(prefix="raychat-efficacy-")
+            with scratch:
+                _measure(scratch, endpoint, report)
+    except BaseException as exc:
+        primary = exc
         report["error"] = f"{type(exc).__name__}: {exc}"
         raise
     finally:
-        report["calls"] = state.calls
-        report["elapsed_seconds"] = time.time() - report["started"]
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        _progress(f"Report: {args.output}")
+        try:
+            report["calls"] = state.calls
+            report["elapsed_seconds"] = time.time() - report["started"]
+            benchmark.write_json_report(args.output, report)
+            _progress(f"Report: {args.output}")
+        except (OSError, TypeError, ValueError):
+            if primary is None:
+                raise
+            _LOG.exception(
+                "Failed to publish experiment report path=%r",
+                str(args.output),
+            )
 
 
 if __name__ == "__main__":

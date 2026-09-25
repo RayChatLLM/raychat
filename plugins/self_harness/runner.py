@@ -5,15 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from raychat.core_bridge import CoreBridge
+from raychat.filesystem import OwnedTemporaryDirectory
+from raychat.plugin_manager import PLUGIN_MANAGER
 from raychat.sdk import workspace_path
 from raychat.service_contracts import ATOMIC_WRITE, CHAT, PROCESS_RUNNER
+from raychat.workspace_files import workspace_access
 
 from .candidate import promote
 from .evaluation import (
@@ -187,7 +189,7 @@ class _HarnessRun:
             "Self-harness: evaluating the baseline in a temporary workspace.",
         )
         try:
-            with tempfile.TemporaryDirectory(
+            with OwnedTemporaryDirectory(
                 prefix="raychat-self-harness-",
             ) as temporary:
                 return self.evaluate(Path(temporary).resolve())
@@ -205,12 +207,16 @@ class _HarnessRun:
     def evaluate(self, root: Path) -> HarnessResult:
         config = self.installation.config
         pristine = root / "source"
-        copy_workspace(
-            self.installation.workspace,
-            pristine,
-            config,
-            self.ctx.check_cancelled,
-        )
+        with (
+            self.ctx.require_service(PLUGIN_MANAGER).source_read(),
+            workspace_access(self.installation.workspace),
+        ):
+            copy_workspace(
+                self.installation.workspace,
+                pristine,
+                config,
+                self.ctx.check_cancelled,
+            )
         service = self.ctx.optional_service("core_updates")
         if isinstance(service, CoreBridge):
             for name in ("raychat", "plugins"):

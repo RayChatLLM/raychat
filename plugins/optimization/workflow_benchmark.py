@@ -13,16 +13,18 @@ import logging
 import os
 import re
 import sys
-import tempfile
 import threading
 import time
 from concurrent.futures import CancelledError, Future
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from raychat.composition import create_runtime
+from raychat.filesystem import OwnedTemporaryDirectory, write_bytes
 from raychat.provider_settings import ProviderSettings, provider_settings
 from raychat.sdk import (
     HTTP_PROVIDER,
@@ -46,7 +48,7 @@ from raychat.validation import (
 from . import optimize_chat_prompt as port
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from raychat.plugins import Runtime
     from raychat.sdk import ChildSessionInfo, Messages, SubagentFactoryService
@@ -585,51 +587,129 @@ def _finalize(benchmark: _Benchmark) -> None:
     report["elapsed_seconds"] = time.monotonic() - benchmark.started
 
 
-def _execute(root: Path, benchmark: _Benchmark) -> None:
+def _cleanup_step(step: Callable[[], object]) -> BaseException | None:
+    try:
+        step()
+    except BaseException as error:
+        _LOGGER.exception("Workflow benchmark cleanup step failed")
+        return error
+    return None
+
+
+def _cleanup_steps(steps: Sequence[Callable[[], object]]) -> list[BaseException]:
+    return [error for step in steps if (error := _cleanup_step(step)) is not None]
+
+
+def _retire_runtime(
+    runtime: Runtime,
+    factory: SubagentFactoryService | None,
+    benchmark: _Benchmark,
+    scratch: OwnedTemporaryDirectory,
+    primary: BaseException | None,
+) -> None:
+    children: tuple[ChildSessionInfo, ...] = ()
+
+    def capture_children() -> None:
+        nonlocal children
+        if factory is not None:
+            children = factory.children()
+
+    def verify_stopped() -> None:
+        if any(child.worker.is_alive for child in children):
+            message = "Workflow child workers remain alive after runtime shutdown."
+            raise RuntimeError(message)
+
+    failures = _cleanup_steps([capture_children, runtime.close, verify_stopped])
+    benchmark.report["workers_stopped"] = not failures
+    if failures:
+        scratch.retain(reason="workflow runtime shutdown could not be verified")
+        benchmark.report["errors"].extend(
+            f"Cleanup {type(error).__name__}: {error}" for error in failures
+        )
+        if primary is None:
+            raise failures[0]
+
+
+def _retire_server(
+    server: ThreadingHTTPServer,
+    serving: threading.Thread,
+    primary: BaseException | None,
+) -> None:
+    steps: list[Callable[[], object]] = []
+    if serving.is_alive():
+        steps.append(server.shutdown)
+    steps.append(server.server_close)
+    if serving.ident is not None:
+        steps.append(partial(serving.join, 5))
+    failures = _cleanup_steps(steps)
+    if serving.is_alive():
+        failures.append(RuntimeError("Workflow gateway thread did not stop."))
+        _LOGGER.error("Workflow gateway thread did not stop")
+    if failures and primary is None:
+        raise failures[0]
+
+
+@contextmanager
+def _gateway_scope(benchmark: _Benchmark) -> Iterator[ThreadingHTTPServer]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _gateway(benchmark))
     serving = threading.Thread(target=server.serve_forever, daemon=True)
-    serving.start()
+    primary: BaseException | None = None
     try:
-        runtime = create_runtime(
-            root,
-            plugins=["filesystem", "context", "subagents", "workflows"],
-            source=port.plugin_sources(),
-        )
-        children: tuple[ChildSessionInfo, ...] = ()
-        factory: SubagentFactoryService | None = None
-        try:
-            context = runtime.context("subagents")
-            factory = context.require_service(SUBAGENT_FACTORY)
-            provider = context.require_service(HTTP_PROVIDER)
-            client = provider.ChatAPI(
-                f"http://127.0.0.1:{server.server_port}/chat",
-                "ledger",
-                "",
-                90,
-                {},
-            )
-            factory.configure(
-                SubagentSetup(
-                    provider=client,
-                    context_chars=benchmark.settings.context_chars,
-                    max_parallel=benchmark.settings.parallel,
-                ),
-            )
-            _run_batches(runtime, benchmark)
-            children = factory.children()
-            expected = _aggregate(benchmark, children)
-            _followups(benchmark, children, expected)
-        finally:
-            if factory is not None:
-                children = factory.children()
-            runtime.close()
-            benchmark.report["workers_stopped"] = all(
-                not child.worker.is_alive for child in children
-            )
+        serving.start()
+        yield server
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        server.shutdown()
-        server.server_close()
-        serving.join(5)
+        _retire_server(server, serving, primary)
+
+
+@contextmanager
+def _runtime_scope(
+    scratch: OwnedTemporaryDirectory,
+    benchmark: _Benchmark,
+) -> Iterator[tuple[Runtime, SubagentFactoryService]]:
+    runtime = create_runtime(
+        Path(scratch.name),
+        plugins=["filesystem", "context", "subagents", "workflows"],
+        source=port.plugin_sources(),
+    )
+    factory: SubagentFactoryService | None = None
+    primary: BaseException | None = None
+    try:
+        factory = runtime.context("subagents").require_service(SUBAGENT_FACTORY)
+        yield runtime, factory
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        _retire_runtime(runtime, factory, benchmark, scratch, primary)
+
+
+def _execute(scratch: OwnedTemporaryDirectory, benchmark: _Benchmark) -> None:
+    with (
+        _gateway_scope(benchmark) as server,
+        _runtime_scope(scratch, benchmark) as (runtime, factory),
+    ):
+        provider = runtime.context("subagents").require_service(HTTP_PROVIDER)
+        client = provider.ChatAPI(
+            f"http://127.0.0.1:{server.server_port}/chat",
+            "ledger",
+            "",
+            90,
+            {},
+        )
+        factory.configure(
+            SubagentSetup(
+                provider=client,
+                context_chars=benchmark.settings.context_chars,
+                max_parallel=benchmark.settings.parallel,
+            ),
+        )
+        _run_batches(runtime, benchmark)
+        children = factory.children()
+        expected = _aggregate(benchmark, children)
+        _followups(benchmark, children, expected)
 
 
 def run(
@@ -674,10 +754,11 @@ def run(
             options,
         ),
     )
-    with tempfile.TemporaryDirectory(prefix="raychat-workflow-benchmark-") as temporary:
+    scratch = OwnedTemporaryDirectory(prefix="raychat-workflow-benchmark-")
+    with scratch as temporary:
         root = Path(temporary)
         _write_fixtures(root, settings)
-        _execute(root, benchmark)
+        _execute(scratch, benchmark)
     _finalize(benchmark)
     return benchmark.report
 
@@ -717,7 +798,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parallel=args.parallel,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    write_bytes(args.output, (json.dumps(report, indent=2) + "\n").encode("utf-8"))
     summary = {
         key: value
         for key, value in report.items()
