@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import io
 import json
 import os
+import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest import mock
 
+from raychat import core_tools
 from raychat.core_bridge import CoreBridge
 from raychat.core_tools import install
+from raychat.filesystem import read_regular
 from raychat.plugins import Runtime
 from raychat.sdk import Action, PluginContext, ToolDefinition
 from raychat.session import AgentSession
@@ -18,9 +25,10 @@ from raychat.storage import SessionStore
 from raychat.validation import array_field, configuration_fields
 from raychat_bootstrap.wire import decode
 from tests.assertions import TypedTestCase
+from tools.smoke_process import SmokeCommand, run_checked
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
     from raychat.sdk import Messages
 
@@ -328,7 +336,7 @@ class CoreToolsTests(TypedTestCase):
                 runtime.execute({"action": "core_source", "query": "PRIVATE_VALUE"}),
                 {"matches": [], "truncated": False},
             )
-            with self.rejected(ValueError, "escapes"):
+            with self.rejected(ValueError, "links or reparse"):
                 runtime.execute({"action": "core_source", "path": "raychat/linked.py"})
             runtime.close()
 
@@ -485,3 +493,213 @@ class CoreToolsTests(TypedTestCase):
             )
             self.require('"pending": true' in session.history_snapshot()[-1].content)
             runtime.close()
+
+
+@contextmanager
+def _source_runtime(root: Path) -> Iterator[tuple[Runtime, io.BytesIO]]:
+    """Own a source inspection runtime and its supervisor output.
+
+    Yields
+    ------
+    tuple[Runtime, io.BytesIO]
+        The installed runtime and captured supervisor requests.
+
+    """
+    output = io.BytesIO()
+    bridge = CoreBridge(io.BytesIO(), output)
+    bridge.source_root = root
+    runtime = Runtime(root)
+    install(runtime, bridge)
+    try:
+        yield runtime, output
+    finally:
+        runtime.close()
+
+
+class CoreSourceFilesystemTests(TypedTestCase):
+    """Capture closed regular inputs without traversing source aliases."""
+
+    def test_search_context_uses_the_same_closed_snapshot_as_matches(self) -> None:
+        """Replacing the input during AST parsing cannot mix two versions."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "raychat/example.py"
+            path.parent.mkdir()
+            before = b"def paint():\n    return 'old marker'\n"
+            after = b"def changed():\n    return 'new marker'\n"
+            path.write_bytes(before)
+            replacement = root / "replacement.py"
+            replacement.write_bytes(after)
+            original: Callable[[str], ast.Module] = ast.parse
+
+            def parse(source: str) -> ast.Module:
+                replacement.replace(path)
+                return original(source)
+
+            with (
+                _source_runtime(root) as (runtime, _output),
+                mock.patch.object(ast, "parse", parse),
+            ):
+                result = runtime.execute({"action": "core_source", "query": "old"})
+            matches = array_field(result["matches"], "matches")
+            self.equal(len(matches), 1)
+            context = configuration_fields(result["context"], "context")
+            self.equal(context["source"], before.decode("utf-8"))
+            self.equal(context["sha256"], hashlib.sha256(before).hexdigest())
+            self.equal(path.read_bytes(), after)
+
+    def test_changed_source_is_rejected_before_display_or_submission(self) -> None:
+        """Growth and same-size replacement cannot silently produce a prefix."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "raychat/example.py"
+            path.parent.mkdir()
+            original = b"VALUE = 1\n"
+            actions: tuple[Action, ...] = (
+                {"action": "core_source", "path": "raychat/example.py"},
+                {"action": "core_source", "query": "VALUE"},
+                {
+                    "action": "core_update",
+                    "files": [
+                        {
+                            "path": "raychat/example.py",
+                            "sha256": hashlib.sha256(original).hexdigest(),
+                            "replacements": [{"old": "1", "new": "2"}],
+                        },
+                    ],
+                },
+            )
+            for changed in (b"VALUE = 3\n", original * 100):
+                for action in actions:
+                    with self.subTest(changed=len(changed), action=action["action"]):
+                        path.write_bytes(original)
+                        self._assert_changed_source(root, action, changed)
+
+    def _assert_changed_source(
+        self,
+        root: Path,
+        action: Action,
+        changed: bytes,
+    ) -> None:
+        def replace(
+            selected: Path,
+            limit: int,
+            *,
+            follow_symlinks: bool,
+        ) -> bytes:
+            replacement = root / "replacement.py"
+            replacement.write_bytes(changed)
+            replacement.replace(selected)
+            return read_regular(selected, limit, follow_symlinks=follow_symlinks)
+
+        with _source_runtime(root) as (runtime, output):
+            with (
+                mock.patch.object(core_tools, "read_regular", replace),
+                self.rejected(ValueError, "changed while reading"),
+            ):
+                runtime.execute(action)
+            self.equal(output.getvalue(), b"")
+        self.equal((root / "raychat/example.py").read_bytes(), changed)
+
+    def test_fifo_substitution_is_rejected_in_a_bounded_child(self) -> None:
+        """A source replaced after inspection cannot block on a FIFO writer."""
+        if os.name != "posix":
+            self.skipTest("POSIX FIFO fixture")
+        script = """
+import io
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from raychat.core_bridge import CoreBridge
+from raychat.core_tools import install
+from raychat.plugins import Runtime
+root = Path(sys.argv[1]).resolve()
+selected = root / 'raychat/example.py'
+original = os.open
+def substituted(path, flags):
+    if Path(path) == selected:
+        selected.unlink()
+        os.mkfifo(selected)
+    return original(path, flags)
+bridge = CoreBridge(io.BytesIO(), io.BytesIO())
+bridge.source_root = root
+runtime = Runtime(root)
+install(runtime, bridge)
+try:
+    with patch('raychat.filesystem.os.open', substituted):
+        try:
+            runtime.execute({'action': 'core_source', 'path': 'raychat/example.py'})
+        except ValueError as error:
+            assert 'regular file' in str(error), str(error)
+        else:
+            raise AssertionError('Accepted FIFO source')
+finally:
+    runtime.close()
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "raychat").mkdir()
+            (root / "raychat/example.py").write_bytes(b"VALUE = 1\n")
+            run_checked(
+                SmokeCommand(
+                    (sys.executable, "-B", "-S", "-c", script, str(root)),
+                    Path(__file__).resolve().parents[1],
+                    dict(os.environ),
+                    10,
+                    4000,
+                ),
+            )
+
+    def test_native_windows_junction_is_skipped_before_traversal(self) -> None:
+        """Search skips even internal aliases; explicit reads reject them."""
+        if os.name != "nt":
+            self.skipTest("Native Windows junction fixture")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "raychat").mkdir()
+            external = root / "external"
+            external.mkdir()
+            selected = external / "example.py"
+            selected.write_bytes(b"PRIVATE_VALUE = 1\n")
+            junction = root / "raychat/linked"
+            run_checked(
+                SmokeCommand(
+                    (
+                        sys.executable,
+                        "-B",
+                        "-S",
+                        "-c",
+                        "import _winapi, sys; _winapi.CreateJunction(*sys.argv[1:])",
+                        str(external),
+                        str(junction),
+                    ),
+                    root,
+                    dict(os.environ),
+                    10,
+                    4000,
+                ),
+            )
+            original = Path.iterdir
+
+            def entries(path: Path) -> Iterator[Path]:
+                self.require(path != junction, "Traversed a Windows junction")
+                return original(path)
+
+            try:
+                with (
+                    _source_runtime(root) as (runtime, _output),
+                    mock.patch.object(Path, "iterdir", entries),
+                ):
+                    self.equal(
+                        runtime.execute({"action": "core_source", "query": "PRIVATE"}),
+                        {"matches": [], "truncated": False},
+                    )
+                    with self.rejected(ValueError, "links or reparse"):
+                        runtime.execute({
+                            "action": "core_source",
+                            "path": "raychat/linked/example.py",
+                        })
+                self.equal(selected.read_bytes(), b"PRIVATE_VALUE = 1\n")
+            finally:
+                junction.rmdir()

@@ -1708,3 +1708,48 @@ The 25 focused configuration/core-tool tests pass on macOS Python 3.10.19
 (2.369 seconds) and 3.14.3 (2.555 seconds). Strict typing, lint and formatting
 pass without suppressions in `build/filesystem-quality-82/report.json`. Updated
 native CI is the next gate; the prior CI evidence above is not a substitute.
+
+
+### Core source inspection and edit-input capture
+
+`core_source` and the input side of `core_update` inspect the retained active
+release. Cooperating core updates build separate generations rather than editing
+this tree in place. These operations own no public destination, staging file or
+cleanup target. A developer checkout must remain quiescent during inspection;
+external editors do not participate in the supervisor's generation protocol.
+
+Explicit source names pass the shared portable relative-path validator. Each
+component below the approved root is checked without resolving it into a different
+object. Linked files and directories, including Windows reparse points, are
+rejected even if their targets remain inside the release. The approved root and
+its parents may resolve through operator-selected aliases. Search skips linked
+entries before descending, traverses only observed ordinary directories, and
+selects only regular `.py`/`.json` files. Absent optional `raychat` or `plugins`
+roots are empty searches; disappearance after discovery and other I/O errors
+propagate. Parent directories must remain trusted during the operation; these
+checks are not a sandbox against concurrent hostile ancestor replacement.
+
+Every source read uses `read_regular(..., follow_symlinks=False)`, bounded by the
+observed size plus one byte. The helper checks the opened descriptor and closes
+it before decoding, hashing, AST parsing or sending a supervisor request. A changed
+identity, size, mode, link count, modification timestamp or change timestamp after
+capture rejects the result; no read or whole-action retry is introduced. Access
+timestamps are deliberately excluded because reading can update them. This does
+not promise detection of arbitrary external rewrites that restore all observed
+metadata, nor a transaction across multiple independently inspected files.
+
+Search derives the first match's context, AST function boundary and SHA-256 from
+the same captured bytes as its matching lines. Replacing the pathname during AST
+parsing therefore cannot mix versions in one answer. Edit proposals retain their
+existing whole-file digest check and submit changed bytes without writing the live
+source. UTF-8 source bytes and original newlines are preserved.
+
+Focused regression evidence: 23 core-tool/review tests pass on local macOS Python
+3.10.19 and 3.14.3, each skipping the native Windows junction fixture. Tests replace
+the source during AST parsing, inject growth and same-size replacement before a
+read for source/search/update actions, and substitute a FIFO in a bounded POSIX
+child. The Windows fixture creates a real junction without symlink privileges,
+guards against traversal, and checks explicit-read rejection. It is selected in
+the existing native CI matrix; this new revision still requires its CI result.
+Strict typing, lint and format passed in `build/filesystem-quality-86`. The final
+23-test core-tool/review selection also passed on local macOS Python 3.12.
