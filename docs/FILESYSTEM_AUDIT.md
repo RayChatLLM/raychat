@@ -2068,3 +2068,10 @@ Local Python 3.10 and 3.14 each passed all 50 checker/filesystem tests. Strict
 mypy, Ruff and formatting passed with unchanged sources in
 `build/filesystem-quality-108`; direct-script `tools/check_types.py` also passed
 both source checks and all expected type-contract rejections.
+
+The first follow-up CI run (`36178872119`, revision `1849032`) passed the full
+1,136-test suite and static checks, but Windows exposed a diagnostic assertion
+that compared a raw path against `%r`-escaped log output. The production path was
+correctly retained and reported; the test now compares its escaped representation,
+including Windows backslashes. The assertion still requires the exact retained
+path. This correction needs a fresh complete native CI result.
