@@ -68,7 +68,19 @@ class _Closeable(Protocol):
 
 
 @contextmanager
-def _owned_stream(stream: _Stream) -> Iterator[_Stream]:
+def owned_stream(stream: _Stream) -> Iterator[_Stream]:
+    """Close an owned stream once while preserving an existing operation failure.
+
+    The caller must retire consumers before leaving the context. A close failure
+    after successful work propagates; a secondary OSError is logged. Closing is
+    never retried and does not imply that the resource was successfully retired.
+
+    Yields
+    ------
+    _Stream
+        The caller-provided stream, owned until context exit.
+
+    """
     try:
         yield stream
     except BaseException:
@@ -499,7 +511,7 @@ def append_owned(path: Path, data: bytes) -> None:
     failure may leave an incomplete final record; readers must tolerate that tail.
 
     """
-    with _owned_stream(_open_append(path, readable=False)) as stream:
+    with owned_stream(_open_append(path, readable=False)) as stream:
         _append_all(stream, data)
 
 
@@ -520,7 +532,7 @@ def append_record(path: Path, data: bytes) -> None:
     if not data.endswith(b"\n") or b"\n" in data[:-1]:
         message = "A log record must contain exactly one terminating newline."
         raise ValueError(message)
-    with _owned_stream(_open_append(path, readable=True)) as stream:
+    with owned_stream(_open_append(path, readable=True)) as stream:
         discarded = _trim_incomplete_record(stream)
         if discarded:
             _LOG.warning(
@@ -642,7 +654,7 @@ def read_regular(
         _require_regular(descriptor, expected)
         stream = os.fdopen(descriptor, "rb")
         descriptor = -1
-        with _owned_stream(stream):
+        with owned_stream(stream):
             if from_end:
                 size = stream.seek(0, os.SEEK_END)
                 stream.seek(max(0, size - limit))

@@ -4,8 +4,8 @@ Status: in progress. This ledger preserves all requirements from the supplied
 checklist (67 checkbox bullets in the supplied text, despite its 69-item label);
 implementation and verification are separate gates. Current changes have local
 macOS and Linux-container evidence. Native Windows validation uses GitHub Actions;
-the latest successful baseline is `1746172` (all twelve jobs in run
-[36170300371](https://github.com/RayChatLLM/raychat/actions/runs/36170300371)).
+the latest successful baseline is `1d7d6b5` (all twelve jobs in run
+[36175820451](https://github.com/RayChatLLM/raychat/actions/runs/36175820451)).
 It includes verified standard Windows users and Defender-enabled stress; changes
 after that baseline still require their own native CI results.
 
@@ -2034,3 +2034,37 @@ module rather than installing a second complete plugin catalog before reporting
 ready. Its pipe ordering, acquisition deadline and contention assertions are
 unchanged. The transcript descriptor-failure probe now reaches transcript
 wrapping itself, while the sidecar owner is independently tested.
+
+### Developer checker process ownership
+
+`tools/checker_process.py` owns type/lint checker children, redirected streams and
+private scratch directories through one asynchronous context. Both checker entry
+points retain direct-script and module invocation. Inputs and copied launcher
+bytes are complete before launch; each command has fresh private output files.
+Only intended standard handles are inherited (`close_fds=True`); stdin is closed.
+Checker output uses UTF-8, decodes after child retirement and stream closure, and
+retains stdout/stderr separately. Quality diagnostic snapshots concatenate those
+streams and publish through the shared filesystem helper; they do not promise
+chronological interleaving between streams. Report directories are exclusive to
+one verification invocation.
+
+A checker has a 900-second execution timeout and a separate ten-second shutdown
+budget. Cancellation during creation joins that creation before killing and
+waiting for the child. Concurrent checker failure cancels and settles siblings
+before cleaning the workspace. Repeated cancellation cannot abandon the same
+owned operation. A failed kill/wait retains the tree and logs its exact pathname
+while preserving the original operation failure. OS calls already in progress
+are not interruptible deadlines. Checkers must not leave independent descendants;
+this is direct-child ownership, not a portable process-tree termination protocol.
+
+Four regression tests use actual children to exercise complete UTF-8 diagnostics,
+nonzero status, repeated cancellation during spawn, a failed concurrent launch,
+and failed retirement with explicit retained-tree cleanup after the test proves
+its consumer stopped. They join the native filesystem selection, including both
+standard Windows and Defender runs. Native acceptance of this follow-up is
+pending its own CI result.
+
+Local Python 3.10 and 3.14 each passed all 50 checker/filesystem tests. Strict
+mypy, Ruff and formatting passed with unchanged sources in
+`build/filesystem-quality-108`; direct-script `tools/check_types.py` also passed
+both source checks and all expected type-contract rejections.

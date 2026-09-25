@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 SUITES = (
+    "tests.test_checker_process",
     "tests.test_filesystem",
     "tests.test_filesystem_process",
     "tests.test_app_config",
