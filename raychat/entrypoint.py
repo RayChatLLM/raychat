@@ -431,13 +431,10 @@ def _launch(
         args.resume = selected
         if selected is None:
             return 0
-    resources = create_resources(args, environ)
-    try:
+    with create_resources(args, environ) as resources:
         if options.exec_prompt is not None:
             return run_exec(args, resources)
         return controller.run_tui(args, resources, terminal)
-    finally:
-        resources.close()
 
 
 def _provider_preflight(argv: Sequence[str], environ: Mapping[str, str]) -> int | None:

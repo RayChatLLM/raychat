@@ -88,8 +88,7 @@ def _run(bridge: CoreBridge, launch: Mapping[str, object]) -> int:
             bridge.send("finished")
             return 0
         bridge.active = False
-    resources = create_resources(args, os.environ, source_override=source)
-    try:
+    with create_resources(args, os.environ, source_override=source) as resources:
         if saved is not None and saved["store"] is not None and not probe:
             store = configuration_fields(saved["store"], "writer ownership")
             raw_args: object = vars(args)
@@ -121,8 +120,6 @@ def _run(bridge: CoreBridge, launch: Mapping[str, object]) -> int:
         if not bridge.retire:
             bridge.send("finished")
         return result
-    finally:
-        resources.close()
 
 
 def main() -> int:
