@@ -26,14 +26,16 @@ import unicodedata
 import weakref
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from io import FileIO
+from io import FileIO, TextIOWrapper
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, TypeVar
+
+from .type_support import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from types import TracebackType
-    from typing import BinaryIO
+    from typing import BinaryIO, TextIO
 
 if sys.platform == "win32":
     import msvcrt
@@ -670,7 +672,9 @@ def _close_after_failure(stream: BinaryIO) -> None:
     try:
         stream.close()
     except OSError:
-        _LOG.exception("Stage close failed while preserving the primary exception")
+        _LOG.exception(
+            "Owned stream close failed while preserving the primary exception",
+        )
 
 
 @contextmanager
@@ -1007,3 +1011,119 @@ class FileLock:
     ) -> None:
         """Release without suppressing the caller's exception."""
         self.close()
+
+
+class _AppendLog(TextIOWrapper):
+    """Serialize each complete text write without retaining buffered appends."""
+
+    def __init__(self, stream: BinaryIO, lock_path: Path) -> None:
+        super().__init__(stream, encoding="utf-8", newline="\n", write_through=True)
+        self._lock_path = lock_path
+
+    @override
+    def write(self, text: str) -> int:
+        data = text.encode("utf-8")
+        with _transcript_access(self._lock_path):
+            count = self.buffer.write(data)
+        if count != len(data):
+            message = "Incomplete transcript append; the record was not retried."
+            raise OSError(message)
+        return len(text)
+
+    @override
+    def __exit__(
+        self,
+        _kind: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self.close()
+        except BaseException:
+            if error is None:
+                raise
+            _LOG.exception("Transcript close failed after an operation failure")
+
+
+@contextmanager
+def _transcript_access(path: Path) -> Iterator[None]:
+    lock = FileLock(path, timeout=0.5).acquire()
+    try:
+        yield
+    finally:
+        try:
+            lock.close()
+        except OSError:
+            # A release failure cannot undo an append or turn it into a retry.
+            _LOG.exception("Transcript lock cleanup failed path=%r", str(path))
+
+
+def _open_transcript(path: Path, mode: int) -> BinaryIO:
+    try:
+        expected = path.lstat()
+    except FileNotFoundError:
+        expected = None
+    if expected is not None and (
+        _linked_metadata(expected)
+        or not stat.S_ISREG(expected.st_mode)
+        or expected.st_nlink != 1
+    ):
+        message = "Transcript logs require a regular file with no links."
+        raise ValueError(message)
+    flags = (
+        os.O_WRONLY | os.O_APPEND | _file_flag("O_BINARY") | _file_flag("O_NONBLOCK")
+    )
+    flags |= os.O_CREAT | os.O_EXCL if expected is None else _file_flag("O_NOFOLLOW")
+    descriptor = os.open(path, flags, mode)
+    try:
+        _require_regular(descriptor, expected)
+        if os.fstat(descriptor).st_nlink != 1:
+            message = "Transcript log gained a hard link while opening."
+            raise ValueError(message)
+        # Explicit transcript selection opts into owner-only POSIX permissions;
+        # it does not authorize clearing read-only attributes or repairing ACLs.
+        if os.name == "posix":
+            os.fchmod(descriptor, mode)
+        stream = os.fdopen(descriptor, "ab", buffering=0)
+        descriptor = -1
+        return stream
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                _LOG.exception(
+                    "Transcript descriptor close failed after initialization failure",
+                )
+
+
+def open_private_append(path: Path, *, mode: int = 0o600) -> TextIO:
+    """Open a UTF-8 transcript with serialized, unbuffered append operations.
+
+    Parents must already exist and remain trusted; parent aliases are resolved.
+    Endpoints must be regular, nonlinked files. A persistent sibling sidecar
+    coordinates opening and each write, with a separate half-second acquisition
+    budget. Callers supply one complete record per write. Existing bytes are never
+    truncated or replaced, and failed/partial appends are not retried, even during
+    close. A failed append may leave an incomplete record; readers must tolerate
+    invalid records. This diagnostic log is not a recovery journal.
+    Existing POSIX permissions are deliberately tightened to mode after opening;
+    if a later step fails, that privacy change remains. Windows attributes/ACLs
+    are never repaired. Stop the stream's users before closing it. External
+    rotation, linked aliases and nonparticipating writers are unsupported.
+
+    Returns
+    -------
+    TextIO
+        An owned stream; each write appends UTF-8 bytes without newline changes.
+
+    """
+    path = path.parent.resolve(strict=True) / path.name
+    lock_path = path.with_name(path.name + ".lock")
+    with _transcript_access(lock_path):
+        stream = _open_transcript(path, mode)
+        try:
+            return _AppendLog(stream, lock_path)
+        except BaseException:
+            _close_after_failure(stream)
+            raise
