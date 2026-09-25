@@ -25,21 +25,21 @@ else:
 
 _READER = """
 import json
+import runpy
 import sys
 from pathlib import Path
-from tests.plugin_support import plugin_module
-module = plugin_module('self_harness.evidence')
+tail = runpy.run_path(sys.argv[2])['tail']
 path = Path(sys.argv[1])
 print('ready', flush=True)
 sys.stdin.readline()
 try:
-    module.tail(path, 1000)
+    tail(path, 1000)
 except RuntimeError:
     print('blocked', flush=True)
 else:
     print('unlocked', flush=True)
 sys.stdin.readline()
-print(json.dumps(module.tail(path, 1000)), flush=True)
+print(json.dumps(tail(path, 1000)), flush=True)
 """
 
 
@@ -157,6 +157,11 @@ class EvidenceLogTests(TypedTestCase):
             asyncio.run(self._reader(path))
 
     async def _reader(self, path: Path) -> None:
+        # Load the parent's exact captured module without installing another
+        # complete plugin catalog merely to exercise its sidecar protocol.
+        source: object = getattr(evidence, "__file__", None)
+        if not isinstance(source, str):
+            self.fail("The captured evidence module has no source path")
         child = await asyncio.create_subprocess_exec(
             sys.executable,
             "-B",
@@ -164,6 +169,7 @@ class EvidenceLogTests(TypedTestCase):
             "-c",
             _READER,
             str(path),
+            source,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

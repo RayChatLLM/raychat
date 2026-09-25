@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat.packages import read_manifest
+from raychat.type_support import override
 from raychat.ui.controller import FrameComposition, compose_frame
 from raychat.ui.renderer import RayTracer
 from raychat.ui.state import TuiState
@@ -19,6 +22,11 @@ from tests.assertions import TypedTestCase
 from tests.plugin_support import create_runtime, package
 from tests.tui_support import argument_fields, arguments
 from tools.terminal_screen import TerminalScreen
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from _typeshed import ReadableBuffer
 
 if os.name == "posix":
     from tools import ui_stress_tui
@@ -373,6 +381,20 @@ class TuiFixtureTests(TypedTestCase):
             self.equal(argument_fields(args)["initial_prompt"], "fixture prompt")
 
 
+class _MarkerWriter(io.BufferedWriter):
+    def __init__(self, descriptor: int, mode: str, observe: Callable[[], None]) -> None:
+        super().__init__(io.FileIO(descriptor, mode))
+        self.observe = observe
+
+    @override
+    def write(self, data: ReadableBuffer, /) -> int:
+        view = memoryview(data)
+        count = super().write(view[:1])
+        super().flush()
+        self.observe()
+        return count + super().write(view[1:])
+
+
 class BackgroundMarkerTests(TypedTestCase):
     """Observe fixture marker visibility during deliberately interrupted writes."""
 
@@ -387,23 +409,12 @@ class BackgroundMarkerTests(TypedTestCase):
             observed: list[tuple[bool, bool]] = []
             failure = TaskCancelled()
 
-            def write_interrupted(
-                path: Path,
-                data: str,
-                encoding: str | None = None,
-                errors: str | None = None,
-                newline: str | None = None,
-            ) -> int:
-                with path.open(
-                    "w",
-                    encoding=encoding,
-                    errors=errors,
-                    newline=newline,
-                ) as stream:
-                    count = stream.write(data[:1])
-                    stream.flush()
-                    observed.append((started.exists(), finished.exists()))
-                    return count + stream.write(data[1:])
+            def write_interrupted(descriptor: int, mode: str) -> _MarkerWriter:
+                return _MarkerWriter(
+                    descriptor,
+                    mode,
+                    lambda: observed.append((started.exists(), finished.exists())),
+                )
 
             def cancel_after_start() -> None:
                 if started.exists():
@@ -413,7 +424,7 @@ class BackgroundMarkerTests(TypedTestCase):
                 (root / "bg-observed.release").touch()
             runtime = create_runtime(root, plugins=[source])
             try:
-                with mock.patch.object(Path, "write_text", new=write_interrupted):
+                with mock.patch.object(os, "fdopen", new=write_interrupted):
                     if cancelled:
                         with self.rejected(TaskCancelled):
                             runtime.command(
