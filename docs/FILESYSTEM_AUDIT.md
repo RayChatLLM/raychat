@@ -364,7 +364,7 @@ own CI run, and hosted Windows success does not prove ordinary-user privileges.
 | 44 | Use approved, configurable application-data locations. | Absolute storage.home_directory, default sessions, trust state and explicit session-directory overrides are exercised through the shipped launcher on all three operating systems in CI dea3fe4. Remaining application-data locations still need inventory review. |
 | 45 | Test with antivirus and relevant index/sync software enabled. | Pending full audit; see subsystem inventory above. |
 | 46 | Distinguish security policy from contention. | Pending full audit; see subsystem inventory above. |
-| 47 | Keep read-only handling opt-in. | Only the private stage receives chmod; no live permission repair. Access-denied test verifies this. |
+| 47 | Keep read-only handling opt-in. | Snapshot publication changes only private-stage mode bits. Explicit transcript selection retains its separate POSIX privacy-tightening policy after a successful open; failed initialization retains that change. Read-only denial is never repaired, and Windows ACLs/attributes are untouched. Descriptor, alias and read-only tests cover this policy. |
 | 48 | Specify a metadata policy. | Mode/ACL/ownership/timestamp policy documented above; metadata is not claimed preserved. |
 | 49 | Use `Path` and string paths consistently. | Sole runtime chdir is confined to a one-request worker with a filesystem-independent liveness watcher. Remaining path construction inventory still under review. |
 | 50 | Generate portable, collision-safe names. | Optimization IDs now use bounded digest components of typed checkpoint keys. Integration verifies hostile, long and case-colliding IDs remain confined and distinct. Other generated-name sites still need review. |
@@ -1786,3 +1786,54 @@ local macOS Python 3.10.19 and 3.14.3; the earlier full entrypoint selection pas
 mypy, Ruff and formatting pass in `build/filesystem-quality-88`. The six tests are
 now selected explicitly in every native matrix job; this change still needs its
 own GitHub CI result.
+
+
+### Optional transcript logs: checked endpoints and serialized appends
+
+`presentation.open_private_log` delegates to `filesystem.open_private_append`.
+The selected log is an append-only diagnostic artifact, never a replaceable
+snapshot or a recovery journal. Parent directories must already exist and stay
+trusted; operator-selected parent aliases are resolved. Endpoint symlinks, reparse
+points, hard links and special files are rejected. Existing descriptors must match
+the observed file identity. New files use exclusive creation. POSIX nonblocking
+open prevents a substituted FIFO from waiting indefinitely for its other endpoint.
+
+A persistent `<log-name>.lock` sidecar coordinates opening and every write. Its
+half-second acquisition budget is separate from publication retries. Each caller
+supplies one complete record per `write`; the session already writes each JSON
+record plus its newline in one call. The bytes are UTF-8 with no newline rewriting.
+Each append performs one unbuffered write under that lock. A short write or I/O
+error propagates without replay, and flush/close cannot retry a buffered record.
+The ordinary text-stream interface remains available to the session and resource
+owner; callers must not bypass it through the underlying buffer or mutate/rotate
+the pathname externally. Streams can overlap during core handoff: locks belong to
+individual appends, so an old paused core does not block the new core's log open.
+
+Readers may inspect a changing diagnostic log but must tolerate incomplete or
+invalid records after a crash/failed append. No record durability, transactional
+replay, coordination with external rotation, or nonlocal-storage behavior is
+claimed. This helper does not trim tails, delete a destination or publish a new
+snapshot. Stable sidecars remain after release. Lock-release I/O errors are
+reported separately because they cannot undo completed bytes or justify retrying
+an append. Opening/wrapping cleanup preserves its original error; after a failed
+consumer, context cleanup also preserves the consumer's exception.
+
+Selecting a transcript intentionally opts into the existing POSIX privacy policy:
+a successful descriptor open is followed by the configured file mode, normally
+0600. The endpoint must have a single link before that change. If later wrapping
+fails, tightened permissions remain while file contents are unchanged. The open
+happens before chmod, so a read-only denial is propagated without repair. Windows
+read-only attributes and ACLs are never changed. This deliberate log policy is
+separate from snapshot publication, which only changes private-stage metadata.
+
+Fifteen presentation tests now cover overlapping streams, immediate byte visibility,
+lock contention with no delayed close-time append, short writes, lock cleanup,
+text/binary wrapping and descriptor cleanup failures, unchanged alias targets,
+hard links, missing parents, read-only files, and FIFO substitution in a bounded
+child. Two pipe-ordered child writers append 80 distinct 64-KiB-payload JSON records;
+the parent checks every record and immediately retires the closed file. Symlink
+fixtures skip only Windows privilege error 1314; ordinary Windows symlink creation
+is not required. The final presentation/filesystem/evidence selection passes all
+60 tests on local macOS Python 3.10.19 and 3.14.3. Strict typing/lint/format passes
+in `build/filesystem-quality-92`. The presentation tests are selected in all native
+CI jobs; the log change still requires its own GitHub CI result.
