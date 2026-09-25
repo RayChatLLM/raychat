@@ -6,6 +6,7 @@ import unittest
 
 SUITES = (
     "tests.test_filesystem",
+    "tests.test_filesystem_process",
     "tests.test_app_config",
     "tests.test_core_tools",
     "tests.test_entrypoint.ResourceCleanupTests",

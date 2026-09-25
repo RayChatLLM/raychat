@@ -546,6 +546,7 @@
       "tests/test_event_bus.py",
       "tests/test_evidence_log.py",
       "tests/test_filesystem.py",
+      "tests/test_filesystem_process.py",
       "tests/test_gepa_engine.py",
       "tests/test_hot_plugins.py",
       "tests/test_http_debug.py",

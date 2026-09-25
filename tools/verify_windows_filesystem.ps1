@@ -52,8 +52,14 @@ $Retired = $true
 $Password = ConvertTo-SecureString ('Rc!9' + [guid]::NewGuid().ToString('N')) -AsPlainText -Force
 
 function Save-DefenderState([string] $Name) {
-    $Status = Get-MpComputerStatus
-    $Preferences = Get-MpPreference
+    $Status = Get-MpComputerStatus | Select-Object AMRunningMode, AMServiceEnabled,
+        AMProductVersion, AntivirusEnabled, AntivirusSignatureVersion,
+        AntivirusSignatureLastUpdated, RealTimeProtectionEnabled, BehaviorMonitorEnabled,
+        IoavProtectionEnabled, OnAccessProtectionEnabled, IsTamperProtected
+    $Preferences = Get-MpPreference | Select-Object DisableRealtimeMonitoring,
+        DisableBehaviorMonitoring, DisableIOAVProtection, DisableScriptScanning,
+        DisableArchiveScanning, DisableAutoExclusions, RealTimeScanDirection,
+        ExclusionPath, ExclusionProcess, ExclusionExtension
     [ordered]@{
         imageOS = $env:ImageOS
         imageVersion = $env:ImageVersion
@@ -68,10 +74,12 @@ function Assert-DefenderEnabled([string] $Name) {
     $Status = $State.Status
     $Preferences = $State.Preferences
     if (-not $Status.AMServiceEnabled -or -not $Status.AntivirusEnabled -or
-        -not $Status.RealTimeProtectionEnabled -or
+        -not $Status.RealTimeProtectionEnabled -or -not $Status.BehaviorMonitorEnabled -or
+        -not $Status.IoavProtectionEnabled -or -not $Status.OnAccessProtectionEnabled -or
         $Preferences.DisableRealtimeMonitoring -or $Preferences.DisableBehaviorMonitoring -or
         $Preferences.DisableIOAVProtection -or $Preferences.DisableScriptScanning -or
         $Preferences.DisableArchiveScanning -or -not $Preferences.DisableAutoExclusions -or
+        $Preferences.RealTimeScanDirection -ne 0 -or
         @($Preferences.ExclusionPath).Where({ $_ }).Count -ne 0 -or
         @($Preferences.ExclusionProcess).Where({ $_ }).Count -ne 0 -or
         @($Preferences.ExclusionExtension).Where({ $_ }).Count -ne 0) {
@@ -106,10 +114,21 @@ try {
     Set-Acl -LiteralPath $Data.FullName -AclObject $DataAcl
     $TestHome = (New-Item -ItemType Directory (Join-Path $Data.FullName 'profile')).FullName
     $TestTemp = (New-Item -ItemType Directory (Join-Path $Data.FullName 'temp')).FullName
+    $Denied = (New-Item -ItemType Directory (Join-Path $TestRoot 'denied')).FullName
+    [IO.File]::WriteAllBytes((Join-Path $Denied 'snapshot'), [Text.Encoding]::UTF8.GetBytes('old'))
+    $OtherDrive = [IO.Path]::GetPathRoot($env:RUNNER_TEMP)
+    if ($OtherDrive -eq [IO.Path]::GetPathRoot($TestRoot)) {
+        throw 'Cross-volume acceptance requires a second local volume.'
+    }
+    $OtherRoot = Join-Path $OtherDrive ('raychat-fs-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory $OtherRoot
+    $DataAcl.SetAccessRuleProtection($true, $true)
+    Set-Acl -LiteralPath $OtherRoot -AclObject $DataAcl
     $ChildEnvironment = @{
         USERPROFILE = $TestHome; TEMP = $TestTemp; TMP = $TestTemp
         APPDATA = $TestHome; LOCALAPPDATA = $TestHome
         PYTHONUTF8 = '1'; PYTHONIOENCODING = 'utf-8'; PYTHONDONTWRITEBYTECODE = '1'
+        RAYCHAT_TEST_DENIED_DIRECTORY = $Denied; RAYCHAT_TEST_OTHER_VOLUME = $OtherRoot
     }
     $null = Save-DefenderState 'inherited'
     foreach ($Phase in @('ordinary', 'defender')) {
@@ -131,7 +150,16 @@ try {
             Start-Service WinDefend
             Set-MpPreference -DisableRealtimeMonitoring $false -DisableBehaviorMonitoring $false `
                 -DisableIOAVProtection $false -DisableScriptScanning $false `
-                -DisableArchiveScanning $false -DisableAutoExclusions $true
+                -DisableArchiveScanning $false -DisableAutoExclusions $true -RealTimeScanDirection Both
+            # Applying preferences is asynchronous. Observe activation for at
+            # most thirty seconds, without replaying settings or running tests early.
+            $Activation = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                $Status = Get-MpComputerStatus
+                if ($Status.RealTimeProtectionEnabled -and $Status.BehaviorMonitorEnabled -and
+                    $Status.IoavProtectionEnabled -and $Status.OnAccessProtectionEnabled) { break }
+                Start-Sleep -Milliseconds 500
+            } while ($Activation.Elapsed.TotalSeconds -lt 30)
             Assert-DefenderEnabled 'enabled-before'
         }
         $Launch = @{
