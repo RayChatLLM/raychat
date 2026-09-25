@@ -62,7 +62,7 @@ class PackageSourceTests(TypedTestCase):
 
     def test_changed_missing_and_new_members_invalidate_capture(self) -> None:
         """Check both immediate read changes and mutations of earlier entries."""
-        for operation in ("edit", "remove", "earlier", "new"):
+        for operation in ("edit", "remove", "earlier", "new", "rename"):
             with (
                 self.subTest(operation=operation),
                 tempfile.TemporaryDirectory() as directory,
@@ -86,9 +86,12 @@ class PackageSourceTests(TypedTestCase):
             if path == trigger:
                 if operation == "remove":
                     selected.unlink()
-                elif operation == "new":
+                elif operation in {"new", "rename"}:
                     before = source.stat()
-                    (source / "new.py").write_bytes(b"new")
+                    if operation == "new":
+                        (source / "new.py").write_bytes(b"new")
+                    else:
+                        selected.rename(selected.with_name("__INIT__.py"))
                     os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
                 else:
                     selected.write_bytes(b"intervening edit")

@@ -114,14 +114,25 @@ def _copy(source: Path, target: Path) -> None:
         else:
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(_read_source(path, info))
-    _check_versions(entries)
+    _check_versions(source, entries, ignore_scratch=True)
 
 
-def _check_versions(entries: list[tuple[Path, os.stat_result]]) -> None:
-    for path, expected in entries:
-        if _version(path.lstat()) != _version(expected):
-            message = f"Release tree changed during capture or hashing: {path}"
-            raise ValueError(message)
+def _check_versions(
+    root: Path,
+    entries: list[tuple[Path, os.stat_result]],
+    *,
+    ignore_scratch: bool = False,
+) -> None:
+    observed = _entries(root, ignore_scratch=ignore_scratch)
+    before = {
+        path.relative_to(root).as_posix(): _version(info) for path, info in entries
+    }
+    after = {
+        path.relative_to(root).as_posix(): _version(info) for path, info in observed
+    }
+    if after != before:
+        message = f"Release tree changed during capture or hashing: {root}"
+        raise ValueError(message)
 
 
 def _packaging_inventory(root: Path) -> None:
@@ -193,7 +204,7 @@ def _digest(root: Path, entries: list[tuple[Path, os.stat_result]]) -> str:
         if stat.S_ISREG(info.st_mode):
             value.update(str(path.relative_to(root)).encode() + b"\0")
             value.update(_read_source(path, info))
-    _check_versions(entries)
+    _check_versions(root, entries)
     return value.hexdigest()
 
 

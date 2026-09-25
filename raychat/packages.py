@@ -613,8 +613,14 @@ def _files(
         remaining -= len(data)
         result[item.relative_to(path).as_posix()] = data
     observed = _package_entries(path, ignore_finder_metadata=ignore_finder_metadata)
-    before = [(item, _member_version(info)) for item, info in entries]
-    after = [(item, _member_version(info)) for item, info in observed]
+    before = [
+        (item.relative_to(path).as_posix(), _member_version(info))
+        for item, info in entries
+    ]
+    after = [
+        (item.relative_to(path).as_posix(), _member_version(info))
+        for item, info in observed
+    ]
     if after != before:
         raise PluginError(
             "Package source inventory changed during capture: " + str(path),
