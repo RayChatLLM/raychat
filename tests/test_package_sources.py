@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
-from raychat import packages
+from raychat import packages, plugin_manager
 from raychat.filesystem import read_regular
 from raychat.sdk import PluginError
 from tests.assertions import TypedTestCase
@@ -164,9 +164,14 @@ class PackageSourceTests(TypedTestCase):
 import sys
 from pathlib import Path
 from raychat.packages import files, read_manifest
+from raychat.plugin_manager import read_bytes
 from raychat.sdk import PluginError
 source = Path(sys.argv[1])
-for operation in (lambda: files(source), lambda: read_manifest(source)):
+for operation in (
+    lambda: files(source),
+    lambda: read_manifest(source),
+    lambda: read_bytes(source / 'plugin.json'),
+):
     try:
         operation()
     except PluginError:
@@ -178,6 +183,51 @@ for operation in (lambda: files(source), lambda: read_manifest(source)):
         (source / 'pipe').rename(source / 'plugin.json')
 """
             self._child(script, source)
+
+    def test_archive_input_obeys_its_byte_limit_and_closes_before_return(self) -> None:
+        """Allow the exact limit, reject excess bytes, and release the read handle."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "package.zip"
+            with mock.patch.object(plugin_manager, "MAX_BYTES", 4):
+                for payload in (b"", b"four"):
+                    path.write_bytes(payload)
+                    self.equal(plugin_manager.read_bytes(path), payload)
+                    path.unlink()
+                path.write_bytes(b"extra")
+                with self.rejected(PluginError, "byte limit"):
+                    plugin_manager.read_bytes(path)
+                path.unlink()
+            with self.rejected(FileNotFoundError):
+                plugin_manager.read_bytes(path)
+
+    def test_archive_input_preserves_native_read_failures(self) -> None:
+        """Permission failures propagate unchanged without retry or mutation."""
+        error = PermissionError("archive access denied")
+        with mock.patch.object(
+            plugin_manager,
+            "read_regular",
+            side_effect=error,
+        ) as read:
+            try:
+                plugin_manager.read_bytes(Path("denied.zip"))
+            except PermissionError as received:
+                self.require(received is error)
+            else:
+                self.fail("Archive permission failure was hidden")
+            self.equal(read.call_count, 1)
+
+    def test_selected_archive_link_remains_supported(self) -> None:
+        """Operator-selected regular-file links are distinct from package members."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "archive.zip"
+            source.write_bytes(b"archive bytes")
+            linked = root / "selected.zip"
+            try:
+                linked.symlink_to(source)
+            except (OSError, NotImplementedError):
+                self.skipTest("Unprivileged symlink creation unavailable")
+            self.equal(plugin_manager.read_bytes(linked), b"archive bytes")
 
     def test_native_windows_junction_is_rejected_before_traversal(self) -> None:
         """A junction fixture does not need Windows symlink privileges."""

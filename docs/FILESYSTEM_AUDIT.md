@@ -1527,3 +1527,33 @@ offline providers. This does not claim Windows TUI or deployment-software covera
 The user requested a branch and PR, with CI verified on the proposed revision.
 Work is on `codex/filesystem-publication-audit`; no commit is made directly to
 `main`. Changed-revision Windows results remain required, using GitHub CI.
+
+### Local package archive input (2026-09-25)
+
+`plugin_manager.read_bytes` now uses the shared bounded regular-file reader,
+closing its descriptor before ZIP validation. Operator-selected file links remain
+supported, unlike linked members within a package tree. Nonregular input becomes
+a `PluginError` with the original validation failure chained. Native read errors,
+including missing files and permission denial, retain their original exception;
+there are no read retries, permission changes or weaker publication paths.
+POSIX FIFO input is rejected without waiting for a producer. This does not promise
+to interrupt a blocking native OS call on every platform.
+
+A bounded real-child test covers FIFOs as package members, manifests and archive
+inputs. Other cases cover the exact byte limit, overflow, descriptor closure,
+missing input, selected regular-file links and unchanged permission exceptions.
+The package/source/recovery selection passes 73 tests on macOS Python 3.12 in
+33.805 seconds (`/tmp/raychat-archive-input-25.log`). The 31-test source/location/
+transaction selection passes on macOS Python 3.10.19 in 6.713 seconds and 3.14.3
+in 6.797 seconds, and Linux Python 3.10.21 in 4.957 seconds and 3.14.7 in
+5.124 seconds. Each skips only the Windows junction fixture. Logs are
+`/tmp/raychat-archive-input-{mac,linux}{310,314}-25.log`; the Windows matrix already
+selects these modules. Strict typing, lint and formatting pass in
+`build/filesystem-quality-74/report.json` without suppression directives.
+
+Linux tests use the isolated unprivileged archive harness and
+`build/filesystem-linux-25.zip`, SHA-256
+`4dbff1c8dbc445a7bbd2c3455385bd1dbe857a714d207cd4efec41a416738692`,
+5,265,104 bytes, 339 members and 338 allowlisted source files. The complete suite
+and 14-scenario smoke result above predate this narrowly scoped archive-reader
+change; they have not been relabeled as a run of the follow-up revision.
