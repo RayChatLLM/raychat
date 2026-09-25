@@ -645,7 +645,9 @@
       "tools/terminal_process.py",
       "tools/terminal_screen.py",
       "tools/ui_stress_tui.py",
-      "tools/verify_quality.py"
+      "tools/verify_filesystem.py",
+      "tools/verify_quality.py",
+      "tools/verify_windows_filesystem.ps1"
     ],
     "smoke_timeout_seconds": 180,
     "smoke_error_chars": 16384

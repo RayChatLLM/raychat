@@ -126,34 +126,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -B -S -m unittest \
-            tests.test_filesystem \
-            tests.test_app_config \
-            tests.test_core_tools \
-            tests.test_entrypoint.ResourceCleanupTests \
-            tests.test_presentation \
-            tests.test_package_system.PackageTransactionTests \
-            tests.test_package_sources \
-            tests.test_catalog_publication \
-            tests.test_evidence_log \
-            tests.test_session_journal \
-            tests.test_workspace_trust \
-            tests.test_workspace_transactions \
-            tests.test_plugins.PluginRetirementTests \
-            tests.test_hot_plugins.SourceCaptureTests \
-            tests.test_release \
-            tests.test_build_portable.PortableBuildTests \
-            tests.test_release_folder \
-            tests.test_gepa_engine \
-            tests.test_optimize_chat_prompt \
-            tests.test_self_harness.ExperimentPublicationTests \
-            tests.test_self_harness.CandidatePromotionTests \
-            tests.test_self_harness.SelfHarnessTests \
-            tests.test_workflow_stress.WorkflowCleanupTests \
-            tests.test_package_recovery \
-            tests.test_plugin_filesystem_process \
-            tests.test_plugin_memory \
-            -v 2>&1 | tee ci-output/filesystem.log
+          python -B -S -m tools.verify_filesystem 2>&1 | tee ci-output/filesystem.log
 
       - name: Verify supervisor recovery persistence
         shell: bash
@@ -210,3 +183,32 @@ jobs:
             ci-output/acceptance
             ci-output/*.log
           if-no-files-found: warn
+
+  windows-standard-user:
+    name: Windows standard user and Defender / Python ${{ matrix.python }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Verify filesystem behavior with ordinary privileges and antivirus
+        shell: pwsh
+        run: ./tools/verify_windows_filesystem.ps1 -Python (Get-Command python).Source
+
+      - name: Retain identity, antivirus state and test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-standard-user-python-${{ matrix.python }}
+          path: ci-output/windows-standard-user
+          if-no-files-found: error
