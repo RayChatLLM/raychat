@@ -4,8 +4,10 @@ Status: in progress. This ledger preserves all requirements from the supplied
 checklist (67 checkbox bullets in the supplied text, despite its 69-item label);
 implementation and verification are separate gates. Current changes have local
 macOS and Linux-container evidence. Native Windows validation uses GitHub Actions;
-the latest successful run covers the committed baseline, not the audit revision.
-Deployment-software stress remains unverified.
+the latest successful baseline is `1746172` (all twelve jobs in run
+[36170300371](https://github.com/RayChatLLM/raychat/actions/runs/36170300371)).
+It includes verified standard Windows users and Defender-enabled stress; changes
+after that baseline still require their own native CI results.
 
 ## Shared policy now in use
 
@@ -362,8 +364,8 @@ own CI run, and hosted Windows success does not prove ordinary-user privileges.
 | 42 | Audit `rmtree()` error handling. | Runtime ignore_errors=True sites migrated to bounded, logged cleanup; remaining strict teardown paths need audit. |
 | 43 | Design orphan recovery. | Package restart recovery reclaims only exact journal-owned containers after acquiring the scope lock; a live parent can reclaim its recorded child stage after reaping. Unknown stages and pre-journal allocations are deliberately retained. Other subsystem recovery paths still need review. |
 | 44 | Use approved, configurable application-data locations. | Absolute storage.home_directory, default sessions, trust state and explicit session-directory overrides are exercised through the shipped launcher on all three operating systems in CI dea3fe4. Remaining application-data locations still need inventory review. |
-| 45 | Test with antivirus and relevant index/sync software enabled. | Pending full audit; see subsystem inventory above. |
-| 46 | Distinguish security policy from contention. | Pending full audit; see subsystem inventory above. |
+| 45 | Test with antivirus and relevant index/sync software enabled. | Windows Python 3.10 and 3.14 each passed the shared filesystem suite under a verified standard account, then with Defender realtime/behavior/IOAV/on-access protection enabled. Before/after state proves scanning enabled and no inherited exclusions; artifacts in CI 1746172. Other security/indexing products and synchronized deployments are outside validated scope. |
+| 46 | Distinguish security policy from contention. | Win32 access denial is never attributed to antivirus, read-only attributes or ACLs from its number alone. Actual ACL-denied publication and allocation fail without changing permissions or destination bytes. Error type/path/code remain diagnostic evidence; operator correction is separate from bounded contention retries. |
 | 47 | Keep read-only handling opt-in. | Snapshot publication changes only private-stage mode bits. Explicit transcript selection retains its separate POSIX privacy-tightening policy after a successful open; failed initialization retains that change. Read-only denial is never repaired, and Windows ACLs/attributes are untouched. Descriptor, alias and read-only tests cover this policy. |
 | 48 | Specify a metadata policy. | Mode/ACL/ownership/timestamp policy documented above; metadata is not claimed preserved. |
 | 49 | Use `Path` and string paths consistently. | Sole runtime chdir is confined to a one-request worker with a filesystem-independent liveness watcher. Remaining path construction inventory still under review. |
@@ -377,14 +379,14 @@ own CI run, and hosted Windows success does not prove ordinary-user privileges.
 | 57 | Do not treat several replacements as one transaction. | Packages use an undo journal and commit decision, including profile membership with installed packages. Candidate file batches now have their own undo/commit record and restart recovery before source capture. Catalog profiles pin immutable metadata and archives, published before the profile pointer. Process termination and interleaved catalog builders are tested. Remaining multi-file subsystems still need review. |
 | 58 | Keep live databases and logs out of generic replacement helpers. | Session/HTTP/evidence logs retain append protocol. Shared append never retries a partial append. |
 | 59 | Validate nonlocal storage separately. | Network/synchronized storage not validated; excluded from the local-filesystem guarantee. |
-| 60 | Native platform coverage: | CI dea3fe4 passed all nine Windows/Linux/macOS and Python 3.10/3.12/3.14 combinations, plus 1,074 complete Linux unit tests. Native subprocess tests are included. Prior Linux UID 65534 and macOS ordinary-user evidence is recorded below; ordinary-privilege Windows acceptance remains unproven on hosted runneradmin. |
+| 60 | Native platform coverage: | CI 1746172 passed all nine Windows/Linux/macOS × Python 3.10/3.12/3.14 combinations and the 1,106-test complete suite. Two extra jobs verified standard Windows tokens with no Administrators membership and read-only installations on 3.10/3.14; each passed 349 filesystem tests twice, including Defender-enabled execution. Prior Linux UID 65534 and ordinary-user macOS evidence remains recorded below. |
 | 61 | Reader contention: | Child-held destination and staged-source publication tests passed on Windows, Linux and macOS in CI dea3fe4. They use pipe ordering, assert bounded Windows failure with old bytes intact, then successful publication after reader close. |
-| 62 | Competing writers: | Thread and four-process increments verified; stale memory instances preserve IDs/updates. Broader snapshot-reader stress pending. |
+| 62 | Competing writers: | Native CI 1746172 passed thread and four-process serialized increments plus two distinguishable 256-KiB writers competing with a coordinated reader for thirty pipe-ordered rounds. Every read matched one complete payload. Both standard Windows accounts repeated this with Defender enabled; memory instances preserve IDs/updates. |
 | 63 | Lock recovery: | Killed native lock holder, thread contention and accidental reentry passed on all three operating systems in CI dea3fe4; recovery retains the persistent sidecar. |
 | 64 | Failure and crash boundaries: | Stage fault injection and process termination covered. Package writers are killed after backup, new tree, receipt, commit record and rollback moves; new managers recover from disk and leave unrelated work intact. Candidate writers and recovery workers are also killed at journal, replacement, commit, restore and cleanup boundaries. Portable-folder writers are now killed at journal, backup, publication, decision, rollback and partial-cleanup boundaries; coordinated access recovers exact recorded trees. Other application reclamation remains pending. |
-| 65 | Cleanup contention: | Mocked transient/permanent Win32 deletion denial, cleanup-only error 145 and primary-failure preservation tested. Native Windows deletion contention remains pending. |
-| 66 | Environment and path edges: | CI dea3fe4 covers Unicode, missing parents, read-only files, mmap, links/junctions, long-path launcher execution, and mocked disk-full/cross-volume failures. Actual denied directories and cross-volume acceptance remain open. |
-| 67 | Deployment conditions: | Native deployment/software validation outstanding; no exclusions or permission workarounds introduced. |
+| 65 | Cleanup contention: | Native CI 1746172 passed a real child-held scratch file: Windows deletion exhausts its bounded budget with diagnostics and unchanged content; final cleanup preserves the primary failure; deletion succeeds after the child closes and exits. Unrelated work remains untouched. Mocked transient failures and cleanup-only Win32 145 remain covered. |
+| 66 | Environment and path edges: | Native CI covers Unicode, missing parents, absent destinations, read-only files, mmap, links/junctions, shipped-launcher long paths, case collisions and injected disk-full failures. Standard-user CI 1746172 additionally passed actual ACL-denied file/directory allocation and publication, plus real C:/D: cross-volume EXDEV with one replacement attempt and both files preserved. |
+| 67 | Deployment conditions: | Local native deployment and Defender-enabled stress passed in CI 1746172 under ordinary Windows accounts. The ephemeral runner removes inherited exclusions rather than adding them. Network/cloud synchronization and other security/indexing products are explicitly outside the validated deployment scope; no weakened publication fallback is offered. |
 
 ## Platform references
 
@@ -1877,7 +1879,8 @@ child holds a scratch file open. Windows deletion must report sharing contention
 retain the content, preserve a primary failure during final tree cleanup, and
 succeed after the child closes and exits. Unrelated active files remain intact.
 POSIX checks its different open-file deletion behavior. Every child is reaped
-before fixture teardown. These tests still require native CI validation.
+before fixture teardown. All passed in the twelve-job baseline run 36170300371,
+including both standard Windows accounts and their Defender-enabled phases.
 
 The provisioned Windows account also receives a read-only ACL fixture and a
 private writable tree on the runner's second local volume. Denied-directory
@@ -1908,5 +1911,54 @@ Tests preserve occupied files and populated directories, exhaust collision names
 and require one attempt with no os.access probe on injected Windows access denial.
 The native denied-directory test runs file and directory allocation in a bounded
 child with a diagnostic traceback deadline. Real cross-volume rejection passed
-before the stalled allocation in the first provisioned run; full validation of
-this allocation fix still requires the subsequent native CI result.
+before the stalled allocation in the first provisioned run. Run 36170300371
+subsequently validated the allocation fix under both standard Windows accounts,
+with and without Defender stress, and across the nine-platform/Python matrix.
+
+### Bootstrap recovery and optional diagnostics
+
+Recovery checkpoints and manifests use `read_regular` with the existing wire
+limit plus one byte, rejecting linked or special endpoints and closing before
+JSON decoding. The wire decoder still enforces complete newline framing and the
+64-MiB message limit. Bootstrap's operator-selected configuration may intentionally
+follow a link to a regular file; its size limit is checked before normalizing
+trailing whitespace, so an oversized valid prefix cannot hide unread content.
+Initial configuration copies remain private, immutable files written before any
+child receives their paths. They do not require publication retries.
+
+The supervisor owns its unique run directory and is the sole diagnostic writer.
+Status records use the shared append helper once, without workflow replay or
+permission repair. That append contract requires the pathname and any aliases to
+remain under the owner's control; external mutation/rotation is unsupported.
+Write failures are logged separately and preserve the status being reported.
+Update diagnostics read at most the final 6,000 bytes of a regular, nonlinked log,
+close before UTF-8 decoding, and tolerate incomplete text with replacement
+characters. Missing diagnostics are empty; other read failures are logged and
+leave the update outcome intact. No read handle crosses persistence awaits.
+
+Seven regression tests cover all four recovery entrypoints' read bounds,
+configuration limits before whitespace trimming, Windows-compatible closure
+before decoding, bounded diagnostic suffixes, and optional diagnostic failures.
+A bounded real POSIX child exercises FIFO inputs for recovery, configuration,
+status appends and diagnostic reads. These tests are selected in the shared native
+filesystem suite, including the standard Windows/Defender jobs; this follow-up
+requires its own CI result before its native acceptance is claimed.
+
+### Portable builder source and release reads
+
+The explicit source allowlist uses the shared portable-path collision policy.
+An operator-selected checkout root may resolve an alias, but descendant parents
+and file endpoints must be ordinary directories and regular files, without links
+or Windows reparse points. Reads close before text validation and archive work,
+are bounded by the observed source size plus one byte, and reject a changed
+identity, size or modification metadata. The checkout must remain quiescent;
+these checks do not turn several reads into an atomic tree snapshot or protect
+against hostile concurrent ancestor replacement.
+
+Release-folder verification checks each directory before descending. Unexpected
+files fail before reading, and expected files are read only through their expected
+size plus one byte. Linked, special, oversized or changed members fail without
+permission changes or retrying the build. Six regression tests cover nonportable
+names, case collisions, source growth/replacement, bounded verification reads,
+linked parents/endpoints, FIFO substitution and native Windows junctions. They
+join the shared native selection; current-follow-up CI validation is pending.

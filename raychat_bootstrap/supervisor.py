@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
-from raychat.filesystem import run_filesystem_task, write_bytes_async
+from raychat.filesystem import (
+    append_owned,
+    read_regular,
+    run_filesystem_task,
+    write_bytes_async,
+)
 from raychat.provider_settings import provider_settings
 from raychat.ui.terminal import TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
@@ -69,7 +74,14 @@ class Supervisor:
     """Keep the terminal usable through validation, activation and core failures."""
 
     def __init__(self, source: Path, argv: Sequence[str], directory: Path) -> None:
-        """Capture the evaluator and establish persistent recovery metadata."""
+        """Capture the evaluator and establish persistent recovery metadata.
+
+        Raises
+        ------
+        ValueError
+            If the selected configuration exceeds the bootstrap transport limit.
+
+        """
         self.argv = list(argv)
         self.workspace = _workspace(argv)
         self.releases = Releases(source, directory)
@@ -98,7 +110,11 @@ class Supervisor:
         self.persistence_error = ""
         self.config = directory / "configuration.json"
         selected = Path(os.environ.get("RAYCHAT_CONFIG", source / "raychat.json"))
-        configuration = decode(selected.read_bytes().rstrip() + b"\n")
+        raw_configuration = read_regular(selected, MAX_MESSAGE + 1)
+        if len(raw_configuration) > MAX_MESSAGE:
+            message = "Bootstrap configuration exceeds the transport limit."
+            raise ValueError(message)
+        configuration = decode(raw_configuration.rstrip() + b"\n")
         plugins = dict(configuration_fields(configuration["plugins"], "plugins"))
         configuration["plugins"] = plugins
         profile = plugins.get("profile")
@@ -124,7 +140,7 @@ class Supervisor:
 
     def restore_recovery(self, manifest: Path, version: str) -> None:
         """Restore retained release choices and state after a supervisor restart."""
-        saved = decode(manifest.read_bytes())
+        saved = decode(read_regular(manifest, MAX_MESSAGE + 1, follow_symlinks=False))
         self.initial = recovery_release(saved["known_good"])
         self.previous = recovery_release(saved["previous"])
         self.start_release = self.previous if version == "previous" else self.initial
@@ -234,8 +250,13 @@ class Supervisor:
         displayed = text
         if self.persistence_error:
             displayed += (" | " if text else "") + self.persistence_error
-        with contextlib.suppress(OSError), self.log.open("ab") as stream:
-            stream.write(encode({"time": time.time(), "status": displayed}))
+        try:
+            append_owned(self.log, encode({"time": time.time(), "status": displayed}))
+        except (OSError, ValueError):
+            logging.getLogger(__name__).exception(
+                "Supervisor diagnostic append failed path=%r",
+                str(self.log),
+            )
         if self.current is not None and self.current.process.returncode is None:
             with contextlib.suppress(OSError, RuntimeError):
                 self.current.send("status", text=displayed)
@@ -778,15 +799,28 @@ class Supervisor:
             if not saved:
                 self.claimed_results[identifier] = result
 
+    def _diagnostics(self) -> str:
+        try:
+            data = read_regular(
+                self.log,
+                6000,
+                follow_symlinks=False,
+                from_end=True,
+            )
+        except FileNotFoundError:
+            return ""
+        except (OSError, ValueError):
+            logging.getLogger(__name__).exception(
+                "Supervisor diagnostic read failed path=%r",
+                str(self.log),
+            )
+            return ""
+        return data.decode("utf-8", errors="replace")
+
     async def _update_result(self, message: Mapping[str, object], status: str) -> None:
         identifier = message.get("request_id")
         if not isinstance(identifier, str) or not identifier:
             return
-        diagnostics = ""
-        if status != "activated" and self.log.is_file():
-            with self.log.open("rb") as stream:
-                stream.seek(max(0, self.log.stat().st_size - 6000))
-                diagnostics = stream.read(6000).decode("utf-8", errors="replace")
         result: dict[str, object] = {
             "request_id": identifier,
             "action": "core_update"
@@ -797,7 +831,7 @@ class Supervisor:
             "request": message.get("prompt", ""),
             "session_id": message.get("session_id", ""),
             "detail": self.status,
-            "diagnostics": diagnostics,
+            "diagnostics": "" if status == "activated" else self._diagnostics(),
             "active_release": None
             if self.current is None
             else self.current.release.identity,
@@ -1005,7 +1039,9 @@ def main() -> int:
     version = os.environ.get("RAYCHAT_RECOVERY_VERSION", "known-good")
     source = Path(__file__).resolve().parents[1]
     if manifest is not None:
-        saved = decode(Path(manifest).read_bytes())
+        saved = decode(
+            read_regular(Path(manifest), MAX_MESSAGE + 1, follow_symlinks=False),
+        )
         source = recovery_release(
             saved["previous" if version == "previous" else "known_good"],
         ).path

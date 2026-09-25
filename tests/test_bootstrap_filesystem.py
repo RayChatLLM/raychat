@@ -12,9 +12,10 @@ from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat.filesystem import read_regular, remove_tree
-from raychat_bootstrap import releases
+from raychat_bootstrap import recovery, releases
+from raychat_bootstrap import supervisor as supervisor_module
 from raychat_bootstrap.releases import Release, Releases
-from raychat_bootstrap.wire import encode
+from raychat_bootstrap.wire import decode, encode
 from tests.assertions import TypedTestCase
 from tests.test_live_recovery_qa import RecoveryHarness
 from tools.smoke_process import SmokeCommand, run_checked
@@ -26,6 +27,25 @@ if TYPE_CHECKING:
 
 
 class _Harness(RecoveryHarness):
+    def status_text(self, text: str) -> None:
+        """Publish a status through the actual optional diagnostic log."""
+        self._status(text)
+
+    def diagnostics(self) -> str:
+        """Read the actual bounded diagnostic suffix.
+
+        Returns
+        -------
+        str
+            Closed, decoded log content or an empty unavailable diagnostic.
+
+        """
+        return self._diagnostics()
+
+    async def finish_update(self, status: str) -> None:
+        """Record an update outcome through production diagnostics and persistence."""
+        await self._update_result({"request_id": "request"}, status)
+
     async def capture_candidate(self, message: Mapping[str, object]) -> None:
         await self._validate_candidate(message)
 
@@ -48,6 +68,211 @@ class _Gate:
         if not self.release.wait(timeout=5):
             message = "Event loop did not release filesystem worker"
             raise TimeoutError(message)
+
+
+class BootstrapReadTests(TypedTestCase):
+    """Bound recovery/configuration reads and isolate optional diagnostic failures."""
+
+    def test_retained_state_closes_before_decoding(self) -> None:
+        """A decoder can replace the input while still receiving its old bytes."""
+        with tempfile.TemporaryDirectory() as directory:
+            selected = Path(directory) / "state.json"
+            selected.write_bytes(encode({"views": {}, "pending_input": "old"}))
+            replacement = Path(directory) / "new.json"
+            replacement.write_bytes(b"{}\n")
+
+            def parse(data: bytes) -> dict[str, object]:
+                replacement.replace(selected)
+                return decode(data)
+
+            with mock.patch.object(recovery, "decode", parse):
+                state = recovery.retained_state(selected)
+            self.equal(state["views"], {})
+            self.equal(state["pending_input"], "")
+            self.equal(selected.read_bytes(), b"{}\n")
+
+    def test_all_recovery_entrypoints_bound_capture_before_decoding(self) -> None:
+        """Oversized recovery input cannot be loaded unbounded or parsed as a prefix."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = _Harness(root)
+            selected = root / "recovery.json"
+            selected.write_bytes(encode({"views": {}}) + b" " * 10000)
+            observed: list[tuple[int, bool, int]] = []
+            environment: dict[str, str] = {"RAYCHAT_RECOVERY": str(selected)}
+
+            def read(path: Path, limit: int, *, follow_symlinks: bool) -> bytes:
+                raw = read_regular(path, limit, follow_symlinks=follow_symlinks)
+                observed.append((limit, follow_symlinks, len(raw)))
+                return raw
+
+            with (
+                mock.patch.object(recovery, "MAX_MESSAGE", 64),
+                mock.patch.object(supervisor_module, "MAX_MESSAGE", 64),
+                mock.patch.object(recovery, "read_regular", read),
+                mock.patch.object(supervisor_module, "read_regular", read),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    ["raychat.py", "--recover-core", str(root)],
+                ),
+                mock.patch.dict(os.environ, environment),
+                mock.patch.object(supervisor_module, "provider_settings"),
+            ):
+                with self.rejected(ValueError, "length or framing"):
+                    recovery.retained_state(selected)
+                with self.rejected(ValueError, "length or framing"):
+                    recovery.prepare()
+                with self.rejected(ValueError, "length or framing"):
+                    supervisor.restore_recovery(selected, "known-good")
+                with self.rejected(ValueError, "length or framing"):
+                    supervisor_module.main()
+            self.equal(observed, [(65, False, 65)] * 4)
+
+    def test_configuration_limit_applies_before_trimming_whitespace(self) -> None:
+        """A valid JSON prefix cannot hide oversized unread configuration content."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / "selected.json"
+            selected.write_bytes(encode({"plugins": {}}) + b" " * 1000)
+            environment: dict[str, str] = {"RAYCHAT_CONFIG": str(selected)}
+            with (
+                mock.patch.object(supervisor_module, "MAX_MESSAGE", 64),
+                mock.patch.dict(os.environ, environment),
+                self.rejected(ValueError, "configuration exceeds"),
+            ):
+                _Harness(root)
+
+    def test_configuration_closes_before_decoding(self) -> None:
+        """Bootstrap configuration parsing does not retain a Windows-blocking handle."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / "selected.json"
+            selected.write_bytes(encode({"plugins": {}}))
+            replacement = root / "replacement.json"
+            replacement.write_bytes(b"{}\n")
+            environment: dict[str, str] = {"RAYCHAT_CONFIG": str(selected)}
+
+            def parse(data: bytes) -> dict[str, object]:
+                replacement.replace(selected)
+                return decode(data)
+
+            with (
+                mock.patch.dict(os.environ, environment),
+                mock.patch.object(supervisor_module, "decode", parse),
+            ):
+                supervisor = _Harness(root)
+            self.equal(decode(supervisor.config.read_bytes())["plugins"], {})
+            self.equal(selected.read_bytes(), b"{}\n")
+
+    def test_diagnostic_append_failure_is_logged_without_replaying_status(self) -> None:
+        """Optional logging cannot turn an existing supervisor status into failure."""
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = _Harness(Path(directory))
+            with (
+                mock.patch.object(
+                    supervisor_module,
+                    "append_owned",
+                    side_effect=PermissionError("diagnostic denied"),
+                ) as append,
+                self.assertLogs("raychat_bootstrap.supervisor", level="ERROR") as logs,
+            ):
+                supervisor.status_text("original update failure")
+            self.equal(append.call_count, 1)
+            self.equal(supervisor.status, "original update failure")
+            self.require("diagnostic denied" in "\n".join(logs.output))
+
+    def test_diagnostics_use_a_closed_suffix_and_preserve_the_update_outcome(
+        self,
+    ) -> None:
+        """Large, missing and unreadable optional logs leave the real outcome intact."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = _Harness(root)
+            raw = b"prefix" * 5000 + b"\xff" + b"tail" * 1000
+            supervisor.log.write_bytes(raw)
+            asyncio.run(supervisor.finish_update("rejected"))
+            self.equal(
+                supervisor.update_results["request"]["diagnostics"],
+                raw[-6000:].decode("utf-8", errors="replace"),
+            )
+            supervisor.log.replace(root / "retired.log")
+            self.equal(supervisor.diagnostics(), "")
+            with (
+                mock.patch.object(
+                    supervisor_module,
+                    "read_regular",
+                    side_effect=PermissionError("diagnostic denied"),
+                ),
+                self.assertLogs("raychat_bootstrap.supervisor", level="ERROR") as logs,
+            ):
+                asyncio.run(supervisor.finish_update("interrupted"))
+            self.equal(supervisor.update_results["request"]["status"], "interrupted")
+            self.equal(supervisor.update_results["request"]["diagnostics"], "")
+            self.require("diagnostic denied" in "\n".join(logs.output))
+
+    def test_fifo_inputs_cannot_block_bootstrap_or_diagnostics(self) -> None:
+        """Exercise each read/append path in a bounded real POSIX child."""
+        if os.name != "posix":
+            self.skipTest("POSIX FIFO fixture")
+        script = """
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from raychat_bootstrap import recovery, supervisor
+from tests.test_bootstrap_filesystem import _Harness
+root, phase = Path(sys.argv[1]).resolve(), sys.argv[2]
+run = _Harness(root) if phase in ('restore', 'diagnostics', 'append') else None
+selected = root / 'recovery.json'
+os.mkfifo(selected)
+if run is not None:
+    run.log = selected
+if phase == 'diagnostics':
+    assert run.diagnostics() == ''
+elif phase == 'append':
+    run.status_text('original status')
+    assert run.status == 'original status'
+else:
+    try:
+        if phase == 'state':
+            recovery.retained_state(selected)
+        elif phase == 'prepare':
+            sys.argv = ['raychat.py', '--recover-core', str(root)]
+            recovery.prepare()
+        elif phase == 'restore':
+            run.restore_recovery(selected, 'known-good')
+        elif phase == 'main':
+            os.environ['RAYCHAT_RECOVERY'] = str(selected)
+            with patch.object(supervisor, 'provider_settings'):
+                supervisor.main()
+        else:
+            os.environ['RAYCHAT_CONFIG'] = str(selected)
+            _Harness(root)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('FIFO input was accepted')
+"""
+        for phase in (
+            "state",
+            "prepare",
+            "restore",
+            "main",
+            "config",
+            "diagnostics",
+            "append",
+        ):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                run_checked(
+                    SmokeCommand(
+                        (sys.executable, "-B", "-S", "-c", script, directory, phase),
+                        Path(__file__).resolve().parents[1],
+                        dict(os.environ),
+                        10,
+                        4000,
+                    ),
+                )
 
 
 class BootstrapFilesystemTests(TypedTestCase):
