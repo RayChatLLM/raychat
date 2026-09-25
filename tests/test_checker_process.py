@@ -179,7 +179,7 @@ class CheckerProcessTests(TypedTestCase):
                             await asyncio.wait_for(task, 15)
                     self.require(workspace.path.is_dir())
                     self.require(
-                        any(str(workspace.path) in line for line in logs.output),
+                        any(repr(str(workspace.path)) in line for line in logs.output),
                     )
                     self.require(all(stream.closed for stream in gate.streams))
                 finally:
