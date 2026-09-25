@@ -50,6 +50,7 @@ WORKSPACE_STAGE_PREFIX = ".raychat-candidate-"
 _Result = TypeVar("_Result")
 _COMPONENT_BYTES = 255
 _CONTROL_END = 32
+_ALLOCATION_ATTEMPTS = 8
 _DEVICE_NAMES = frozenset({
     "CON",
     "PRN",
@@ -360,10 +361,35 @@ def cleanup_tree(path: Path) -> None:
         _LOG.exception("Retired tree remains path=%r", str(path))
 
 
+def _reserve_temporary(
+    parent: Path,
+    prefix: str,
+    suffix: str,
+    create: Callable[[Path], _Result],
+) -> tuple[Path, _Result]:
+    # tempfile retries PermissionError on Windows after an os.access check that
+    # cannot establish ACL write access. Only genuine name collisions merit a
+    # new name here; exclusive creation establishes ownership without a probe.
+    parent = parent.absolute()
+    for _ in range(_ALLOCATION_ATTEMPTS):
+        path = parent / (prefix + secrets.token_hex(16) + suffix)
+        try:
+            resource = create(path)
+        except FileExistsError:
+            continue
+        return path, resource
+    raise FileExistsError(
+        errno.EEXIST,
+        "Temporary name allocation exhausted",
+        str(parent),
+    )
+
+
 def create_scratch_directory(*, prefix: str, parent: Path | None = None) -> Path:
     """Reserve one fresh private tree, transferring cleanup ownership to the caller.
 
-    Creation failures propagate immediately. The returned path already exists;
+    Only name collisions retry, at most eight times; other creation failures
+    propagate immediately. The returned path already exists;
     callers must not delete and recreate it to reserve a publication name. To
     retain a moved directory, use an unused child inside this owned container.
 
@@ -373,7 +399,17 @@ def create_scratch_directory(*, prefix: str, parent: Path | None = None) -> Path
         The securely allocated directory, on the parent's filesystem.
 
     """
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+
+    def create(path: Path) -> None:
+        path.mkdir(mode=0o700)
+
+    reserved: tuple[Path, None] = _reserve_temporary(
+        Path(tempfile.gettempdir()) if parent is None else parent,
+        prefix,
+        "",
+        create,
+    )
+    return reserved[0]
 
 
 class OwnedTemporaryDirectory:
@@ -647,12 +683,14 @@ def _open_stage(destination: Path) -> tuple[BinaryIO, Path]:
     if destination.is_symlink():
         message = "Snapshot destination must not be a symbolic link."
         raise ValueError(message)
-    descriptor, name = tempfile.mkstemp(
-        prefix=".raychat-",
-        suffix=".pending",
-        dir=destination.parent,
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    flags |= _file_flag("O_BINARY") | _file_flag("O_NOFOLLOW")
+    temporary, descriptor = _reserve_temporary(
+        destination.parent,
+        ".raychat-",
+        ".pending",
+        lambda path: os.open(path, flags, 0o600),
     )
-    temporary = Path(name)
     try:
         return os.fdopen(descriptor, "wb"), temporary
     except BaseException:

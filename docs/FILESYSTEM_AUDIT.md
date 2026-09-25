@@ -323,7 +323,7 @@ own CI run, and hosted Windows success does not prove ordinary-user privileges.
 | 3 | Create one filesystem utility module. | Implemented: `raychat/filesystem.py`; legacy locking imports delegate to it. |
 | 4 | Document ownership and failure behavior. | Helper ownership/budget/failure contracts documented; complete per-caller review pending. |
 | 5 | Remove check-then-act assumptions. | Memory load, workspace append and session resume handle operation failures. Package metadata now checks the actual opened descriptor and rejects identity substitution instead of relying on exists/is_file before open. Remaining traversal sites need review. |
-| 6 | Use unique, securely created staging files. | Implemented for migrated snapshots: secure mkstemp sibling stages; directory staging remains under review. |
+| 6 | Use unique, securely created staging files. | Implemented for migrated snapshots: secure exclusive-create sibling stages; directory staging remains under review. |
 | 7 | Stage beside the destination. | Implemented for migrated snapshots; stage parent is destination parent. |
 | 8 | Own the temporary file descriptor explicitly. | fdopen-failure test proves descriptor closure; session wrapping also fixed. Other raw stream owners remain to audit. |
 | 9 | Audit `NamedTemporaryFile`; do not ban it outright. | No NamedTemporaryFile use found in runtime/plugin/build sources. |
@@ -1888,3 +1888,25 @@ one actual `Path.replace` attempt ending in EXDEV, preserving both files. Ordina
 POSIX jobs exercise denied directory permissions; second-volume coverage is
 reported only where that fixture is explicitly provisioned. Local execution
 without it records a skip, never simulated cross-volume acceptance.
+
+### Denied Windows ACLs during temporary allocation
+
+The standard-user CI fixture exposed a ten-minute stall in Python's tempfile
+allocation path after a real ACL-denied write. CPython's mkstemp/mkdtemp retry
+PermissionError on Windows when os.access reports a writable parent; that probe
+does not establish ACL authorization. The helper now reserves temporary files
+with O_CREAT|O_EXCL (binary, noninherited descriptor, mode 0600) and directories
+with exclusive mkdir (mode 0700). Both use one internal allocator with fresh
+128-bit secrets-based names and a maximum of eight genuine FileExistsError
+collisions. Any other creation failure, including access denied, propagates on
+its first attempt. No global tempfile setting, destination, ACL, or attribute is
+changed. Stages remain siblings of the destination and retain their descriptor
+through wrapping, writing and close. Path.replace publication keeps its separate
+bounded contention policy unchanged.
+
+Tests preserve occupied files and populated directories, exhaust collision names,
+and require one attempt with no os.access probe on injected Windows access denial.
+The native denied-directory test runs file and directory allocation in a bounded
+child with a diagnostic traceback deadline. Real cross-volume rejection passed
+before the stalled allocation in the first provisioned run; full validation of
+this allocation fix still requires the subsequent native CI result.

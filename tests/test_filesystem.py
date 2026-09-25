@@ -26,6 +26,7 @@ from raychat.filesystem import (
     OwnedTemporaryDirectory,
     PortablePathIndex,
     RetryPolicy,
+    create_scratch_directory,
     destinations_conflict,
     is_link_or_reparse_point,
     portable_component,
@@ -302,7 +303,7 @@ class FilesystemTests(TypedTestCase):
         self.equal(list(self.root.glob(".raychat-*.pending")), [])
 
     def test_fdopen_failure_closes_descriptor_and_cleans_stage(self) -> None:
-        """Descriptor wrapping failure cannot leak the mkstemp handle."""
+        """Descriptor wrapping failure cannot leak the exclusively created handle."""
         descriptors: list[int] = []
 
         def fail(descriptor: int, _mode: str) -> None:
@@ -584,6 +585,90 @@ sys.stdin.readline()
 
 class FilesystemBoundaryTests(TypedTestCase):
     """Cover staged I/O failures and publication boundaries independently."""
+
+    def test_allocations_skip_only_actual_name_collisions(self) -> None:
+        """Exclusive creation preserves an existing file and populated directory."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            occupied = root / ".raychat-occupied.pending"
+            occupied.write_bytes(b"other file")
+            target = root / "snapshot"
+            available: list[str] = ["occupied", "fresh"]
+            with mock.patch(
+                "raychat.filesystem.secrets.token_hex",
+                side_effect=available,
+            ) as names:
+                write_bytes(target, b"published")
+            self.equal(names.call_count, 2)
+            self.equal(occupied.read_bytes(), b"other file")
+            self.equal(target.read_bytes(), b"published")
+            occupied_directory = root / "scratch-occupied"
+            occupied_directory.mkdir()
+            (occupied_directory / "active").write_bytes(b"other owner")
+            available = ["occupied", "fresh"]
+            with mock.patch(
+                "raychat.filesystem.secrets.token_hex",
+                side_effect=available,
+            ) as names:
+                scratch = create_scratch_directory(prefix="scratch-", parent=root)
+            self.equal(names.call_count, 2)
+            self.equal(scratch, root / "scratch-fresh")
+            self.require(scratch.is_dir())
+            self.equal((occupied_directory / "active").read_bytes(), b"other owner")
+
+    def test_name_collision_exhaustion_is_bounded_and_preserves_other_owners(
+        self,
+    ) -> None:
+        """A broken name generator cannot overwrite an existing allocation."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            occupied = root / ".raychat-occupied.pending"
+            occupied.write_bytes(b"other file")
+            occupied_directory = root / "scratch-occupied"
+            occupied_directory.mkdir()
+            for kind in ("file", "directory"):
+                with (
+                    self.subTest(kind=kind),
+                    mock.patch(
+                        "raychat.filesystem.secrets.token_hex",
+                        return_value="occupied",
+                    ) as names,
+                    self.rejected(FileExistsError, "allocation exhausted"),
+                ):
+                    if kind == "file":
+                        write_bytes(root / "snapshot", b"new")
+                    else:
+                        create_scratch_directory(prefix="scratch-", parent=root)
+                self.equal(names.call_count, 8)
+            self.equal(occupied.read_bytes(), b"other file")
+            self.require(occupied_directory.is_dir())
+            self.require(not (root / "snapshot").exists())
+
+    def test_allocation_permission_errors_propagate_without_access_probes(self) -> None:
+        """Windows ACL denial must not trigger tempfile's name retry behavior."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for kind in ("file", "directory"):
+                operation = (
+                    "raychat.filesystem.os.open"
+                    if kind == "file"
+                    else "pathlib.Path.mkdir"
+                )
+                with (
+                    self.subTest(kind=kind),
+                    mock.patch(
+                        operation,
+                        side_effect=WindowsContentionError(5),
+                    ) as create,
+                    mock.patch.object(os, "access") as access,
+                    self.rejected(PermissionError),
+                ):
+                    if kind == "file":
+                        write_bytes(root / "snapshot", b"new")
+                    else:
+                        create_scratch_directory(prefix="scratch-", parent=root)
+                self.equal(create.call_count, 1)
+                self.equal(access.call_count, 0)
 
     def test_reparse_detection_does_not_require_symlink_mode(self) -> None:
         """Windows junction metadata is unsafe even when its mode is a directory."""
