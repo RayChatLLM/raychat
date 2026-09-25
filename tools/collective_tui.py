@@ -557,12 +557,13 @@ class _CollectiveRun:
                 "temperature": 0,
             },
         }
-        self.case.config.write_text(json_text(self.config))
+        self.case.config.write_text(json_text(self.config), encoding="utf-8")
 
     def _write_fixtures(self) -> None:
         for page in range(REFERENCE_PAGES):
             (self.case.work / f"padding-{page}.txt").write_text(
                 ("Background reference data. " * 250)[:6000],
+                encoding="utf-8",
             )
         for index in range(self.options.agents):
             (self.case.work / f"shard-{index}.json").write_text(
@@ -574,6 +575,7 @@ class _CollectiveRun:
                         {"cents": 300 + index * 3, "paid": False},
                     ],
                 }),
+                encoding="utf-8",
             )
         for offset in self.ledger.offsets:
             tasks = []
@@ -600,6 +602,7 @@ class _CollectiveRun:
                 })
             (self.case.work / f"batch-{offset}.json").write_text(
                 json_text({"action": "delegate_many", "agents": tasks}),
+                encoding="utf-8",
             )
 
     def _chat(self, endpoint: str) -> TerminalChat:
@@ -764,7 +767,10 @@ class _CollectiveRun:
                 self.options.live or visible_when_aggregated == len(self.ledger.offsets)
             ),
         )
-        (self.case.output / "result.json").write_text(json_text(report, indent=2))
+        (self.case.output / "result.json").write_text(
+            json_text(report, indent=2),
+            encoding="utf-8",
+        )
         require(report["passed"], report)
         return report
 
@@ -787,9 +793,11 @@ class _CollectiveRun:
                     },
                     indent=2,
                 ),
+                encoding="utf-8",
             )
         (self.case.output / "requests.json").write_text(
             json_text(self.ledger.requests, indent=2),
+            encoding="utf-8",
         )
 
     def run(self) -> dict[str, object]:

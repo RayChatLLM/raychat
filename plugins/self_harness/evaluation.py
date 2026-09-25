@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import TYPE_CHECKING
 
-from raychat.filesystem import WORKSPACE_STAGE_PREFIX
+from raychat.filesystem import WORKSPACE_STAGE_PREFIX, is_link_or_reparse_point
 from raychat.validation import (
     ConfigurationError,
     array_field,
@@ -84,7 +84,7 @@ def copy_workspace(
             if (
                 path.name in ignored
                 or secret
-                or path.is_symlink()
+                or is_link_or_reparse_point(path)
                 or path == excluded
                 or path.parts[-2:] in {(".raychat", "sessions"), (".raychat", "live")}
             ):

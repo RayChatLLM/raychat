@@ -204,6 +204,7 @@ class SkillStoreTests(_SkillsAssertions):
     def test_skill_descriptor_closes_before_parsing(self) -> None:
         """Parsing may replace the source after its bounded bytes are captured."""
         source = self.write_skill("one", "# Original\n")
+        source.write_bytes(b"# Original\n")
 
         def replaced(raw: bytes, path: Path) -> _rc_skills.Skill:
             replacement = path.with_name("replacement")

@@ -94,7 +94,7 @@ def fixture(root: Path, output: Path) -> Case:
     manifest["instructions"] = (
         "An offline UI QA provider records requests and supplies observable answers."
     )
-    manifest_path.write_text(json_text(manifest))
+    manifest_path.write_text(json_text(manifest), encoding="utf-8")
     return case
 
 
@@ -356,7 +356,7 @@ def inputs(case: Case, report: Report) -> None:
     tui = object_field(config["tui"], "tui")
     tui["input_max_chars"] = 48
     tui["paste_max_bytes"] = 1024
-    case.config.write_text(json_text(config))
+    case.config.write_text(json_text(config), encoding="utf-8")
     chat = case.chat()
     try:
         chat.wait("Main chat")
@@ -853,9 +853,12 @@ def main() -> None:
         except (AssertionError, OSError, ValueError, RuntimeError):
             report["failure"] = traceback.format_exc()
         reports[name] = report
-        (case.output / "result.json").write_text(json_text(report, indent=2))
+        (case.output / "result.json").write_text(
+            json_text(report, indent=2),
+            encoding="utf-8",
+        )
         write_report({name: report})
-    (output / "result.json").write_text(json_text(reports, indent=2))
+    (output / "result.json").write_text(json_text(reports, indent=2), encoding="utf-8")
     if any(report["failure"] for report in reports.values()):
         raise SystemExit(1)
 

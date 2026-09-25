@@ -1997,3 +1997,31 @@ Local Python 3.10 and 3.14 each passed 103 focused filesystem, transcript, CLI,
 bootstrap and skill tests (one native-Windows-only skip). Strict typing, lint and
 formatting passed in `build/filesystem-quality-104`. Native CI for this follow-up
 is required before claiming its acceptance.
+
+### Tooling encodings and self-harness capture
+
+All direct Path.read_text/write_text calls in tools now choose UTF-8, including
+four embedded marker/source writers. Fixture reports keep their ordinary text
+newline behavior; portable source/archives remain exact-byte formats. The
+generated background-command fixture uses the shared snapshot writer instead of
+a fixed pending filename. Its existing terminal acceptance scenarios exercise
+that publication in CI.
+
+Self-harness workspace copies skip symlinks and Windows reparse points before
+descending, preserving their existing exclusion policy on both platforms. The
+source stays under package/workspace coordination during capture; participating
+writers cannot change it mid-copy. Nonparticipating editors and hostile parent
+mutation are outside this contract. A real child tests an unprivileged native
+Windows junction (or POSIX symlink), refuses traversal and verifies the external
+sentinel is untouched. If a failed experiment also cannot append its rejection
+record, that secondary failure is logged and the original experiment failure
+propagates. The original failure and independent successful logging paths have
+regression coverage. Both changes are bundled into the immutable self-harness
+package and current catalog/profile graph.
+
+Python 3.10 and 3.14 each passed all 35 self-harness tests locally; strict typing,
+lint and formatting passed in `build/filesystem-quality-106`. Windows CI for the
+preceding skill change exposed a CRLF assumption in the new closure test, not a
+reader failure: the reader retained the original bytes correctly. That fixture
+now writes explicit LF bytes. Acceptance of the corrected revision still depends
+on its own complete native CI run.

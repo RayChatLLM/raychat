@@ -318,7 +318,10 @@ def main() -> None:
         except (AssertionError, OSError, ValueError) as exc:
             failures.append(name)
             results[name] = {"passed": False, "error": str(exc), "checks": case.checks}
-    (args.output / "result.json").write_text(json_text(results, indent=2))
+    (args.output / "result.json").write_text(
+        json_text(results, indent=2),
+        encoding="utf-8",
+    )
     write_report(results, indent=2)
     if failures:
         raise SystemExit(1)

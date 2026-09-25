@@ -19,7 +19,7 @@ def register(api: PluginAPI) -> None:
         revision = ctx.settings['revision']
         (ctx.workspace / f'reload-{revision}.json').write_text(json.dumps({
             'revision': revision, 'thread': threading.current_thread().name,
-        }))
+        }), encoding='utf-8')
         if revision:
             time.sleep(0.2)
 
@@ -32,7 +32,7 @@ def register(api: PluginAPI) -> None:
         return f"REV_{ctx.settings['revision']}"
 
     def hold(arguments: str, ctx: PluginContext) -> str:
-        (ctx.workspace / 'hold-started').write_text('running')
+        (ctx.workspace / 'hold-started').write_text('running', encoding='utf-8')
         deadline = time.monotonic() + 10
         while not (ctx.workspace / 'hold-release').exists():
             ctx.check_cancelled()
@@ -86,8 +86,9 @@ def run(case: Case) -> dict[str, object]:
         path.mkdir()
         (path / "plugin.json").write_text(
             json_text({**manifest, "id": identifier, "requires": requires}),
+            encoding="utf-8",
         )
-        (path / "__init__.py").write_text(implementation)
+        (path / "__init__.py").write_text(implementation, encoding="utf-8")
     chat = case.chat()
     observed: list[dict[str, object]] = []
     try:
@@ -96,7 +97,7 @@ def run(case: Case) -> dict[str, object]:
         chat.command_complete("/plugins link dependent", "packages")
         for revision in range(1, 21):
             defaults["revision"] = revision
-            (package / "plugin.json").write_text(json_text(manifest))
+            (package / "plugin.json").write_text(json_text(manifest), encoding="utf-8")
             # Deliberately overlap a worker's refresh with an application command.
             chat.send("/tick\t\r")
             marker = case.work / f"reload-{revision}.json"
@@ -127,7 +128,7 @@ def run(case: Case) -> dict[str, object]:
         chat.send("/hold\t\r")
         wait_file(chat, case.work / "hold-started")
         chat.command("/plugins uninstall race", '"applied": false')
-        (case.work / "hold-release").write_text("release")
+        (case.work / "hold-release").write_text("release", encoding="utf-8")
         chat.wait("Missing or disabled plugin dependency: race")
         chat.wait("HOLD_FINISHED")
         chat.command_complete("/dependent", "REV_20")
@@ -142,9 +143,10 @@ def run(case: Case) -> dict[str, object]:
             require(failure not in transcript, failure)
         (case.output / "reload-observations.json").write_text(
             json_text(observed, indent=2),
+            encoding="utf-8",
         )
     finally:
-        (case.work / "hold-release").write_text("release")
+        (case.work / "hold-release").write_text("release", encoding="utf-8")
         chat.close(case.output / "terminal.ansi")
     return case.result()
 
