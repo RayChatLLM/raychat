@@ -21,15 +21,35 @@ from raychat.filesystem import (
     remove_owned,
     remove_tree,
     replace_completed,
-    write_bytes,
 )
 from tests.assertions import TypedTestCase
 from tests.transport_support import captured
+from tools.smoke_process import SmokeCommand, run_checked
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable
 
 _FAILURE_DEADLINE = 5
+
+_DENIED_ALLOCATION = """
+import faulthandler
+import sys
+from pathlib import Path
+from raychat.filesystem import create_scratch_directory, write_bytes
+faulthandler.dump_traceback_later(5)
+target = Path(sys.argv[1])
+for operation in (
+    lambda: write_bytes(target, b'new'),
+    lambda: create_scratch_directory(prefix='denied-', parent=target.parent),
+):
+    try:
+        operation()
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError('Denied allocation unexpectedly succeeded')
+faulthandler.cancel_dump_traceback_later()
+"""
 
 _SNAPSHOTS = """
 import sys
@@ -233,8 +253,15 @@ class FilesystemEnvironmentTests(TypedTestCase):
             replace_completed(source, target, policy=RetryPolicy(timeout=0.05))
         self.require(time.monotonic() - started < _FAILURE_DEADLINE)
         self.require(any("replace failed" in line for line in logs.output))
-        with self.rejected(PermissionError):
-            write_bytes(target, b"new", policy=RetryPolicy(timeout=0.05))
+        run_checked(
+            SmokeCommand(
+                (sys.executable, "-B", "-S", "-c", _DENIED_ALLOCATION, str(target)),
+                Path(__file__).resolve().parents[1],
+                dict(os.environ),
+                10,
+                4000,
+            ),
+        )
         self.equal(target.read_bytes(), b"old")
         self.equal(source.read_bytes(), b"complete new content")
         self.equal(stat.S_IMODE(target.stat().st_mode), old_mode)
