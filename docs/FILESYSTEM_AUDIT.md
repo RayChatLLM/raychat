@@ -1557,3 +1557,40 @@ Linux tests use the isolated unprivileged archive harness and
 5,265,104 bytes, 339 members and 338 allowlisted source files. The complete suite
 and 14-scenario smoke result above predate this narrowly scoped archive-reader
 change; they have not been relabeled as a run of the follow-up revision.
+
+### Release inventory membership revalidation (2026-09-25)
+
+Core source copying and release hashing now enumerate the tree again before
+accepting the copy or digest. Revalidation compares exact relative POSIX spellings
+and entry versions, including the complete membership set. Checking only the
+entries discovered at the start could miss a late addition when directory
+metadata stayed unchanged. Copy revalidation applies the same cache/scratch
+exclusions as its initial inventory; digest/seal revalidation covers every entry.
+The existing digest encoding is unchanged. A detected addition prevents sealing
+before any chmod occurs; failed capture retires only its new candidate and leaves
+the externally added source bytes untouched.
+
+Package revalidation also compares exact relative string spellings instead of
+native Path equality. This prevents Windows case-insensitive path comparison
+from hiding a case-only rename. The regression renames an already-read entry and
+restores its parent's modification time. These observations still require trusted
+parents and quiescent inputs; they do not establish a transaction with external
+editors or eliminate the interval after the final observation.
+
+Forty bootstrap, package-source, live-release and persistence tests pass on macOS
+Python 3.12 in 4.291 seconds (`/tmp/raychat-inventory-recheck-26.log`). Adding the
+two portable ordering regressions produces a 42-test selection, passing on macOS
+Python 3.10.19 in 10.980 seconds and 3.14.3 in 12.112 seconds, and Linux Python
+3.10.21 in 12.359 seconds and 3.14.7 in 15.522 seconds. Each skips the two Windows
+junction fixtures. Logs are `/tmp/raychat-inventory-recheck-{mac,linux}{310,314}-26.log`.
+Strict typing, lint and formatting pass without suppressions in
+`build/filesystem-quality-75/report.json`.
+
+Linux runs use the unprivileged isolated archive harness with
+`build/filesystem-linux-26.zip`, SHA-256
+`cbb36b7ecec468df62658bb9fdce6773819a955a6ea3e8043f27a9f1178cc7c9`,
+5,269,402 bytes, 339 members and 338 allowlisted source files. That archive passes
+all five offline startup failure/repair phases and restores its terminal
+(`build/filesystem-bootstrap-tui-26/startup/result.json`). These focused results
+supplement the earlier full-suite and full-smoke results; native changed-revision
+Windows execution still requires the requested PR and GitHub CI authentication.

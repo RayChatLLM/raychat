@@ -404,6 +404,47 @@ class BootstrapPathTests(TypedTestCase):
                     manager.capture(manager.source)
                 self.equal(list(manager.directory.glob("candidate-*")), [])
 
+    def test_added_members_invalidate_capture_hash_and_seal(self) -> None:
+        """Directory timestamps cannot substitute for checking tree membership."""
+        for operation in ("capture", "digest", "seal"):
+            with (
+                self.subTest(operation=operation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self._added_member(Path(directory), operation)
+
+    def _added_member(self, root: Path, operation: str) -> None:
+        manager = self.manager(root)
+        source = manager.source / "raychat"
+        source.mkdir()
+        selected = source / "example.py"
+        selected.write_bytes(b"original")
+        added = source / "added.py"
+
+        def read(path: Path, limit: int, *, follow_symlinks: bool = True) -> bytes:
+            data = read_regular(path, limit, follow_symlinks=follow_symlinks)
+            if path == selected:
+                before = source.stat()
+                added.write_bytes(b"late addition")
+                os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return data
+
+        with (
+            mock.patch.object(releases, "read_regular", read),
+            mock.patch.object(Path, "chmod") as chmod,
+            self.rejected(ValueError, "tree changed"),
+        ):
+            if operation == "capture":
+                manager.capture(manager.source)
+            elif operation == "digest":
+                releases.digest(source)
+            else:
+                releases.seal(source)
+        self.equal(chmod.call_count, 0)
+        self.equal(added.read_bytes(), b"late addition")
+        self.equal(selected.read_bytes(), b"original")
+        self.equal(list(manager.directory.glob("candidate-*")), [])
+
     def test_candidate_undo_scratch_is_excluded_from_capture(self) -> None:
         """Workspace transaction backups do not enter an immutable core release."""
         with tempfile.TemporaryDirectory() as directory:
