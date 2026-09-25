@@ -71,6 +71,7 @@ SIGNATURE = ["verifier:missing-check", "causal", "verification"]
 
 _PROMOTION_LOCK_PROBE = """
 import sys
+sys.stdout.reconfigure(newline="\\n")
 from pathlib import Path
 from raychat.filesystem import FileLock
 for value in sys.argv[1:]:

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 _WRITER = """
 import json
 import sys
+sys.stdout.reconfigure(newline="\\n")
 from pathlib import Path
 from tools import build_portable, release_folder
 path, phase = Path(sys.argv[1]), sys.argv[2]
