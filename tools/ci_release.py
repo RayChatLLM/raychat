@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,33 @@ class _Arguments(argparse.Namespace):
 async def _run(root: Path, output: Path) -> int:
     archive = output / f"raychat-v{release_version(root)}.zip"
     durations = ("--durations", "20") if sys.version_info >= (3, 12) else ()
+    unit = (
+        (
+            "-B",
+            "-m",
+            "unittest_parallel",
+            "-s",
+            "tests",
+            "-j",
+            "2",
+            "--level=module",
+            "-v",
+            "-f",
+        )
+        if os.name == "nt"
+        else (
+            "-B",
+            "-S",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-v",
+            "-f",
+            *durations,
+        )
+    )
     stages = (
         (
             "build",
@@ -36,21 +64,7 @@ async def _run(root: Path, output: Path) -> int:
                 str(output / "acceptance"),
             ),
         ),
-        (
-            "unit",
-            (
-                "-B",
-                "-S",
-                "-m",
-                "unittest",
-                "discover",
-                "-s",
-                "tests",
-                "-v",
-                "-f",
-                *durations,
-            ),
-        ),
+        ("unit", unit),
     )
     timings: dict[str, float] = {}
     async with CheckerWorkspace(prefix="raychat-ci-") as workspace:
