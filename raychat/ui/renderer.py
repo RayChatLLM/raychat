@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
 from raychat.configuration import SETTINGS
 from raychat.ui.caching import cache_function
@@ -32,6 +32,18 @@ ANIMATION_HERTZ = SETTINGS.renderer.animation_hertz
 DEFAULT_QUALITY = SETTINGS.renderer.default_quality
 _SCENE = SETTINGS.renderer.scene
 _BENCHMARK = SETTINGS.renderer.benchmark
+
+
+def supports_truecolor(environ: Mapping[str, str]) -> bool:
+    """Choose compatible colors for the terminal hosting the application.
+
+    Returns
+    -------
+    bool
+        False for macOS Terminal, which needs indexed 256-color sequences.
+
+    """
+    return environ.get("TERM_PROGRAM") != "Apple_Terminal"
 
 
 def _positive_dimensions(*values: object) -> bool:
