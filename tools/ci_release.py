@@ -20,8 +20,10 @@ class _Arguments(argparse.Namespace):
 
 async def _run(root: Path, output: Path) -> int:
     archive = output / f"raychat-v{release_version(root)}.zip"
-    durations = ("--durations", "20") if sys.version_info >= (3, 12) else ()
-    unit = (
+    durations: tuple[str, ...] = (
+        ("--durations", "20") if sys.version_info >= (3, 12) else ()
+    )
+    unit: tuple[str, ...] = (
         (
             "-B",
             "-m",

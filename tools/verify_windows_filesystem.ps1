@@ -4,7 +4,6 @@ param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
     [string] $ExpectedSid,
-    [switch] $Diagnostic,
     [string] $OutputDirectory = "ci-output"
 )
 
@@ -39,12 +38,7 @@ if ($Child) {
     } catch [UnauthorizedAccessException] {
         Write-Output 'Confirmed: the installation denies standard-user writes.'
     }
-    if ($Diagnostic -and $env:RAYCHAT_DIAGNOSTIC_TESTS) {
-        $Tests = $env:RAYCHAT_DIAGNOSTIC_TESTS.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
-        & $Python -B -S -X faulthandler -m unittest -v -f @Tests
-    } else {
-        & $Python -B -m tools.ci_release --output $OutputDirectory
-    }
+    & $Python -B -m tools.ci_release --output $OutputDirectory
     exit $LASTEXITCODE
 }
 
@@ -180,7 +174,7 @@ try {
             ArgumentList = '-NoLogo -NoProfile -NonInteractive -File "' +
                 (Join-Path $Source 'tools/verify_windows_filesystem.ps1') +
                 '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value +
-                ' -OutputDirectory "' + $ChildOutput + '"' + $(if ($Diagnostic) { ' -Diagnostic' } else { '' })
+                ' -OutputDirectory "' + $ChildOutput + '"'
             Credential = $Credential
             LoadUserProfile = $true
             Environment = $ChildEnvironment
@@ -195,7 +189,7 @@ try {
         # Short waits keep cancellation responsive and expose each Python stage.
         $Waiting = [Diagnostics.Stopwatch]::StartNew()
         $PrintedLines = @{}
-        $BudgetMinutes = if ($Diagnostic -and $env:RAYCHAT_DIAGNOSTIC_TESTS) { 8 } else { 20 }
+        $BudgetMinutes = 20
         do {
             $Exited = $Process.WaitForExit(1000)
             foreach ($LogPath in @($Launch.RedirectStandardOutput, $Launch.RedirectStandardError)) {
