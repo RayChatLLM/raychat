@@ -93,8 +93,11 @@ def _defender_evidence(path: Path) -> None:
         raise RuntimeError(message)
 
 
-def _completed_evidence(output: Path) -> None:
+def _completed_evidence(output: Path, *, diagnostic: bool = False) -> None:
     unit = _report(output / "unit-report.json")
+    if bool(unit.get("diagnostic")) != diagnostic:
+        message = "Diagnostic selections cannot certify the full release suite."
+        raise RuntimeError(message)
     expected = integer_field(unit.get("expected"), "expected unit tests")
     completed = integer_field(unit.get("completed"), "completed unit tests")
     if expected <= 0 or completed != expected or unit.get("passed") is not True:
@@ -202,7 +205,12 @@ def run_harness(command: Sequence[str], output: Path, deadline: float) -> int:
     return result
 
 
-def wait_harness(output: Path, seconds: float | None) -> int:
+def wait_harness(
+    output: Path,
+    seconds: float | None,
+    *,
+    diagnostic: bool = False,
+) -> int:
     """Wait briefly for a checkpoint or require the harness's final exit status.
 
     Returns
@@ -222,7 +230,7 @@ def wait_harness(output: Path, seconds: float | None) -> int:
         status = _status(output)
         if status is not None:
             if seconds is None and status == 0:
-                _completed_evidence(output)
+                _completed_evidence(output, diagnostic=diagnostic)
             return status if seconds is None else 0
         remaining = limit - time.time()
         if remaining <= 0:
@@ -255,7 +263,10 @@ def main() -> int:
         message = "This supervisor requires an ephemeral GitHub-hosted Windows VM."
         raise RuntimeError(message)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("start", "run", "checkpoint", "finish"))
+    parser.add_argument(
+        "operation",
+        choices=("start", "run", "checkpoint", "finish", "finish-diagnostic"),
+    )
     parser.add_argument("--output", type=Path, default=Path("ci-output"))
     parser.add_argument("--seconds", type=float, default=180)
     parser.add_argument("--deadline", type=float, default=0)
@@ -269,6 +280,8 @@ def main() -> int:
         if powershell is None:
             message = "PowerShell is required for Windows acceptance."
             raise RuntimeError(message)
+        selection = os.environ.get("RAYCHAT_WINDOWS_DIAGNOSTIC", "")
+        diagnostic_arguments = ("-Diagnostic", selection) if selection else ()
         return run_harness(
             (
                 powershell,
@@ -279,11 +292,16 @@ def main() -> int:
                 str(_ROOT / "tools/verify_windows_filesystem.ps1"),
                 "-Python",
                 sys.executable,
+                *diagnostic_arguments,
             ),
             output,
             args.deadline,
         )
-    return wait_harness(output, None if args.operation == "finish" else args.seconds)
+    return wait_harness(
+        output,
+        None if args.operation in {"finish", "finish-diagnostic"} else args.seconds,
+        diagnostic=args.operation == "finish-diagnostic",
+    )
 
 
 if __name__ == "__main__":

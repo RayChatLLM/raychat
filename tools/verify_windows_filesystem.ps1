@@ -3,6 +3,7 @@
 param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
+    [ValidateSet("", "launcher", "opaque", "pair")][string] $Diagnostic = "",
     [string] $ExpectedSid,
     [string] $OutputDirectory = "ci-output"
 )
@@ -43,14 +44,20 @@ if ($Child) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Each discovered module runs once. Supervise native unittest processes
     # directly: a crashed interpreter must fail, not strand a process-pool task.
-    # Fail-fast emits a failing shard's traceback immediately. A green run still
-    # requires every discovered test to complete, checked below.
     $Modules = @(Get-ChildItem tests -Recurse -File -Filter 'test*.py' | Sort-Object FullName |
         ForEach-Object {
             ([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName) -replace '\.py$', '') -replace '[\\/]', '.'
         })
+    if ($Diagnostic) {
+        $Modules = @(if ($Diagnostic -in @('launcher', 'pair')) { 'tests.test_user_release' }
+            if ($Diagnostic -in @('opaque', 'pair')) { 'tests.test_opaque_incident_demo' })
+    }
     if ($Modules.Count -eq 0) { throw 'No unit-test modules were discovered.' }
-    $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
+    $ExpectedTests = if ($Diagnostic) {
+        & $Python -B -S -c "import sys, unittest; print(unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:]).countTestCases())" @Modules
+    } else {
+        & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
+    }
     if ($LASTEXITCODE -ne 0) { throw 'Unit discovery failed.' }
     $ExpectedTests = [int]$ExpectedTests
     $Shards = @()
@@ -60,7 +67,7 @@ if ($Child) {
     try {
         # Run the concurrency benchmark in a fresh process before other suites.
         # All discovered tests still run exactly once under the same deadline.
-        $Phases = @('stress', 'remaining')
+        $Phases = if ($Diagnostic) { @('remaining') } else { @('stress', 'remaining') }
         foreach ($Phase in $Phases) {
             $PhaseModules = @(if ($Phase -eq 'stress') {
                 'tests.test_workflow_stress'
@@ -84,7 +91,7 @@ if ($Child) {
                     Join-Path $env:TEMP "unit-$Index")).FullName
                 $UnitLaunch = @{
                     FilePath = $Python
-                    ArgumentList = @('-B', '-S', '-X', 'faulthandler', '-m', 'unittest', '-v', '--failfast', '--durations', '20') + $Selection
+                    ArgumentList = @('-B', '-S', '-X', 'faulthandler', '-m', 'unittest', '-v', '--durations', '20') + $Selection
                     WorkingDirectory = (Get-Location).Path
                     RedirectStandardOutput = $UnitOut
                     RedirectStandardError = $UnitErr
@@ -134,6 +141,7 @@ if ($Child) {
         if ($ActualTests -ne $ExpectedTests) { $UnitExit = 1 }
         [ordered]@{
             expected = $ExpectedTests; completed = $ActualTests; passed = ($UnitExit -eq 0)
+            diagnostic = [bool]$Diagnostic; selection = $Diagnostic
         } |
             ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-report.json')
     } finally {
@@ -330,7 +338,8 @@ try {
             ArgumentList = '-NoLogo -NoProfile -NonInteractive -File "' +
                 (Join-Path $Source 'tools/verify_windows_filesystem.ps1') +
                 '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value +
-                ' -OutputDirectory "' + $ChildOutput + '"'
+                ' -OutputDirectory "' + $ChildOutput + '"' +
+                $(if ($Diagnostic) { ' -Diagnostic ' + $Diagnostic } else { '' })
             Credential = $Credential
             LoadUserProfile = $true
             Environment = $ChildEnvironment

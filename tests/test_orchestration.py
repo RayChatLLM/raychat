@@ -812,15 +812,18 @@ class SubagentCoordinatorTests(PackageTestCase):
         thread = threading.Thread(target=run)
         thread.start()
         try:
-            require(request_started.wait(3))
+            # Defender scans cold worker imports before the first HTTP request.
+            require(request_started.wait(30 if os.name == "nt" else 3))
             cancelled.set()
             thread.join(3)
             require(not (thread.is_alive()))
         finally:
+            cancelled.set()
             release_server.set()
             server.shutdown()
             server.server_close()
             server_thread.join(3)
+            thread.join(3)
         equal(len(caught), 1)
         require(isinstance(caught[0], CancelledError))
 

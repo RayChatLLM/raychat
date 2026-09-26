@@ -1,4 +1,4 @@
-# Temporary full-suite diagnosis; this job is never a release publication check.
+# Temporary selected-module diagnosis; this job is never a release publication check.
 name: Windows stress diagnostic
 
 on:
@@ -16,10 +16,15 @@ concurrency:
 
 jobs:
   windows:
-    name: Windows full-suite diagnostic
+    name: Windows pair diagnostic / ${{ matrix.selection }}
+    strategy:
+      fail-fast: false
+      matrix:
+        selection: [launcher, opaque, pair]
     runs-on: windows-latest
     timeout-minutes: 25
     env:
+      RAYCHAT_WINDOWS_DIAGNOSTIC: ${{ matrix.selection }}
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
@@ -32,7 +37,7 @@ jobs:
           cache-dependency-path: requirements-windows-test.txt
       - name: Install CI-only console driver
         run: python -m pip install -r requirements-windows-test.txt
-      - name: Start the unchanged full Windows acceptance harness
+      - name: Start isolated diagnostic modules with release acceptance
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor start
       - name: Wait for diagnostic checkpoint 1
@@ -42,7 +47,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-1-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-1-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -54,7 +59,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-2-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-2-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -66,7 +71,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-3-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-3-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -78,7 +83,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-4-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-4-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -90,7 +95,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-5-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-5-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -102,7 +107,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-6-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-6-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -114,7 +119,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-7-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-7-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -126,7 +131,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-8-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-8-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -138,7 +143,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-9-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-9-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -150,7 +155,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-10-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-10-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -162,7 +167,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-11-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-11-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -174,7 +179,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-12-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-12-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -186,7 +191,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-13-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-13-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -198,7 +203,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-14-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-14-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -210,7 +215,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-15-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-15-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -222,7 +227,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-16-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-16-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -234,7 +239,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-17-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-17-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -246,7 +251,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-18-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-18-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -258,7 +263,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-19-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-19-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -270,7 +275,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-20-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-20-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -282,7 +287,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-21-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-21-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -294,7 +299,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-22-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-22-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -306,7 +311,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-23-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-23-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
@@ -318,18 +323,18 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-24-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.selection }}-24-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
-      - name: Require actual full acceptance evidence
+      - name: Require completed selected-module diagnostic evidence
         timeout-minutes: 9
-        run: python -B -S -m tools.windows_ci_supervisor finish
+        run: python -B -S -m tools.windows_ci_supervisor finish-diagnostic
       - name: Retain complete diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-final
+          name: windows-triage-${{ matrix.selection }}-final
           path: ci-output/
           if-no-files-found: error

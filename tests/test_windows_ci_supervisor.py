@@ -99,6 +99,10 @@ class WindowsSupervisorTests(TypedTestCase):
         """A silent successful process cannot certify tests it never ran."""
         cases: tuple[tuple[str, object | None], ...] = (
             ("unit-report.json", None),
+            (
+                "unit-report.json",
+                {"expected": 2, "completed": 2, "passed": True, "diagnostic": True},
+            ),
             ("unit-report.json", {"expected": 2, "completed": 1, "passed": True}),
             ("unit-report.json", {"expected": 0, "completed": 0, "passed": True}),
             ("unit-report.json", {"expected": 2, "completed": 2, "passed": False}),
