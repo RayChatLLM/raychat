@@ -67,7 +67,7 @@ def readonly_installation(root: Path) -> Iterator[None]:
     if os.name == "nt":
         sid = os.environ["RAYCHAT_TEST_SID"]
         _command(
-            ("icacls", str(root), "/deny", f"*{sid}:(OI)(CI)(W,D,DC)"),
+            ("icacls", str(root), "/deny", f"*{sid}:(OI)(CI)(WD,AD,WEA,WA,D,DC)"),
             root.parent,
         )
         try:
@@ -189,6 +189,10 @@ def exercise(root: Path, parent: Path, output: Path) -> dict[str, object]:
     provider = Provider()
     try:
         with readonly_installation(root):
+            require(
+                bool((root / "raychat").read_bytes()),
+                "Read-only launcher is unreadable.",
+            )
             try:
                 (root / "write-probe").write_bytes(b"should fail")
             except PermissionError:
