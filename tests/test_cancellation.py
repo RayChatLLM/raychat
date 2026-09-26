@@ -40,7 +40,13 @@ from tests.plugin_support import ScriptedChat, callback_plugin, plugin_module
 from tests.provider_support import registered_provider
 from tests.test_package_system import PackageTestCase
 from tests.test_terminal_runtime import collect_until
-from tests.transport_support import ChildLauncher, captured, equal, require
+from tests.transport_support import (
+    ChildLauncher,
+    captured,
+    equal,
+    require,
+    startup_timeout,
+)
 from tests.tui_support import arguments, resources_fixture
 
 if TYPE_CHECKING:
@@ -296,7 +302,7 @@ class CancellationTests(PackageTestCase):
                     run_options={"runtime": runtime, "allowed_actions": actions},
                 )
                 first = worker.submit("abandoned prompt")
-                require(chat.entered.wait(2))
+                require(chat.entered.wait(startup_timeout(2)))
                 require(worker.cancel_current(first))
                 equal(_payload(wait_for_event(worker, "cancelled"))["job_id"], first)
                 require(worker.is_alive)
@@ -314,7 +320,8 @@ class CancellationTests(PackageTestCase):
 
         def workflow_child(_messages: Messages) -> str:
             child_started.set()
-            if not release_child.wait(4):
+            # Hold the sibling while the selected child finishes cold startup.
+            if not release_child.wait(startup_timeout(2) + 2):
                 error_message = "Workflow child timed out"
                 raise AssertionError(error_message)
             return DONE
@@ -354,9 +361,9 @@ class CancellationTests(PackageTestCase):
         # Build both fixtures before holding a workflow open. Cold child
         # plugin capture under Defender is separate from cancellation latency.
         parent_id = parent.submit("Run a review workflow")
-        require(child_started.wait(15))
+        require(child_started.wait(startup_timeout(15)))
         child_id = selected.submit("Independent subagent conversation")
-        require(chat.entered.wait(2))
+        require(chat.entered.wait(startup_timeout(2)))
         require(selected.cancel_current(child_id))
         wait_for_event(selected, "cancelled")
         require(parent.is_alive)
@@ -389,7 +396,11 @@ class CancellationTests(PackageTestCase):
         )
         job = worker.submit("Write a file")
         # Initializing the complete plugin profile can be slow on a busy runner.
-        approval = wait_for_event(worker, "approval_required", timeout=10)
+        approval = wait_for_event(
+            worker,
+            "approval_required",
+            timeout=startup_timeout(10),
+        )
         require(worker.cancel_current(job))
         require(
             not (
@@ -425,7 +436,7 @@ class CancellationTests(PackageTestCase):
             run_options={"auto_approve": True},
         )
         job = worker.submit("Run something slow")
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + startup_timeout(3)
         while not pid_file.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         require(pid_file.exists())
@@ -460,7 +471,7 @@ class CancellationTests(PackageTestCase):
         runtime.load([callback_plugin("slow", register)])
         worker = self.worker(ScriptedChat([DONE]), run_options={"runtime": runtime})
         job = worker.submit("/slow")
-        require(entered.wait(2))
+        require(entered.wait(startup_timeout(2)))
         worker.cancel_current(job)
         wait_for_event(worker, "cancelled")
         worker.submit("Replacement")
@@ -486,7 +497,7 @@ class CancellationTests(PackageTestCase):
             new=launcher,
         ):
             job = worker.submit("Blocked HTTP")
-            deadline = time.monotonic() + 2
+            deadline = time.monotonic() + startup_timeout(2)
             while not launcher.processes and time.monotonic() < deadline:
                 time.sleep(0.01)
             require(launcher.processes)
@@ -513,7 +524,7 @@ class CancellationTests(PackageTestCase):
             job = worker.submit(
                 "/optimize benchmark --workers 1 --cases 2 --delay-ms 10000",
             )
-            require(launcher.started.wait(3))
+            require(launcher.started.wait(startup_timeout(3)))
             require(worker.cancel_current(job))
             wait_for_event(worker, "cancelled", 3)
         require(launcher.processes)

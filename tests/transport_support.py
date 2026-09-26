@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 import threading
@@ -14,6 +15,18 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
 _Error = TypeVar("_Error", bound=BaseException)
+
+
+def startup_timeout(default: float) -> float:
+    """Allow cold Windows fixture startup without relaxing operation deadlines.
+
+    Returns
+    -------
+    float
+        Thirty seconds on Windows, otherwise the fixture's existing bound.
+
+    """
+    return max(30, default) if os.name == "nt" else default
 
 
 class ChildProcessOptions(TypedDict):
