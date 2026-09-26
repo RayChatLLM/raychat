@@ -19,6 +19,7 @@ class _Arguments(argparse.Namespace):
 
 async def _run(root: Path, output: Path) -> int:
     archive = output / f"raychat-v{release_version(root)}.zip"
+    durations = ("--durations", "20") if sys.version_info >= (3, 12) else ()
     stages = (
         (
             "build",
@@ -35,7 +36,21 @@ async def _run(root: Path, output: Path) -> int:
                 str(output / "acceptance"),
             ),
         ),
-        ("unit", ("-B", "-S", "-m", "unittest", "discover", "-s", "tests", "-v", "-f")),
+        (
+            "unit",
+            (
+                "-B",
+                "-S",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-v",
+                "-f",
+                *durations,
+            ),
+        ),
     )
     timings: dict[str, float] = {}
     async with CheckerWorkspace(prefix="raychat-ci-") as workspace:

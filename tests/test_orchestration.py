@@ -1235,7 +1235,9 @@ class GoalModeTests(PackageTestCase):
             default_profile="primary",
         )
         controller = goal_module.GoalController(goal_module.GoalJudge(router))
-        run_options: dict[str, object] = {"goal_controller": controller}
+        runtime = create_runtime(self.root, goal_controller=controller)
+        self.addCleanup(runtime.close)
+        run_options: dict[str, object] = {"runtime": runtime}
         worker = AgentWorker(main, self.root, run_options=run_options)
         kinds = []
         result = None
