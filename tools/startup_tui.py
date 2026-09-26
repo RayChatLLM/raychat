@@ -51,13 +51,13 @@ def run(root: Path, output: Path) -> dict[str, object]:
         "requires": {},
         "instructions": "Use /startup-check to confirm this plugin is ready.",
     }
-    (package / "plugin.json").write_text(json_text(manifest))
+    (package / "plugin.json").write_text(json_text(manifest), encoding="utf-8")
     entrypoint = package / "__init__.py"
     config = read_object(root / "raychat.json")
     object_field(config["storage"], "storage")["home_directory"] = str(output / "home")
     object_field(config["plugins"], "plugins")["profile"] = None
     configuration = output / "config.json"
-    configuration.write_text(json_text(config))
+    configuration.write_text(json_text(config), encoding="utf-8")
     arguments = [
         "--config",
         str(configuration),
@@ -93,7 +93,7 @@ def run(root: Path, output: Path) -> dict[str, object]:
         ),
     )
     for phase, source, error in failures:
-        entrypoint.write_text(source)
+        entrypoint.write_text(source, encoding="utf-8")
         chat = TerminalChat(root, arguments, environ=fixture_provider_environment())
         try:
             chat.wait("Error:")
@@ -108,7 +108,7 @@ def run(root: Path, output: Path) -> dict[str, object]:
                 require(str(package) in terminal, terminal)
         finally:
             chat.close(output / f"{phase}-failure.ansi", expected_exit=1)
-        entrypoint.write_text(VALID)
+        entrypoint.write_text(VALID, encoding="utf-8")
         chat = TerminalChat(root, arguments, environ=fixture_provider_environment())
         try:
             chat.wait("[IDLE]")
@@ -123,7 +123,10 @@ def run(root: Path, output: Path) -> dict[str, object]:
             ),
         )
     report = {"passed": True, "checks": checks, "terminal_restored": True}
-    (output / "result.json").write_text(json_text(report, indent=2) + "\n")
+    (output / "result.json").write_text(
+        json_text(report, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return report
 
 

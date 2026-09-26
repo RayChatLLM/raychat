@@ -5,18 +5,22 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import stat
 import time
 import uuid
-from pathlib import Path
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from .core_review import verify
+from .filesystem import is_link_or_reparse_point, portable_relative_path, read_regular
 from .sdk import InstructionContribution, ToolDefinition
 from .storage import SessionStore
 from .validation import array_field, configuration_fields, integer_field, text_field
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Iterator, Mapping
+    from os import stat_result
+    from pathlib import Path
 
     from .core_bridge import CoreBridge
     from .plugins import Runtime
@@ -90,98 +94,142 @@ Examples of actions:
 
 
 def _path(root: Path, raw: object) -> Path:
-    name = Path(text_field(raw, "source path"))
-    if (
-        name.is_absolute()
-        or ".." in name.parts
-        or not name.parts
-        or name.parts[0] not in {"raychat", "plugins"}
-        or name.suffix not in {".py", ".json"}
-    ):
+    name = portable_relative_path(text_field(raw, "source path"))
+    if name.parts[0] not in {"raychat", "plugins"} or name.suffix not in {
+        ".py",
+        ".json",
+    }:
         message = (
             "Source paths must name .py or .json files under raychat/ or plugins/."
         )
         raise ValueError(message)
-    result = (root / name).resolve()
-    if not result.is_relative_to(root.resolve()):
-        message = "Source path escapes the active release."
-        raise ValueError(message)
+    result = root
+    for part in name.parts:
+        result /= part
+        if is_link_or_reparse_point(result):
+            message = "Source paths cannot contain links or reparse points."
+            raise ValueError(message)
     return result
+
+
+def _source_version(info: stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_mode,
+        info.st_nlink,
+    )
+
+
+def _read_source(path: Path) -> bytes:
+    # Releases stay alive for their consumers and are not edited in place by
+    # cooperating writers. Detect observed external changes; do not retry reads.
+    before = path.lstat()
+    data = read_regular(path, before.st_size + 1, follow_symlinks=False)
+    after = path.lstat()
+    if _source_version(before) != _source_version(after) or len(data) != before.st_size:
+        message = "Core source changed while reading; inspect it again."
+        raise ValueError(message)
+    return data
+
+
+def _source_paths(root: Path) -> Iterator[Path]:
+    # Inspect before descending: rglob can traverse Windows junctions. Only the
+    # two optional top-level source directories may be absent at discovery.
+    pending = []
+    for name in ("plugins", "raychat"):
+        path = root / name
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        pending.append(path)
+    while pending:
+        path = pending.pop()
+        if is_link_or_reparse_point(path):
+            continue
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            pending.extend(sorted(path.iterdir(), reverse=True))
+        elif stat.S_ISREG(info.st_mode) and path.suffix in {".py", ".json"}:
+            yield path
+
+
+def _source_page(
+    root: Path,
+    path: Path,
+    data: bytes,
+    action: Mapping[str, object],
+) -> dict[str, object]:
+    lines = data.decode("utf-8").splitlines(keepends=True)
+    start = integer_field(action.get("start", 1), "start", minimum=1)
+    end = min(
+        len(lines),
+        start + _PAGE_LINES - 1,
+        integer_field(action.get("end", len(lines)), "end", minimum=start),
+    )
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "start": start,
+        "end": end,
+        "total_lines": len(lines),
+        "source": "".join(lines[start - 1 : end]),
+    }
 
 
 def _source(root: Path, action: Mapping[str, object]) -> dict[str, object]:
     root = root.resolve()
     path = _path(root, action["path"]) if "path" in action else None
     if path is not None and "query" not in action:
-        data = path.read_bytes()
-        lines = data.decode("utf-8").splitlines(keepends=True)
-        start = integer_field(action.get("start", 1), "start", minimum=1)
-        end = min(
-            len(lines),
-            start + _PAGE_LINES - 1,
-            integer_field(action.get("end", len(lines)), "end", minimum=start),
-        )
-        return {
-            "path": str(path.relative_to(root)),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "start": start,
-            "end": end,
-            "total_lines": len(lines),
-            "source": "".join(lines[start - 1 : end]),
-        }
+        return _source_page(root, path, _read_source(path), action)
     query = text_field(action.get("query"), "search query")
-    paths = (
-        [path]
-        if path is not None
-        else [
-            entry
-            for directory in (root / "raychat", root / "plugins")
-            for entry in sorted(directory.rglob("*"))
-            if entry.is_file() and entry.suffix in {".py", ".json"}
-        ]
-    )
+    return _search(root, [path] if path is not None else _source_paths(root), query)
+
+
+def _search(root: Path, paths: Iterable[Path], query: str) -> dict[str, object]:
     matches: list[dict[str, object]] = []
+    result: dict[str, object] = {"matches": matches, "truncated": False}
     for entry in paths:
-        if not entry.resolve().is_relative_to(root):
-            continue
+        data = _read_source(_path(root, entry.relative_to(root).as_posix()))
         for number, line in enumerate(
-            entry.read_text(encoding="utf-8").splitlines(),
+            data.decode("utf-8").splitlines(),
             1,
         ):
             if query.casefold() in line.casefold():
+                if not matches:
+                    result["context"] = _search_context(root, entry, data, number)
                 matches.append({
-                    "path": str(entry.relative_to(root)),
+                    "path": entry.relative_to(root).as_posix(),
                     "line": number,
                     "text": line,
                     "read_action": {
                         "action": "core_source",
-                        "path": str(entry.relative_to(root)),
+                        "path": entry.relative_to(root).as_posix(),
                         "start": max(1, number - 40),
                     },
                 })
                 if len(matches) == _SEARCH_RESULTS:
-                    return _search_result(root, matches, truncated=True)
-    return _search_result(root, matches, truncated=False)
+                    result["truncated"] = True
+                    return result
+    return result
 
 
-def _search_result(
+def _search_context(
     root: Path,
-    matches: list[dict[str, object]],
-    *,
-    truncated: bool,
+    path: Path,
+    data: bytes,
+    line: int,
 ) -> dict[str, object]:
-    result: dict[str, object] = {"matches": matches, "truncated": truncated}
-    if not matches:
-        return result
-    first = matches[0]
-    path = _path(root, first["path"])
-    line = integer_field(first["line"], "line", minimum=1)
     start = max(1, line - 40)
     if path.suffix == ".py":
         try:
             blocks = [
                 node
-                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                for node in ast.walk(ast.parse(data.decode("utf-8")))
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.lineno <= line <= (node.end_lineno or node.lineno)
             ]
@@ -189,8 +237,7 @@ def _search_result(
             blocks = []
         if blocks:
             start = max(line - _PAGE_LINES + 1, *(node.lineno for node in blocks))
-    result["context"] = _source(root, {"path": first["path"], "start": start})
-    return result
+    return _source_page(root, path, data, {"start": start})
 
 
 def _changes(root: Path, action: Mapping[str, object]) -> dict[str, bytes]:
@@ -199,8 +246,8 @@ def _changes(root: Path, action: Mapping[str, object]) -> dict[str, bytes]:
     for raw in array_field(action.get("files"), "files"):
         item = configuration_fields(raw, "source edit")
         path = _path(root, item.get("path"))
-        name = str(path.relative_to(root))
-        data = path.read_bytes()
+        name = path.relative_to(root).as_posix()
+        data = _read_source(path)
         if name in changes or hashlib.sha256(data).hexdigest() != item.get("sha256"):
             message = "Duplicate or stale source edit; read the active source again."
             raise ValueError(message)
@@ -254,10 +301,13 @@ def _validate(root: Path, action: dict[str, object]) -> None:
 
 def _status(bridge: CoreBridge) -> dict[str, object]:
     diagnostics = ""
-    if bridge.diagnostics is not None and bridge.diagnostics.is_file():
-        with bridge.diagnostics.open("rb") as stream:
-            stream.seek(max(0, bridge.diagnostics.stat().st_size - 24000))
-            diagnostics = stream.read(24000).decode("utf-8", errors="replace")
+    if bridge.diagnostics is not None:
+        with suppress(FileNotFoundError):
+            diagnostics = read_regular(
+                bridge.diagnostics,
+                24000,
+                from_end=True,
+            ).decode("utf-8", errors="replace")
     return {
         "status": bridge.status,
         "phase": bridge.status,

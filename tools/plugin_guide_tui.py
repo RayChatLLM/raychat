@@ -70,7 +70,7 @@ async def _run_catalog_script(script: str) -> None:
 
 
 def _prepare_examples(case: Case) -> _GuideExamples:
-    guide = (case.root / "docs/PLUGINS.md").read_text()
+    guide = (case.root / "docs/PLUGINS.md").read_text(encoding="utf-8")
     manifests: dict[str, dict[str, object]] = {}
     for raw in _blocks(guide, "json"):
         if not raw.lstrip().startswith("{"):
@@ -85,7 +85,7 @@ def _prepare_examples(case: Case) -> _GuideExamples:
     }
     probe = case.probe / "provider.py"
     marker = '        if prompt == "START_WORKFLOW":'
-    source = probe.read_text()
+    source = probe.read_text(encoding="utf-8")
     if source.count(marker) != 1:
         error_message = "Shared terminal provider fixture changed"
         raise AssertionError(error_message)
@@ -95,6 +95,7 @@ def _prepare_examples(case: Case) -> _GuideExamples:
             '        if prompt == "USE_DOCUMENTED_GREET":\n'
             '            return json.dumps({"action": "greet"})\n' + marker,
         ),
+        encoding="utf-8",
     )
     return _GuideExamples(guide, manifests, sources)
 
@@ -109,8 +110,14 @@ def _exercise_services(
     chat.command_complete("/plugins new dev/hello", "created")
     for identifier, path in (("hello", hello), ("salute", salute)):
         path.mkdir(parents=True, exist_ok=True)
-        (path / "plugin.json").write_text(json_text(examples.manifests[identifier]))
-        (path / "__init__.py").write_text(examples.sources[identifier] + "\n")
+        (path / "plugin.json").write_text(
+            json_text(examples.manifests[identifier]),
+            encoding="utf-8",
+        )
+        (path / "__init__.py").write_text(
+            examples.sources[identifier] + "\n",
+            encoding="utf-8",
+        )
     chat.command_complete("/plugins check dev/hello", "commands")
     chat.command_complete("/plugins link dev/hello", "packages")
     chat.command_complete("/greet", "Hello (call 1)")
@@ -123,7 +130,10 @@ def _exercise_services(
     object_field(examples.manifests["hello"]["defaults"], "defaults")["greeting"] = (
         "Ahoy"
     )
-    (hello / "plugin.json").write_text(json_text(examples.manifests["hello"]))
+    (hello / "plugin.json").write_text(
+        json_text(examples.manifests["hello"]),
+        encoding="utf-8",
+    )
     chat.command_complete("/greet", "Ahoy (call 3)")
     chat.command_complete("USE_DOCUMENTED_GREET", "Greeting tool completed")
     chat.wait("WORKFLOW_FINISHED")
@@ -142,7 +152,10 @@ def _exercise_services(
     object_field(examples.manifests["hello"]["defaults"], "defaults")["greeting"] = (
         "Hola"
     )
-    (hello / "plugin.json").write_text(json_text(examples.manifests["hello"]))
+    (hello / "plugin.json").write_text(
+        json_text(examples.manifests["hello"]),
+        encoding="utf-8",
+    )
     chat.command_complete("/salute", "Hola")
     chat.command_complete("/plugins uninstall hello", "dependency")
     chat.command_complete("/greet", "Hola (call 6)")
@@ -156,12 +169,18 @@ def _exercise_services(
     )
 
     object_field(examples.manifests["hello"]["defaults"], "defaults")["greeting"] = ""
-    (hello / "plugin.json").write_text(json_text(examples.manifests["hello"]))
+    (hello / "plugin.json").write_text(
+        json_text(examples.manifests["hello"]),
+        encoding="utf-8",
+    )
     chat.command_complete("/greet", "Hola (call 7)")
     object_field(examples.manifests["hello"]["defaults"], "defaults")["greeting"] = (
         "Recovered"
     )
-    (hello / "plugin.json").write_text(json_text(examples.manifests["hello"]))
+    (hello / "plugin.json").write_text(
+        json_text(examples.manifests["hello"]),
+        encoding="utf-8",
+    )
     chat.command_complete("/greet", "Recovered (call 8)")
     case.checks.append(
         "invalid live settings retain the working generation and recover after repair",

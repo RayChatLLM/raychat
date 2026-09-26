@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import TYPE_CHECKING
 
+from raychat.filesystem import WORKSPACE_STAGE_PREFIX, is_link_or_reparse_point
 from raychat.validation import (
     ConfigurationError,
     array_field,
@@ -66,16 +67,24 @@ def copy_workspace(
         ".agents",
     }
     excluded = source / config.directory
+    metadata = {
+        source / name
+        for name in (".raychat/candidate.transaction.json", ".raychat/filesystem.lock")
+    }
 
     def walk(directory: Path) -> None:
         nonlocal files, size
         for path in sorted(directory.iterdir()):
             check()
             secret = path.name == ".env" or path.name.startswith(".env.")
+            if path in metadata or path.name.casefold().startswith(
+                WORKSPACE_STAGE_PREFIX,
+            ):
+                continue
             if (
                 path.name in ignored
                 or secret
-                or path.is_symlink()
+                or is_link_or_reparse_point(path)
                 or path == excluded
                 or path.parts[-2:] in {(".raychat", "sessions"), (".raychat", "live")}
             ):

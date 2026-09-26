@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from raychat.filesystem import read_regular
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -114,6 +115,11 @@ class SkillStore:
     def discover(cls, roots: Iterable[str | Path]) -> Self:
         """Discover configured skills in deterministic path order.
 
+        Operator-selected roots, immediate child directories and skill files may
+        intentionally follow links. Read only regular descriptors, close before
+        parsing, and never retry a read. Sources must remain quiescent during
+        discovery; existing-file deduplication does not reserve their identities.
+
         Returns
         -------
         Self
@@ -127,16 +133,13 @@ class SkillStore:
 
         """
         candidates: list[Path] = []
-        seen_paths: set[str] = set()
         for raw_root in roots:
             root = Path(raw_root).expanduser()
             possible = _root_candidates(root)
             for path in possible:
-                identity = os.path.normcase(str(path.resolve()))
-                if identity not in seen_paths:
-                    seen_paths.add(identity)
+                if not any(path.samefile(candidate) for candidate in candidates):
                     candidates.append(path)
-        candidates.sort(key=_path_identity)
+        candidates.sort(key=_path_sort)
         if len(candidates) > MAX_SKILLS:
             error_message = f"At most {MAX_SKILLS} skills may be configured."
             raise ValueError(error_message)
@@ -144,8 +147,7 @@ class SkillStore:
         skills: list[Skill] = []
         total = 0
         for source in candidates:
-            with source.open("rb") as stream:
-                raw = stream.read(MAX_SKILL_BYTES + 1)
+            raw = read_regular(source, MAX_SKILL_BYTES + 1)
             if len(raw) > MAX_SKILL_BYTES:
                 error_message = f"Skill exceeds {MAX_SKILL_BYTES} bytes: {source}"
                 raise ValueError(error_message)
@@ -275,8 +277,9 @@ def _frontmatter(lines: list[str], source: Path) -> tuple[dict[str, str], int]:
     return metadata, body_start
 
 
-def _path_identity(path: Path) -> str:
-    return os.path.normcase(str(path.resolve()))
+def _path_sort(path: Path) -> tuple[str, str]:
+    text = str(path.resolve())
+    return text.casefold(), text
 
 
 def _path_order(path: Path) -> str:

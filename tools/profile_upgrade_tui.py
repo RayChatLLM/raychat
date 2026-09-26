@@ -282,7 +282,7 @@ class Scenario:
         )
         edited = self.home / "plugins/edited/__init__.py"
         edited.write_text(
-            edited.read_text().replace("EDITED_V1", "EDITED_LOCAL"),
+            edited.read_text(encoding="utf-8").replace("EDITED_V1", "EDITED_LOCAL"),
             encoding="utf-8",
         )
         receipt = self.receipt()
@@ -495,7 +495,8 @@ class Scenario:
             write_json(path / "plugin.json", document)
             (path / "__init__.py").write_text(
                 "from pathlib import Path\n"
-                f"Path({str(marker)!r}).write_text('old plugin imported')\n"
+                f"Path({str(marker)!r}).write_text("
+                "'old plugin imported', encoding='utf-8')\n"
                 "raise RuntimeError('SDK3_PACKAGE_EXECUTED')\n",
                 encoding="utf-8",
             )
@@ -518,7 +519,7 @@ class Scenario:
             record["resolved"] = str(archive)
         edited = self.home / "plugins/edited/__init__.py"
         edited.write_text(
-            edited.read_text().replace("EDITED_V1", "EDITED_LOCAL"),
+            edited.read_text(encoding="utf-8").replace("EDITED_V1", "EDITED_LOCAL"),
             encoding="utf-8",
         )
         write_json(self.home / "plugins.lock.json", receipt)

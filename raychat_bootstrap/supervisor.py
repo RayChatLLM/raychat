@@ -13,10 +13,17 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
+from raychat.filesystem import (
+    append_owned,
+    read_regular,
+    run_filesystem_task,
+    write_bytes_async,
+)
 from raychat.provider_settings import provider_settings
 from raychat.ui.terminal import TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
@@ -67,7 +74,14 @@ class Supervisor:
     """Keep the terminal usable through validation, activation and core failures."""
 
     def __init__(self, source: Path, argv: Sequence[str], directory: Path) -> None:
-        """Capture the evaluator and establish persistent recovery metadata."""
+        """Capture the evaluator and establish persistent recovery metadata.
+
+        Raises
+        ------
+        ValueError
+            If the selected configuration exceeds the bootstrap transport limit.
+
+        """
         self.argv = list(argv)
         self.workspace = _workspace(argv)
         self.releases = Releases(source, directory)
@@ -96,7 +110,11 @@ class Supervisor:
         self.persistence_error = ""
         self.config = directory / "configuration.json"
         selected = Path(os.environ.get("RAYCHAT_CONFIG", source / "raychat.json"))
-        configuration = decode(selected.read_bytes().rstrip() + b"\n")
+        raw_configuration = read_regular(selected, MAX_MESSAGE + 1)
+        if len(raw_configuration) > MAX_MESSAGE:
+            message = "Bootstrap configuration exceeds the transport limit."
+            raise ValueError(message)
+        configuration = decode(raw_configuration.rstrip() + b"\n")
         plugins = dict(configuration_fields(configuration["plugins"], "plugins"))
         configuration["plugins"] = plugins
         profile = plugins.get("profile")
@@ -122,7 +140,7 @@ class Supervisor:
 
     def restore_recovery(self, manifest: Path, version: str) -> None:
         """Restore retained release choices and state after a supervisor restart."""
-        saved = decode(manifest.read_bytes())
+        saved = decode(read_regular(manifest, MAX_MESSAGE + 1, follow_symlinks=False))
         self.initial = recovery_release(saved["known_good"])
         self.previous = recovery_release(saved["previous"])
         self.start_release = self.previous if version == "previous" else self.initial
@@ -221,21 +239,7 @@ class Supervisor:
     @staticmethod
     async def _replace(path: Path, data: bytes) -> None:
         """Flush and close before replacing; tolerate short Windows sharing locks."""
-        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-        try:
-            with temporary.open("wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            # Eleven attempts over at most half a second of retry sleeps.
-            for _attempt in range(10):
-                if _replace_if_available(temporary, path):
-                    return
-                await asyncio.sleep(0.05)
-            temporary.replace(path)
-        finally:
-            with contextlib.suppress(OSError):
-                temporary.unlink(missing_ok=True)
+        await write_bytes_async(path, data)
 
     def _persistence_failure(self, error: OSError) -> None:
         self.persistence_error = f"Recovery state could not be saved: {error}"
@@ -246,8 +250,13 @@ class Supervisor:
         displayed = text
         if self.persistence_error:
             displayed += (" | " if text else "") + self.persistence_error
-        with contextlib.suppress(OSError), self.log.open("ab") as stream:
-            stream.write(encode({"time": time.time(), "status": displayed}))
+        try:
+            append_owned(self.log, encode({"time": time.time(), "status": displayed}))
+        except (OSError, ValueError):
+            logging.getLogger(__name__).exception(
+                "Supervisor diagnostic append failed path=%r",
+                str(self.log),
+            )
         if self.current is not None and self.current.process.returncode is None:
             with contextlib.suppress(OSError, RuntimeError):
                 self.current.send("status", text=displayed)
@@ -268,9 +277,10 @@ class Supervisor:
             core.captured.set()
 
     def _changed_plugins(self, release: Release) -> list[str]:
-        if self.current is None:
+        current = self.current
+        if current is None:
             return []
-        previous = self.current.release.path / "plugins"
+        previous = current.release.path / "plugins"
         updated = release.path / "plugins"
         names = {
             path.name
@@ -295,9 +305,12 @@ class Supervisor:
         recover_history: bool | Literal["retained"] = False,
         safe: bool = False,
     ) -> Core:
-        release.verify()
+        await run_filesystem_task(release.verify)
+        changed_plugins = await run_filesystem_task(
+            partial(self._changed_plugins, release),
+        )
         log = (self.releases.directory / ("core-" + uuid.uuid4().hex + ".log")).open(
-            "ab",
+            "xb",
         )
         environment = {
             **os.environ,
@@ -328,7 +341,12 @@ class Supervisor:
                 limit=MAX_MESSAGE + 1,
             )
         except BaseException:
-            log.close()
+            try:
+                log.close()
+            except OSError:
+                logging.getLogger(__name__).exception(
+                    "Child diagnostic close failed after launch failure",
+                )
             raise
         core = Core(process, release, log)
         self.children.append(core)
@@ -349,7 +367,7 @@ class Supervisor:
             probe=probe,
             workspace=str(workspace),
             recover_history=recover_history,
-            changed_plugins=self._changed_plugins(release),
+            changed_plugins=changed_plugins,
         )
         core.reader = asyncio.create_task(self._reader(core))
         return core
@@ -365,30 +383,42 @@ class Supervisor:
     async def _stop(core: Core, *, force: bool = False) -> None:
         core.expected_exit = True
         try:
-            if core.process.returncode is None:
-                if not force:
-                    try:
-                        core.send("retire")
-                    except (BrokenPipeError, ConnectionError, OSError, RuntimeError):
-                        force = True
-                if force and core.process.returncode is None:
-                    with contextlib.suppress(ProcessLookupError):
-                        core.process.kill()
-                try:
-                    await asyncio.wait_for(core.process.wait(), timeout=10)
-                except asyncio.TimeoutError:
-                    with contextlib.suppress(ProcessLookupError):
-                        core.process.kill()
-                    await asyncio.wait_for(core.process.wait(), timeout=10)
-            if core.reader is not None:
-                try:
-                    await asyncio.wait_for(core.reader, timeout=2)
-                except asyncio.TimeoutError:
-                    core.reader.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await core.reader
-        finally:
+            await Supervisor._retire_core(core, force=force)
+        except BaseException:
+            try:
+                core.log.close()
+            except OSError:
+                logging.getLogger(__name__).exception(
+                    "Child diagnostic close failed after shutdown failure",
+                )
+            raise
+        else:
             core.log.close()
+
+    @staticmethod
+    async def _retire_core(core: Core, *, force: bool) -> None:
+        if core.process.returncode is None:
+            if not force:
+                try:
+                    core.send("retire")
+                except (BrokenPipeError, ConnectionError, OSError, RuntimeError):
+                    force = True
+            if force and core.process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    core.process.kill()
+            try:
+                await asyncio.wait_for(core.process.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    core.process.kill()
+                await asyncio.wait_for(core.process.wait(), timeout=10)
+        if core.reader is not None:
+            try:
+                await asyncio.wait_for(core.reader, timeout=2)
+            except asyncio.TimeoutError:
+                core.reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await core.reader
 
     async def _stop_live_children(self) -> None:
         """Kill every unreaped child while preserving the original failure."""
@@ -465,17 +495,21 @@ class Supervisor:
             ).items()
         }
         source = text_field(message.get("source", ""), "source path", allow_empty=True)
-        candidate = await asyncio.to_thread(
-            self.releases.capture,
-            Path(source) if source else self.releases.source,
-            changes,
+        candidate = await run_filesystem_task(
+            partial(
+                self.releases.capture,
+                Path(source) if source else self.releases.source,
+                changes,
+            ),
         )
         overlay = message.get("overlay")
         if overlay is not None:
-            await asyncio.to_thread(
-                (candidate / "harness.txt").write_text,
-                text_field(overlay, "overlay", allow_empty=True),
-                encoding="utf-8",
+            await run_filesystem_task(
+                partial(
+                    (candidate / "harness.txt").write_text,
+                    text_field(overlay, "overlay", allow_empty=True),
+                    encoding="utf-8",
+                ),
             )
         self._status("Update: validating imports, types, tests and packaging")
         release = await self.releases.validate(
@@ -604,7 +638,9 @@ class Supervisor:
             backup = self.releases.directory / "recovery-before-safe.json"
             backup_saved = await self._save(backup, self.last_state)
             try:
-                saved = retained_state(Path(self.checkpoints[target.identity]))
+                saved = await run_filesystem_task(
+                    partial(retained_state, Path(self.checkpoints[target.identity])),
+                )
                 replacement = await self._restore_state(target, saved, retained=True)
                 status = "Core recovered from retained state; stale queued work removed"
             except Exception:
@@ -780,15 +816,28 @@ class Supervisor:
             if not saved:
                 self.claimed_results[identifier] = result
 
+    def _diagnostics(self) -> str:
+        try:
+            data = read_regular(
+                self.log,
+                6000,
+                follow_symlinks=False,
+                from_end=True,
+            )
+        except FileNotFoundError:
+            return ""
+        except (OSError, ValueError):
+            logging.getLogger(__name__).exception(
+                "Supervisor diagnostic read failed path=%r",
+                str(self.log),
+            )
+            return ""
+        return data.decode("utf-8", errors="replace")
+
     async def _update_result(self, message: Mapping[str, object], status: str) -> None:
         identifier = message.get("request_id")
         if not isinstance(identifier, str) or not identifier:
             return
-        diagnostics = ""
-        if status != "activated" and self.log.is_file():
-            with self.log.open("rb") as stream:
-                stream.seek(max(0, self.log.stat().st_size - 6000))
-                diagnostics = stream.read(6000).decode("utf-8", errors="replace")
         result: dict[str, object] = {
             "request_id": identifier,
             "action": "core_update"
@@ -799,7 +848,7 @@ class Supervisor:
             "request": message.get("prompt", ""),
             "session_id": message.get("session_id", ""),
             "detail": self.status,
-            "diagnostics": diagnostics,
+            "diagnostics": "" if status == "activated" else self._diagnostics(),
             "active_release": None
             if self.current is None
             else self.current.release.identity,
@@ -974,22 +1023,6 @@ class Supervisor:
         return result
 
 
-def _replace_if_available(temporary: Path, destination: Path) -> bool:
-    """Attempt atomic replacement without waiting on transient sharing locks.
-
-    Returns
-    -------
-    bool
-        Whether replacement succeeded rather than encountering a permission error.
-
-    """
-    try:
-        temporary.replace(destination)
-    except PermissionError:
-        return False
-    return True
-
-
 def _workspace(argv: Sequence[str]) -> Path:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--workspace", default=SETTINGS.chat.workspace)
@@ -1023,7 +1056,9 @@ def main() -> int:
     version = os.environ.get("RAYCHAT_RECOVERY_VERSION", "known-good")
     source = Path(__file__).resolve().parents[1]
     if manifest is not None:
-        saved = decode(Path(manifest).read_bytes())
+        saved = decode(
+            read_regular(Path(manifest), MAX_MESSAGE + 1, follow_symlinks=False),
+        )
         source = recovery_release(
             saved["previous" if version == "previous" else "known_good"],
         ).path

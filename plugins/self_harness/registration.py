@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from raychat.event_types import AFTER_TOOL, CONTEXT, Context
+from raychat.filesystem import read_regular
 from raychat.sdk import CommandDefinition, ToolDefinition, workspace_path
 from raychat.validation import configuration_fields
+from raychat.workspace_files import workspace_access
 
 from .configuration import SelfHarnessSettings
 from .configuration import validate as validate_settings
@@ -22,6 +24,18 @@ if TYPE_CHECKING:
     from raychat.sdk import Action, PluginAPI, PluginContext
 
     from .records import HarnessResult
+
+
+def _overlay(workspace: Path, path: Path, limit: int) -> str:
+    with workspace_access(workspace, existing_only=True):
+        try:
+            data = read_regular(path, limit + 1)
+        except FileNotFoundError:
+            data = b""
+    if len(data) > limit:
+        message = "Active self-harness overlay exceeds its byte limit."
+        raise ValueError(message)
+    return data.decode("utf-8")
 
 
 def _installation(api: PluginAPI) -> HarnessInstallation:
@@ -45,15 +59,7 @@ def _installation(api: PluginAPI) -> HarnessInstallation:
         if release_overlay
         else workspace_path(workspace, config.overlay_path)
     )
-    if overlay_path.exists():
-        with overlay_path.open("rb") as stream:
-            data = stream.read(config.max_overlay_bytes + 1)
-        if len(data) > config.max_overlay_bytes:
-            message = "Active self-harness overlay exceeds its byte limit."
-            raise ValueError(message)
-        overlay = data.decode("utf-8")
-    else:
-        overlay = ""
+    overlay = _overlay(workspace, overlay_path, config.max_overlay_bytes)
     return HarnessInstallation(
         workspace,
         workspace_path(workspace, config.directory),

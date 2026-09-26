@@ -121,7 +121,7 @@ def run(
             "chat provider",
         )
         provider["request_options"] = request_options
-        case.config.write_text(json_text(config))
+        case.config.write_text(json_text(config), encoding="utf-8")
     path = case.output / "report.json"
     chat = TerminalChat(
         case.root,
@@ -145,7 +145,10 @@ def run(
         wait_done(chat, path.exists, 600)
         report = read_object(path)
         summary = summarize_report(report)
-        (case.output / "result.json").write_text(json_text(summary, indent=2))
+        (case.output / "result.json").write_text(
+            json_text(summary, indent=2),
+            encoding="utf-8",
+        )
         if not summary["measured_benefit"]:
             error_message = (
                 "This run did not demonstrate improvement; full evidence was retained"

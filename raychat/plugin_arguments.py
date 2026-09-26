@@ -10,16 +10,15 @@ from typing import TYPE_CHECKING, TypedDict
 from .composition import package_manager
 from .configuration import SETTINGS
 from .packages import read_manifest
-from .plugin_manager import read_json
 from .sdk import PluginError
 from .session_options import paths
 from .validation import (
     array_field,
     configuration_fields,
     plain,
-    string_list_field,
     text_field,
 )
+from .workspace_trust import workspace_trust
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -117,37 +116,35 @@ def _declarations(
         _add_declaration(target, item, settings, environ)
 
 
-def _selected_packages(argv: Sequence[str] | None) -> dict[str, Path]:
+def _selected_packages(argv: Sequence[str] | None) -> dict[str, Manifest]:
     empty_plugins: list[str] = []
     probe = argparse.ArgumentParser(add_help=False)
     probe.add_argument("--workspace", default=SETTINGS.chat.workspace)
     probe.add_argument("--plugin", action="append", default=empty_plugins)
-    probe.add_argument("--trust-workspace")
+    probe.add_argument("--trust-workspace", choices=("grant", "revoke"))
     probe.add_argument("--no-plugins", action="store_true")
     known, _ = probe.parse_known_args([] if argv is None else argv)
     raw: object = vars(known)
     fields = configuration_fields(raw, "plugin discovery arguments")
     workspace = text_field(fields["workspace"], "workspace")
-    home = Path.home() / SETTINGS.storage.home_directory
-    trusted = string_list_field(
-        read_json(home / SETTINGS.storage.trust_filename, []),
-        "trusted workspaces",
-        allow_empty=True,
-    )
     manager = package_manager(
         workspace,
         trusted=fields.get("trust_workspace") == "grant"
-        or str(Path(workspace).resolve()) in trusted,
+        or (fields.get("trust_workspace") != "revoke" and workspace_trust(workspace)),
         install_profile=not fields.get("no_plugins"),
     )
-    packages = manager.paths(include_disabled=True)
-    for value in (*SETTINGS.plugins.paths, *(paths(fields["plugin"]) or ())):
-        path = Path(value).expanduser().resolve()
-        identifier = read_manifest(path).id
-        if identifier in packages and packages[identifier] != path:
-            raise PluginError("Ambiguous plugin ID: " + identifier)
-        packages[identifier] = path
-    return packages
+    with manager.source_read():
+        packages = manager.paths(include_disabled=True)
+        for value in (*SETTINGS.plugins.paths, *(paths(fields["plugin"]) or ())):
+            path = Path(value).expanduser().resolve()
+            identifier = read_manifest(path).id
+            if identifier in packages and packages[identifier] != path:
+                raise PluginError("Ambiguous plugin ID: " + identifier)
+            packages[identifier] = path
+        return {
+            name: read_manifest(path, require_current_sdk=False)
+            for name, path in packages.items()
+        }
 
 
 def add_plugin_arguments(
@@ -156,5 +153,5 @@ def add_plugin_arguments(
     argv: Sequence[str] | None = None,
 ) -> None:
     """Read package metadata without executing registration during argument parsing."""
-    for path in _selected_packages(argv).values():
-        _declarations(parser, read_manifest(path, require_current_sdk=False), environ)
+    for manifest in _selected_packages(argv).values():
+        _declarations(parser, manifest, environ)

@@ -544,6 +544,15 @@ activation failure invokes `rollback(error)`; successful activation invokes
 The agent `plugins` tool accepts `{"action":"plugins","command":"install ..."}`.
 Finish the current turn with `done` before using a newly queued capability.
 
+Self-Harness file promotion holds the package and workspace locks through
+validation and records completed stages and undo files before publication.
+Startup and cooperating filesystem operations recover interrupted candidates;
+conflicting external edits preserve the record and undo files for correction.
+A committed decision permits cleanup only, so recovery does not revert later
+user edits. This does not provide power-loss durability or coordinate older
+writers and external editors. The `.raychat-candidate-` directory prefix is
+reserved for private stages and excluded from package source captures.
+
 Core, SDK and terminal-controller source changes still require a restart.
 
 ## Standard distribution
@@ -570,6 +579,9 @@ projects live independently in `plugins/ID`; startup never loads that directory.
 `python3 -m tools.build_plugin_catalog` builds deterministic archives and a catalog
 in `plugin_catalog/`. The configured `plugins.profile` names a local release
 profile; its catalog contains full manifests, exact versions and archive hashes.
+Generated profiles pin an immutable, content-addressed catalog, whose archives
+also have content-addressed names. Rebuilding publishes these completed files
+before replacing the profile and retains older artifacts for existing readers.
 On first launch, the ordinary package manager installs this profile into the user
 plugin directory. Metadata is read before CLI parsing without executing plugins.
 

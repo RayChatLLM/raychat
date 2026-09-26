@@ -5,37 +5,23 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
-import tempfile
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-@dataclass(frozen=True)
-class CheckerOutput:
-    """Retain a checker's complete output and actual process exit status."""
-
-    returncode: int
-    stdout: str
-    stderr: str
+from tools.checker_process import CheckerOutput, CheckerWorkspace
 
 
-async def _mypy(root: Path, args: list[str]) -> CheckerOutput:
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "mypy",
-        "--strict",
-        *args,
-        cwd=root,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await process.communicate()
-    return CheckerOutput(
-        await process.wait(),
-        stdout.decode("utf-8", errors="replace"),
-        stderr.decode("utf-8", errors="replace"),
+async def _mypy(
+    workspace: CheckerWorkspace,
+    root: Path,
+    args: list[str],
+) -> CheckerOutput:
+    return await workspace.run(
+        (sys.executable, "-m", "mypy", "--strict", *args),
+        root,
     )
 
 
@@ -45,10 +31,10 @@ async def _contract_rejections(root: Path) -> int:
         sys.stderr.write("Missing negative type-contract fixtures.\n")
         return 1
     expected: Counter[tuple[str, int, str]] = Counter()
-    with tempfile.TemporaryDirectory(prefix="raychat-contract-types-") as directory:
+    async with CheckerWorkspace(prefix="raychat-contract-types-") as workspace:
         paths = []
         for fixture in fixtures:
-            path = Path(directory) / fixture.stem
+            path = workspace.path / fixture.stem
             source = fixture.read_text(encoding="utf-8")
             path.write_text(source, encoding="utf-8")
             paths.append(str(path))
@@ -59,6 +45,7 @@ async def _contract_rejections(root: Path) -> int:
                         (str(path), number, code.strip()) for code in codes.split(",")
                     )
         result = await _mypy(
+            workspace,
             root,
             [
                 "--show-error-codes",
@@ -67,7 +54,7 @@ async def _contract_rejections(root: Path) -> int:
                 # Mypy can otherwise reuse cached diagnostics with the previous
                 # temporary fixture's absolute path, breaking exact comparisons.
                 "--cache-dir",
-                str(Path(directory) / "cache"),
+                str(workspace.path / "cache"),
                 *paths,
             ],
         )
@@ -109,13 +96,13 @@ def _display(result: CheckerOutput) -> int:
 
 async def _main(root: Path) -> int:
     source = await asyncio.to_thread((root / "raychat.py").read_bytes)
-    results = [_display(await _mypy(root, []))]
     # Check identical launcher bytes as a uniquely named module. Checking raychat.py
     # together with its namesake package would make mypy report a duplicate module.
-    with tempfile.TemporaryDirectory(prefix="raychat-launcher-types-") as directory:
-        launcher = Path(directory) / "raychat_launcher.py"
-        await asyncio.to_thread(launcher.write_bytes, source)
-        results.append(_display(await _mypy(root, [str(launcher)])))
+    async with CheckerWorkspace(prefix="raychat-launcher-types-") as workspace:
+        results = [_display(await _mypy(workspace, root, []))]
+        launcher = workspace.path / "raychat_launcher.py"
+        launcher.write_bytes(source)
+        results.append(_display(await _mypy(workspace, root, [str(launcher)])))
     results.append(await _contract_rejections(root))
     return int(any(results))
 

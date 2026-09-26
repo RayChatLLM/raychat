@@ -6,17 +6,181 @@ import contextlib
 import io
 import os
 import socket
+import tempfile
 import unittest
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, TypeVar
 from unittest import mock
 
+from raychat.filesystem import OwnedTemporaryDirectory
+from raychat.sdk import (
+    HTTP_PROVIDER,
+    SUBAGENT_FACTORY,
+    ChildSessionInfo,
+    ServiceKey,
+    SubagentFactoryService,
+)
 from raychat.validation import integer_field, object_field
-from tests.plugin_support import plugin_module
+from raychat.workers import AgentWorker
+from tests.assertions import TypedTestCase
+from tests.plugin_support import plugin_module, registered_service
 
 if TYPE_CHECKING:
+    from http.server import ThreadingHTTPServer
+
     from plugins.optimization import workflow_benchmark as benchmark
 else:
     benchmark = plugin_module("optimization.workflow_benchmark")
+
+_Service = TypeVar("_Service")
+
+
+class _RuntimeFixture:
+    """Supply controlled runtime shutdown while the real gateway runs normally."""
+
+    def __init__(
+        self,
+        factory: SubagentFactoryService,
+        events: list[str],
+        close_error: BaseException | None,
+    ) -> None:
+        self.services: dict[str, object] = {
+            SUBAGENT_FACTORY.name: factory,
+            HTTP_PROVIDER.name: registered_service("optimization", HTTP_PROVIDER),
+        }
+        self.events = events
+        self.close_error = close_error
+
+    def context(self, _name: str) -> _RuntimeFixture:
+        return self
+
+    def require_service(self, key: ServiceKey[_Service]) -> _Service:
+        return key.validate(self.services[key.name])
+
+    def close(self) -> None:
+        self.events.append("close")
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class WorkflowCleanupTests(TypedTestCase):
+    """Keep live-workspace ownership when shutdown or verification fails."""
+
+    def test_all_cleanup_steps_run_without_masking_primary_failure(self) -> None:
+        """A child snapshot failure cannot skip close or replace a workflow error."""
+        primary = RuntimeError("workflow failed")
+        cancelled = KeyboardInterrupt()
+        snapshot = RuntimeError("child enumeration failed")
+        shutdown = RuntimeError("runtime close failed")
+        cases = (
+            (None, None, None),
+            (primary, None, None),
+            (None, snapshot, None),
+            (None, None, shutdown),
+            (primary, snapshot, shutdown),
+            (cancelled, snapshot, shutdown),
+        )
+        for run_error, snapshot_error, close_error in cases:
+            with self.subTest(errors=(run_error, snapshot_error, close_error)):
+                self._cleanup_case(run_error, snapshot_error, close_error)
+
+    def _cleanup_case(
+        self,
+        run_error: BaseException | None,
+        snapshot_error: BaseException | None,
+        close_error: BaseException | None,
+        *,
+        alive: bool = False,
+    ) -> None:
+        events: list[str] = []
+
+        def children() -> tuple[ChildSessionInfo, ...]:
+            events.append("children")
+            if snapshot_error is not None:
+                raise snapshot_error
+            return (ChildSessionInfo("stuck", worker),) if alive else ()
+
+        factory = SubagentFactoryService(
+            configure=lambda _setup: None,
+            children=children,
+        )
+        runtime = _RuntimeFixture(factory, events, close_error)
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = OwnedTemporaryDirectory(
+                prefix="workflow-",
+                parent=Path(temporary),
+            )
+            root = Path(scratch.name)
+            worker = AgentWorker(lambda _messages: "", root)
+            with (
+                mock.patch.object(
+                    benchmark,
+                    "OwnedTemporaryDirectory",
+                    return_value=scratch,
+                ),
+                mock.patch.object(benchmark, "create_runtime", return_value=runtime),
+                mock.patch.object(benchmark, "_run_batches", side_effect=run_error),
+                mock.patch.object(
+                    benchmark,
+                    "_aggregate",
+                    return_value=list[benchmark.LedgerRow](),
+                ),
+                mock.patch.object(benchmark, "_followups"),
+            ):
+                expected = run_error or snapshot_error or close_error
+                try:
+                    report = benchmark.run(agents=1, padding_pages=0)
+                except (RuntimeError, KeyboardInterrupt) as error:
+                    if alive and expected is None:
+                        self.require("workers remain alive" in str(error))
+                    else:
+                        self.require(error is expected)
+                else:
+                    self.require(expected is None and not alive)
+                    self.require(report["workers_stopped"])
+            self.equal(events.count("close"), 1)
+            self.equal(events[-1], "close")
+            self.equal(
+                root.exists(),
+                snapshot_error is not None or close_error is not None or alive,
+            )
+
+    def test_live_worker_after_close_retains_workspace_and_fails(self) -> None:
+        """Retain scratch when close returns but a child still reports alive."""
+
+        def alive(_worker: AgentWorker) -> bool:
+            return True
+
+        with mock.patch.object(AgentWorker, "is_alive", property(alive)):
+            self._cleanup_case(None, None, None, alive=True)
+
+    def test_gateway_start_failure_closes_socket_and_preserves_primary(self) -> None:
+        """An unstarted server never waits for shutdown of a nonexistent thread."""
+        primary = RuntimeError("gateway thread start failed")
+        secondary = OSError("gateway socket cleanup failed")
+        closed: list[bool] = []
+
+        def close(server: ThreadingHTTPServer) -> None:
+            server.socket.close()
+            closed.append(True)
+            raise secondary
+
+        with (
+            mock.patch("threading.Thread.start", side_effect=primary),
+            mock.patch("http.server.ThreadingHTTPServer.server_close", close),
+            mock.patch(
+                "http.server.ThreadingHTTPServer.shutdown",
+                side_effect=AssertionError,
+            ),
+            mock.patch.object(benchmark, "create_runtime", side_effect=AssertionError),
+        ):
+            try:
+                benchmark.run(agents=1, padding_pages=0)
+            except RuntimeError as error:
+                self.require(error is primary)
+            else:
+                self.fail("Expected gateway startup failure")
+        self.equal(closed, [True])
 
 
 class WorkflowStressTests(unittest.TestCase):

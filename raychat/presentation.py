@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import stat
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,6 +15,7 @@ from raychat._common import (
     MAX_PROTOCOL_BYTES,
 )
 from raychat.configuration import SETTINGS
+from raychat.filesystem import open_private_append, read_regular
 
 _PARAMETER_BYTES = range(0x30, 0x40)
 _INTERMEDIATE_BYTES = range(0x20, 0x30)
@@ -120,7 +119,7 @@ def console_text(value: object, encoding: str | None = None) -> str:
 
 
 def open_private_log(path: Path) -> TextIO:
-    """Open an append-only UTF-8 log, restricting POSIX permissions to its owner.
+    """Open one owned transcript writer with explicit private-file permissions.
 
     Returns
     -------
@@ -128,16 +127,7 @@ def open_private_log(path: Path) -> TextIO:
         An append stream owned by the caller.
 
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    file_mode = SETTINGS.storage.file_mode
-    fd = os.open(path, flags, file_mode)
-    try:
-        if os.name == "posix":
-            os.fchmod(fd, file_mode)
-        return os.fdopen(fd, "a", encoding="utf-8", newline="\n")
-    except BaseException:
-        os.close(fd)
-        raise
+    return open_private_append(path, mode=SETTINGS.storage.file_mode)
 
 
 def load_protocol(path: Path) -> str:
@@ -154,19 +144,7 @@ def load_protocol(path: Path) -> str:
         When the file is oversized, empty, nonregular or contains invalid UTF-8.
 
     """
-    flags = os.O_RDONLY | _file_flag("O_BINARY") | _file_flag("O_NONBLOCK")
-    descriptor = os.open(path, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            error_message = "Protocol file must be a regular file."
-            raise ValueError(error_message)
-        stream = os.fdopen(descriptor, "rb")
-        descriptor = -1
-        with stream:
-            data = stream.read(MAX_PROTOCOL_BYTES + 1)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+    data = read_regular(path, MAX_PROTOCOL_BYTES + 1)
     if len(data) > MAX_PROTOCOL_BYTES:
         error_message = (
             f"Protocol file exceeds the {MAX_PROTOCOL_BYTES}-byte size limit."
@@ -183,11 +161,3 @@ def load_protocol(path: Path) -> str:
         error_message = "Protocol file must contain nonempty text."
         raise ValueError(error_message)
     return protocol
-
-
-def _file_flag(name: str) -> int:
-    value: object = getattr(os, name, 0)
-    if not isinstance(value, int):
-        message = "Invalid platform file flag: " + name
-        raise TypeError(message)
-    return value

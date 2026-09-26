@@ -45,6 +45,7 @@ import random
 import threading
 import warnings
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -55,6 +56,8 @@ from typing import (
     TypeVar,
     overload,
 )
+
+from raychat.filesystem import FileLock
 
 from . import serialization
 from .adapter import DataInst, GEPAAdapter, ProposalFn
@@ -1147,8 +1150,13 @@ def _run_with_loaders(
     validation: NormalizedLoader[DataId, DataInst],
     options: _RunOptions[DataInst],
 ) -> GEPAResult[object, DataId]:
-    result = _run_normalized(train, validation, options)
-    return result.map_ids(validation.original_id)
+    run_dir = options.config.engine.run_dir
+    ownership = (
+        FileLock(Path(run_dir) / "gepa.lock") if run_dir is not None else nullcontext()
+    )
+    with ownership:
+        result = _run_normalized(train, validation, options)
+        return result.map_ids(validation.original_id)
 
 
 def _build_adapter(

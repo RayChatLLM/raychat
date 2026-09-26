@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import errno
 import io
 import os
 import re
@@ -15,9 +16,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 from unittest import mock
 
+import raychat.composition as _rc_composition
 from raychat.configuration import SETTINGS
 from raychat.plugin_sources import SourceTree
-from raychat.plugins import import_plugin
+from raychat.plugins import Runtime, import_plugin
 from raychat.provider_settings import provider_settings
 from raychat.sdk import Chat, Messages, ProviderError
 from raychat.validation import (
@@ -949,6 +951,68 @@ class ProtocolSafetyTests(_OptimizationTestCase):
             _unchanged_reflection,
         )
 
+    def test_session_storage_failures_abort_optimizer_without_retry(self) -> None:
+        """Storage failures must escape evaluation and the optimizer unchanged."""
+        for code in (errno.EACCES, errno.ENOSPC, errno.ENOENT):
+            failure = OSError(code, "session storage failed", "session.jsonl")
+            with (
+                self.subTest(code=code),
+                mock.patch.object(
+                    _rc_composition,
+                    "run_session",
+                    side_effect=failure,
+                ) as run_session,
+            ):
+                try:
+                    optimize_chat_prompt.run_offline_demo()
+                except OSError as exc:
+                    self.check(condition=exc is failure)
+                else:
+                    self.fail("Session storage failure became an optimizer score.")
+                self.equal(run_session.call_count, 1)
+
+    def test_candidate_execution_failure_remains_scored_feedback(self) -> None:
+        """Candidate execution errors retain their existing diagnostic score."""
+        with mock.patch.object(
+            _rc_composition,
+            "run_session",
+            side_effect=RuntimeError("candidate exhausted its steps"),
+        ) as run_session:
+            evaluation = optimize_chat_prompt.evaluate_case(
+                optimize_chat_prompt.base_protocol(),
+                optimize_chat_prompt.VALIDATION_CASES[0],
+                optimize_chat_prompt.DeterministicTaskModel,
+            )
+        self.equal(run_session.call_count, 1)
+        self.equal(evaluation.score, 0.0)
+        self.equal(
+            evaluation.side_info["Failure"],
+            "RuntimeError: candidate exhausted its steps",
+        )
+
+    def test_tool_permission_failure_remains_an_unsuccessful_action(self) -> None:
+        """The composed session still turns tool errors into failed effects."""
+        protocol = (
+            optimize_chat_prompt.base_protocol()
+            + "\n"
+            + optimize_chat_prompt.LEARNED_VALIDATION_RULE
+            + "\n"
+        )
+        with mock.patch.object(
+            Runtime,
+            "execute",
+            side_effect=PermissionError(errno.EACCES, "tool path denied"),
+        ) as execute:
+            evaluation = optimize_chat_prompt.evaluate_case(
+                protocol,
+                optimize_chat_prompt.VALIDATION_CASES[0],
+                optimize_chat_prompt.DeterministicTaskModel,
+            )
+        self.equal(execute.call_count, 1)
+        self.equal(evaluation.score, 0.0)
+        self.equal(evaluation.side_info["Failure"], "")
+        self.equal(evaluation.side_info["ActionEffects"], [False])
+
     def test_live_reflection_provider_failure_is_not_swallowed_by_gepa(self) -> None:
         """Live reflection provider failure is not swallowed by gepa."""
         reflection_calls = 0
@@ -1019,6 +1083,54 @@ class ProtocolSafetyTests(_OptimizationTestCase):
             self.check(condition=missing in errors.getvalue())
             self.check(condition=not run.called)
 
+    def test_cli_rejects_colliding_exports_before_running_models(self) -> None:
+        """Reject equal, case-ambiguous and hard-linked output/report destinations."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "protocol.txt"
+            output.write_bytes(b"original")
+            alias = root / "alias.txt"
+            os.link(output, alias)
+            pairs = (
+                (output, output),
+                (output, alias),
+                (root / "missing", root / "MISSING"),
+            )
+            for command in ("demo", "useful-demo", "live"):
+                for protocol, report in pairs:
+                    errors = io.StringIO()
+                    with (
+                        self.subTest(command=command, report=report),
+                        mock.patch.object(
+                            optimize_chat_prompt,
+                            "_demo_command",
+                            side_effect=AssertionError,
+                        ),
+                        mock.patch.object(
+                            optimize_chat_prompt,
+                            "_useful_demo_command",
+                            side_effect=AssertionError,
+                        ),
+                        mock.patch.object(
+                            optimize_chat_prompt,
+                            "_live_command",
+                            side_effect=AssertionError,
+                        ),
+                        mock.patch("sys.stderr", errors),
+                    ):
+                        status = optimize_chat_prompt.main([
+                            command,
+                            "--output",
+                            str(protocol),
+                            "--report",
+                            str(report),
+                        ])
+                    self.equal(status, 1)
+                    self.check(condition="different paths" in errors.getvalue())
+            self.equal(output.read_bytes(), b"original")
+            self.equal(alias.read_bytes(), b"original")
+            self.check(condition=not (root / "missing").exists())
+
     def test_live_cli_uses_one_snapshot_for_both_roles(self) -> None:
         """Construct both task and reflection clients from the canonical identity."""
         fake_run = _ScriptedRun({"ok": True})
@@ -1049,6 +1161,58 @@ class ProtocolSafetyTests(_OptimizationTestCase):
             self.equal(client.url, "https://provider.example/v1/chat/completions")
             self.equal(client.model, "fixture-model")
             self.equal(client.api_key, "fixture-optimization-token")
+
+    def test_export_failure_keeps_already_published_protocol_and_old_report(
+        self,
+    ) -> None:
+        """A report failure leaves the published protocol intact without rerunning."""
+        fake_run = _ScriptedRun({"improved": True})
+        original_replace = Path.replace
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "protocol.txt"
+            report = root / "report.json"
+            for failed_path in (output, report):
+                output.write_bytes(b"old protocol")
+                report.write_bytes(b"old report")
+
+                def replace(
+                    source: Path,
+                    destination: Path,
+                    blocked: Path = failed_path,
+                ) -> Path:
+                    if destination == blocked:
+                        message = "injected export failure"
+                        raise OSError(message)
+                    return original_replace(source, destination)
+
+                with (
+                    self.subTest(failed_path=failed_path),
+                    mock.patch.object(
+                        optimize_chat_prompt,
+                        "run_offline_demo",
+                        return_value=fake_run,
+                    ) as run,
+                    mock.patch.object(Path, "replace", replace),
+                    mock.patch("sys.stderr", new=io.StringIO()),
+                ):
+                    status = optimize_chat_prompt.main([
+                        "demo",
+                        "--output",
+                        str(output),
+                        "--report",
+                        str(report),
+                    ])
+                self.equal(status, 1)
+                self.equal(run.call_count, 1)
+                self.equal(report.read_bytes(), b"old report")
+                self.equal(
+                    output.read_bytes(),
+                    b"old protocol"
+                    if failed_path == output
+                    else fake_run.best_protocol.encode("utf-8"),
+                )
+                self.equal(set(root.iterdir()), {output, report})
 
     def test_live_cli_rejects_retired_provider_selectors(self) -> None:
         """Reject endpoint, model and credential overrides for either role."""

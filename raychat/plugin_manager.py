@@ -7,10 +7,9 @@ import contextvars
 import copy
 import hashlib
 import json
-import os
-import shutil
-import tempfile
-from contextlib import contextmanager
+import logging
+import threading
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path, PureWindowsPath
@@ -20,8 +19,14 @@ from urllib.request import getproxies, proxy_bypass
 
 from raychat.event_types import CONFIGURE, Lifecycle
 
-from .file_lock import FileLock
+from .filesystem import (
+    FileLock,
+    OwnedTemporaryDirectory,
+    read_regular,
+    write_bytes,
+)
 from .http_debug import HTTPConnection, HTTPSConnection
+from .package_transactions import PackageTransaction
 from .packages import (
     MAX_BYTES,
     NAME,
@@ -48,6 +53,7 @@ from .validation import (
     object_field,
     text_field,
 )
+from .workspace_files import workspace_access
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -145,6 +151,13 @@ class CheckResult(TypedDict):
 
 
 @dataclass(frozen=True, kw_only=True)
+class _ProfilePlan:
+    identifier: str
+    sources: list[str]
+    states: dict[str, PackageState]
+
+
+@dataclass(frozen=True, kw_only=True)
 class _InstallRequest:
     sources: list[str]
     scope: str
@@ -152,13 +165,14 @@ class _InstallRequest:
     linked: bool = False
     ctx: PluginContext | None = None
     preserve_disabled: bool = False
+    profile: _ProfilePlan | None = None
 
 
 @dataclass(kw_only=True)
 class _Staging:
     request: _InstallRequest
-    temporary: tempfile.TemporaryDirectory[str]
-    available: dict[str, Path]
+    temporary: OwnedTemporaryDirectory
+    available: dict[str, Manifest]
     staged: dict[str, Path] = field(default_factory=dict)
     records: dict[str, PackageRecord] = field(default_factory=dict)
     manifests: dict[str, Manifest] = field(default_factory=dict)
@@ -169,12 +183,13 @@ class _Staging:
 @dataclass(kw_only=True)
 class _PackageChange:
     scope: str
-    temporary: tempfile.TemporaryDirectory[str]
+    temporary: OwnedTemporaryDirectory
     ctx: PluginContext | None = None
     staged: Mapping[str, Path] = field(default_factory=dict)
     records: Mapping[str, PackageRecord] = field(default_factory=dict)
     removed: list[str] = field(default_factory=list)
     expected_sources: Mapping[str, str] = field(default_factory=dict)
+    profile: _ProfilePlan | None = None
 
 
 @dataclass(kw_only=True)
@@ -182,14 +197,14 @@ class _TransactionState:
     change: _PackageChange
     before: PackageState
     state: PackageState
-    backups: dict[Path, Path] = field(default_factory=dict)
-    written: list[Path] = field(default_factory=list)
-    held: list[FileLock] = field(default_factory=list)
+    transaction: PackageTransaction | None = None
+    held: ExitStack = field(default_factory=ExitStack)
+    active: bool = False
 
     def release(self) -> None:
         """Release each acquired installation lock exactly once."""
-        while self.held:
-            self.held.pop().close()
+        self.active = False
+        self.held.close()
 
     def cleanup(self) -> None:
         """Remove staging files before releasing transaction ownership."""
@@ -355,15 +370,8 @@ def atomic_json(path: str | Path, value: object) -> None:
     """Persist finite JSON with flush, fsync and atomic replacement."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".plugins-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, sort_keys=True, allow_nan=False, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        Path(temporary).replace(path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+    encoded = json.dumps(value, sort_keys=True, allow_nan=False, indent=2)
+    write_bytes(path, encoded.encode("utf-8"))
 
 
 def read_json(path: str | Path, default: object) -> object:
@@ -381,12 +389,13 @@ def read_json(path: str | Path, default: object) -> object:
 
     """
     path = Path(path)
-    if not path.exists():
+    try:
+        data = read_regular(path, MAX_BYTES + 1, follow_symlinks=False)
+    except FileNotFoundError:
         return default
-    if path.is_symlink() or not path.is_file():
-        raise PluginError("Expected a regular plugin state file: " + str(path))
-    with path.open("rb") as stream:
-        data = stream.read(MAX_BYTES + 1)
+    except ValueError as error:
+        message = "Expected a regular plugin state file: " + str(path)
+        raise PluginError(message) from error
     if len(data) > MAX_BYTES:
         error_message = "Plugin state exceeds its size limit."
         raise PluginError(error_message)
@@ -550,7 +559,7 @@ def _download_http(url: str) -> bytes:
 
 def _download_isolated(url: str, cancel_check: CancelCheck) -> bytes:
     cancel_check()
-    with tempfile.TemporaryDirectory(prefix="raychat-package-download-") as directory:
+    with OwnedTemporaryDirectory(prefix="raychat-package-download-") as directory:
         destination = Path(directory) / "response"
         request: dict[str, object] = {
             "mode": "package_download",
@@ -592,6 +601,11 @@ def download(url: str) -> bytes:
 def read_bytes(path: str | Path) -> bytes:
     """Read a bounded package file before archive validation.
 
+    Operator-selected file links are followed intentionally. The opened object
+    must be regular; POSIX FIFOs are opened nonblocking and rejected. The
+    descriptor closes before archive parsing. This read has no retry or
+    permission repair and cannot interrupt an already-blocking native OS call.
+
     Returns
     -------
     bytes
@@ -600,15 +614,27 @@ def read_bytes(path: str | Path) -> bytes:
     Raises
     ------
     PluginError
-        If the file exceeds the package byte limit.
+        If the input is nonregular or exceeds the package byte limit.
 
     """
-    with Path(path).open("rb") as stream:
-        data = stream.read(MAX_BYTES + 1)
+    try:
+        data = read_regular(Path(path), MAX_BYTES + 1)
+    except ValueError as error:
+        raise PluginError(
+            "Package input must be a regular file: " + str(path),
+        ) from error
     if len(data) > MAX_BYTES:
         error_message = "Package input exceeds its byte limit."
         raise PluginError(error_message)
     return data
+
+
+class _SourceOwnership(threading.local):
+    """Identify this thread's active package transaction, never another reader."""
+
+    def __init__(self) -> None:
+        self.scopes: set[str] = set()
+        self.held = ExitStack()
 
 
 class PackageManager:
@@ -632,8 +658,9 @@ class PackageManager:
         home: str | Path,
         *,
         trusted: bool = False,
+        defer_state: bool = False,
     ) -> None:
-        """Load operator-owned installation receipts for both package scopes."""
+        """Load receipts now, or on first use by a runtime with captured sources."""
         self.workspace = Path(workspace).resolve()
         self.home = Path(home).resolve()
         self.trusted = trusted
@@ -647,10 +674,39 @@ class PackageManager:
             "workspace": self.home / "workspaces" / workspace_id,
             "user": self.home,
         }
-        self._states = {scope: self._read(scope) for scope in self.roots}
+        self._state_cache: dict[str, PackageState] = {}
+        self._source_ownership = _SourceOwnership()
+        if not defer_state:
+            with self.source_read():
+                pass
 
-    def _scope_lock(self, scope: str) -> FileLock:
-        return FileLock(self.state_roots[scope] / "plugins.mutex")
+    @property
+    def _states(self) -> dict[str, PackageState]:
+        if not self._state_cache:
+            with self.source_read():
+                pass
+        return self._state_cache
+
+    @_states.setter
+    def _states(self, value: dict[str, PackageState]) -> None:
+        self._state_cache = value
+
+    def _acquire_scope(self, scope: str, *, timeout: float = 0) -> FileLock:
+        lock = FileLock(self.state_roots[scope] / "plugins.mutex", timeout=timeout)
+        with ExitStack() as held:
+            held.enter_context(lock)
+            PackageTransaction.recover(
+                self.roots[scope] / "plugins",
+                self.state_file(scope),
+            )
+            held.pop_all()
+        return lock
+
+    @contextmanager
+    def _locked_scope(self, scope: str, *, timeout: float = 1.0) -> Iterator[None]:
+        with ExitStack() as held:
+            held.push(self._acquire_scope(scope, timeout=timeout))
+            yield
 
     def state_file(self, scope: str) -> Path:
         """Locate a scope receipt outside the untrusted workspace.
@@ -662,6 +718,59 @@ class PackageManager:
 
         """
         return self.state_roots[scope] / "plugins.lock.json"
+
+    @contextmanager
+    def source_read(self) -> Iterator[None]:
+        """Hold both scopes through discovery and capture, never plugin execution.
+
+        Acquire in canonical sidecar-path order with a one-second budget per
+        scope. Refresh receipts after recovery while both locks are held. This
+        context borrows locks only from this thread's explicit package transaction.
+        Ordinary read contexts remain nonreentrant. Linked development sources
+        and external editors remain outside the cooperating writer protocol.
+        """
+        if self._source_ownership.scopes:
+            yield
+            return
+        with ExitStack() as held:
+            scopes = sorted(
+                (str(root), scope) for scope, root in self.state_roots.items()
+            )
+            for _root, scope in scopes:
+                held.enter_context(self._locked_scope(scope))
+            # Both scopes exclude new candidates. Recover interrupted file
+            # batches before source inspection, then release the workspace lock.
+            with workspace_access(self.workspace, existing_only=True):
+                pass
+            self._states = {scope: self._read(scope) for scope in self.roots}
+            yield
+
+    @contextmanager
+    def source_update(self) -> Iterator[None]:
+        """Own both package scopes through a queued source edit and validation.
+
+        This explicit transaction lends its locks to source capture on the same
+        thread. Acquire it before any workspace file lock and retain it until
+        commit or rollback finishes. It supplies coordination, not an undo log.
+        """
+        with self._transaction_sources("source edits"):
+            yield
+
+    @contextmanager
+    def _transaction_sources(self, scope: str) -> Iterator[None]:
+        ownership = self._source_ownership
+        if scope in ownership.scopes:
+            message = "A package transaction is already active for scope: " + scope
+            raise PluginError(message)
+        if not ownership.scopes:
+            ownership.held.enter_context(self.source_read())
+        ownership.scopes.add(scope)
+        try:
+            yield
+        finally:
+            ownership.scopes.remove(scope)
+            if not ownership.scopes:
+                ownership.held.close()
 
     def _read(self, scope: str) -> PackageState:
         default: PackageState = {
@@ -680,6 +789,9 @@ class PackageManager:
 
     def paths(self, *, include_disabled: bool = False) -> dict[str, Path]:
         """Resolve installed packages while retaining scope and ambiguity checks.
+
+        Hold source_read() through this lookup and subsequent source reads when
+        package writers may run. Returned paths do not reserve installed trees.
 
         Returns
         -------
@@ -729,12 +841,14 @@ class PackageManager:
         """
         return {name for state in self._states.values() for name in state["disabled"]}
 
-    def attach(self, runtime: Runtime) -> None:
+    def attach(self, runtime: Runtime, *, inherit_disabled: bool = True) -> None:
         """Bind installation and discovery to a live plugin runtime."""
         self.runtime = runtime
+        runtime.source_read = self.source_read
         raw_services: object = runtime.services
         object_field(raw_services, "runtime services")[PLUGIN_MANAGER.name] = self
-        runtime.disabled.update(self.disabled)
+        if inherit_disabled:
+            runtime.disabled.update(self.disabled)
 
     def new_paths(self) -> list[str]:
         """Find installed package sources absent from the current generation.
@@ -756,7 +870,10 @@ class PackageManager:
         known = {
             snapshot["path"] for snapshot in self.runtime.export_sources()["packages"]
         }
-        return [str(path) for path in self.paths().values() if str(path) not in known]
+        with self.source_read():
+            return [
+                str(path) for path in self.paths().values() if str(path) not in known
+            ]
 
     def inventory(self) -> list[InventoryItem]:
         """Describe installed metadata and detect source edits without executing it.
@@ -767,6 +884,10 @@ class PackageManager:
             The validated result described by this operation.
 
         """
+        with self.source_read():
+            return self._inventory()
+
+    def _inventory(self) -> list[InventoryItem]:
         result: list[InventoryItem] = []
         for identifier, path in sorted(self.paths(include_disabled=True).items()):
             manifest = read_manifest(path, require_current_sdk=False)
@@ -855,7 +976,7 @@ class PackageManager:
         if origins != state:
             # Preserve proven origins before refreshing the catalog cache. A
             # failed download/upgrade must not erase the evidence for a retry.
-            with self._scope_lock(scope):
+            with self._locked_scope(scope):
                 if self._read(scope) != state:
                     error_message = "Installation state changed; retry the profile."
                     raise PluginError(error_message)
@@ -867,18 +988,42 @@ class PackageManager:
             item["id"] + "@" + item["version"]: item
             for item in self._catalog_records(str(profile.catalog))
         }
-        sources = self._profile_sources(profile, state, releases)
-        if sources:
+        plan = self._profile_plan(profile, releases)
+        if plan.sources:
             self._install_sources(
-                _InstallRequest(sources=sources, scope=scope, preserve_disabled=True),
+                _InstallRequest(
+                    sources=plan.sources,
+                    scope=scope,
+                    preserve_disabled=True,
+                    profile=plan,
+                ),
             )
-        with self._scope_lock(scope):
-            state = self._read(scope)
+            return
+        with self.source_read():
+            self._verify_profile(plan)
+            state = copy.deepcopy(self._states[scope])
             profiles = state.setdefault("profiles", [])
             if profile.id not in profiles:
                 profiles.append(profile.id)
                 atomic_json(self.state_file(scope), state)
                 self._states[scope] = state
+
+    def _profile_plan(
+        self,
+        profile: Distribution,
+        releases: Mapping[str, CatalogRecord],
+    ) -> _ProfilePlan:
+        with self.source_read():
+            return _ProfilePlan(
+                identifier=profile.id,
+                sources=self._profile_sources(profile, self._states["user"], releases),
+                states=copy.deepcopy(self._states),
+            )
+
+    def _verify_profile(self, plan: _ProfilePlan) -> None:
+        if self._states != plan.states:
+            message = "Installation state changed; retry the profile."
+            raise PluginError(message)
 
     def _profile_sources(
         self,
@@ -946,7 +1091,8 @@ class PackageManager:
         if not NAME.fullmatch(name):
             error_message = "Catalog name must be an identifier."
             raise PluginError(error_message)
-        state = copy.deepcopy(self._states[scope])
+        before = self._states[scope]
+        state = copy.deepcopy(before)
         if operation == "add":
             self._catalog_records(url)
             state["catalogs"][name] = url
@@ -957,8 +1103,8 @@ class PackageManager:
         else:
             error_message = "Use catalog list, add NAME URL, or remove NAME."
             raise PluginError(error_message)
-        with self._scope_lock(scope):
-            if self._read(scope) != self._states[scope]:
+        with self._locked_scope(scope):
+            if self._read(scope) != before:
                 error_message = "Catalog state changed; retry."
                 raise PluginError(error_message)
             atomic_json(self.state_file(scope), state)
@@ -1237,7 +1383,7 @@ class PackageManager:
             elif dependency in plan.available:
                 _require_version(
                     identifier,
-                    read_manifest(plan.available[dependency]),
+                    Manifest.parse(plan.available[dependency].document()),
                     version,
                 )
             else:
@@ -1249,24 +1395,25 @@ class PackageManager:
         plan.complete.add(identifier)
 
     def _replacement_sources(self, plan: _Staging) -> dict[str, str]:
-        expected_sources: dict[str, str] = {}
-        inventory = {item["id"]: item for item in self.inventory()}
-        for identifier in plan.staged:
-            old = inventory.get(identifier)
-            if old is None:
-                continue
-            if old["scope"] != plan.request.scope:
-                raise PluginError(
-                    "Plugin ID already exists in another scope: " + identifier,
+        with self.source_read():
+            expected_sources: dict[str, str] = {}
+            inventory = {item["id"]: item for item in self._inventory()}
+            for identifier in plan.staged:
+                old = inventory.get(identifier)
+                if old is None:
+                    continue
+                if old["scope"] != plan.request.scope:
+                    raise PluginError(
+                        "Plugin ID already exists in another scope: " + identifier,
+                    )
+                expected_sources[old["path"]] = digest(
+                    files(old["path"], validate_manifest=False),
                 )
-            expected_sources[old["path"]] = digest(
-                files(old["path"], validate_manifest=False),
-            )
-            if old["modified"] and not plan.request.force:
-                raise PluginError(
-                    "Plugin has local edits; use --force to replace: " + identifier,
-                )
-        return expected_sources
+                if old["modified"] and not plan.request.force:
+                    raise PluginError(
+                        "Plugin has local edits; use --force to replace: " + identifier,
+                    )
+            return expected_sources
 
     @staticmethod
     def _link_primary(plan: _Staging, primary: str) -> None:
@@ -1300,15 +1447,21 @@ class PackageManager:
             temporary=plan.temporary,
             ctx=plan.request.ctx,
             expected_sources=expected_sources,
+            profile=plan.request.profile,
         )
 
     def _install_sources(self, request: _InstallRequest) -> InstallResult:
-        temporary = tempfile.TemporaryDirectory(prefix="raychat-install-")
+        temporary = OwnedTemporaryDirectory(prefix="raychat-install-")
         try:
+            with self.source_read():
+                available = {
+                    name: read_manifest(path, require_current_sdk=False)
+                    for name, path in self.paths(include_disabled=True).items()
+                }
             plan = _Staging(
                 request=request,
                 temporary=temporary,
-                available=self.paths(include_disabled=True),
+                available=available,
             )
             return self._transaction(self._stage_roots(plan))
         except BaseException:
@@ -1316,8 +1469,8 @@ class PackageManager:
             raise
 
     def _transaction(self, change: _PackageChange) -> InstallResult:
-        state = copy.deepcopy(self._states[change.scope])
         before = self._read(change.scope)
+        state = copy.deepcopy(before)
         base = self.roots[change.scope]
         for identifier, record in change.records.items():
             record.setdefault("path", str(base / "plugins" / identifier))
@@ -1329,47 +1482,43 @@ class PackageManager:
             state["packages"].pop(identifier, None)
             if identifier not in state["disabled"]:
                 state["disabled"].append(identifier)
+        if change.profile is not None:
+            profiles = state.setdefault("profiles", [])
+            if change.profile.identifier not in profiles:
+                profiles.append(change.profile.identifier)
         plan = _TransactionState(change=change, before=before, state=state)
         return self._apply_transaction(plan)
 
     def _prepare_transaction(self, plan: _TransactionState) -> None:
-        lock = self._scope_lock(plan.change.scope)
-        lock.acquire()
-        plan.held.append(lock)
+        plan.held.enter_context(self._transaction_sources(plan.change.scope))
+        plan.active = True
         if self._read(plan.change.scope) != plan.before:
             message = "Installation state changed; retry the operation."
             raise PluginError(message)
+        if plan.change.profile is not None:
+            self._verify_profile(plan.change.profile)
         for path, expected in plan.change.expected_sources.items():
             if digest(files(path, validate_manifest=False)) != expected:
                 raise PluginError(
                     "Installed source changed while the update was queued: " + path,
                 )
-        self._write_transaction_files(plan)
-        atomic_json(self.state_file(plan.change.scope), plan.state)
-
-    @staticmethod
-    def _write_transaction_files(plan: _TransactionState) -> None:
-        for identifier, source in plan.change.staged.items():
-            record = plan.change.records[identifier]
-            if record["linked"]:
-                continue
-            target = Path(record["path"])
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                backup = target.parent / (
-                    ".backup-" + identifier + "-" + os.urandom(8).hex()
-                )
-                plan.backups[target] = backup
-                target.replace(backup)
-            plan.written.append(target)
-            incoming = target.parent / (
-                ".incoming-" + identifier + "-" + os.urandom(8).hex()
-            )
-            try:
-                shutil.copytree(source, incoming)
-                incoming.replace(target)
-            finally:
-                shutil.rmtree(incoming, ignore_errors=True)
+        sources: dict[str, Path | None] = {
+            identifier: source
+            for identifier, source in plan.change.staged.items()
+            if not plan.change.records[identifier]["linked"]
+        }
+        for identifier in plan.change.removed:
+            old = plan.before["packages"].get(identifier)
+            if old is not None and not old["linked"]:
+                sources[identifier] = None
+        following = json.dumps(plan.state, sort_keys=True, allow_nan=False, indent=2)
+        plan.transaction = PackageTransaction.begin(
+            self.roots[plan.change.scope] / "plugins",
+            self.state_file(plan.change.scope),
+            sources,
+            following.encode("utf-8"),
+        )
+        plan.transaction.apply(sources)
 
     def _rollback_transaction(self, plan: _TransactionState) -> None:
         try:
@@ -1377,15 +1526,10 @@ class PackageManager:
         finally:
             plan.cleanup()
 
-    def _restore_transaction(self, plan: _TransactionState) -> None:
-        if not plan.held:
-            return
-        for target in reversed(plan.written):
-            shutil.rmtree(target, ignore_errors=True)
-            if target in plan.backups:
-                plan.backups[target].replace(target)
-        if self._read(plan.change.scope) == plan.state:
-            atomic_json(self.state_file(plan.change.scope), plan.before)
+    @staticmethod
+    def _restore_transaction(plan: _TransactionState) -> None:
+        if plan.active and plan.transaction is not None:
+            plan.transaction.rollback()
 
     def _commit_transaction(self, plan: _TransactionState) -> None:
         try:
@@ -1394,18 +1538,11 @@ class PackageManager:
             plan.cleanup()
 
     def _finish_transaction(self, plan: _TransactionState) -> None:
+        if plan.transaction is not None:
+            plan.transaction.commit()
         self._states[plan.change.scope] = plan.state
-        for backup in plan.backups.values():
-            shutil.rmtree(backup, ignore_errors=True)
         if self.runtime is not None:
             self.runtime.disabled.update(self.disabled)
-        base = self.roots[plan.change.scope]
-        for identifier in plan.change.removed:
-            old = plan.before["packages"].get(identifier)
-            if old and not old["linked"]:
-                path = Path(old["path"])
-                if path.parent == base / "plugins":
-                    shutil.rmtree(path, ignore_errors=True)
 
     def _validate_transaction(self, plan: _TransactionState) -> None:
         # Validate the complete installed dependency graph before commit.
@@ -1428,7 +1565,13 @@ class PackageManager:
                 self._validate_transaction(plan)
                 self._commit_transaction(plan)
             except BaseException:
-                self._rollback_transaction(plan)
+                try:
+                    self._rollback_transaction(plan)
+                except (OSError, PluginError):
+                    logging.getLogger(__name__).exception(
+                        "Package rollback failed; journal retained for scope=%r",
+                        change.scope,
+                    )
                 raise
             return {
                 "applied": True,
@@ -1490,16 +1633,13 @@ class PackageManager:
         state["disabled"] = [v for v in state["disabled"] if v != identifier]
         if not enabled:
             state["disabled"].append(identifier)
-        held: list[FileLock] = []
-
-        def release() -> None:
-            while held:
-                held.pop().close()
+        held = ExitStack()
+        prepared = False
 
         def prepare() -> None:
-            lock = self._scope_lock(scope)
-            lock.acquire()
-            held.append(lock)
+            nonlocal prepared
+            held.enter_context(self._transaction_sources(scope))
+            prepared = True
             if self._read(scope) != before:
                 error_message = "Plugin state changed; retry."
                 raise PluginError(error_message)
@@ -1508,16 +1648,16 @@ class PackageManager:
         def commit() -> None:
             self._states[scope] = state
             _apply_enabled(runtime, identifier, enabled=enabled)
-            release()
+            held.close()
 
         def rollback(_error: BaseException) -> None:
-            if not held:
+            if not prepared:
                 return
             try:
                 if self._read(scope) == state:
                     atomic_json(self.state_file(scope), before)
             finally:
-                release()
+                held.close()
 
         context = ctx or runtime.context("plugin_manager")
         return context.update_plugins(
@@ -1543,19 +1683,22 @@ class PackageManager:
         if runtime is None:
             error_message = "Plugin activation requires an attached runtime."
             raise PluginError(error_message)
-        paths = self.paths(include_disabled=True)
-        if identifier not in paths:
-            raise PluginError("Unknown plugin: " + identifier)
-        if enabled and any(
-            identifier in v["disabled"] for k, v in self._states.items() if k != scope
-        ):
-            error_message = (
-                "Plugin is disabled in another scope; enable it there first."
-            )
-            raise PluginError(
-                error_message,
-            )
-        return runtime, paths
+        with self.source_read():
+            paths = self.paths(include_disabled=True)
+            if identifier not in paths:
+                raise PluginError("Unknown plugin: " + identifier)
+            if enabled and any(
+                identifier in v["disabled"]
+                for k, v in self._states.items()
+                if k != scope
+            ):
+                error_message = (
+                    "Plugin is disabled in another scope; enable it there first."
+                )
+                raise PluginError(
+                    error_message,
+                )
+            return runtime, paths
 
     def uninstall(
         self,
@@ -1579,7 +1722,7 @@ class PackageManager:
         """
         if identifier not in self._states[scope]["packages"]:
             raise PluginError("Plugin is not installed in this scope: " + identifier)
-        temporary = tempfile.TemporaryDirectory(prefix="raychat-uninstall-")
+        temporary = OwnedTemporaryDirectory(prefix="raychat-uninstall-")
         return self._transaction(
             _PackageChange(
                 scope=scope,
@@ -1628,25 +1771,22 @@ class PackageManager:
             The validated result described by this operation.
 
         """
-        available = self.paths(include_disabled=True)
-        manifest = read_manifest(path)
-        available[manifest.id] = Path(path).resolve()
-        ordered = dependency_order(
-            {
-                name: read_manifest(candidate, require_current_sdk=False)
-                for name, candidate in available.items()
-            },
-            [manifest.id],
-        )
         runtime = Runtime(self.workspace)
         trees: list[SourceTree] = []
         try:
-            modules = []
-            for name in ordered:
-                tree = SourceTree(available[name])
-                trees.append(tree)
-                modules.append(tree.entrypoint())
-            runtime.load(modules)
+            with self.source_read():
+                available = self.paths(include_disabled=True)
+                manifest = read_manifest(path)
+                available[manifest.id] = Path(path).resolve()
+                ordered = dependency_order(
+                    {
+                        name: read_manifest(candidate, require_current_sdk=False)
+                        for name, candidate in available.items()
+                    },
+                    [manifest.id],
+                )
+                trees.extend(SourceTree(available[name]) for name in ordered)
+            runtime.load([tree.entrypoint() for tree in trees])
             runtime.emit(CONFIGURE, Lifecycle(), strict=True)
             return {
                 "id": manifest.id,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import tempfile
 import unittest
@@ -212,6 +211,22 @@ class MemoryStoreTests(_MemoryAssertions):
         raw = self.path.read_bytes()
         self.check(condition=b"third" in raw)
         self.check(condition=bool(raw.endswith(b"\n")))
+
+    def test_independent_stores_preserve_updates_and_monotonic_ids(self) -> None:
+        """Reload under the writer lock instead of publishing a stale snapshot."""
+        first = _rc_memory.MemoryStore(self.path)
+        second = _rc_memory.MemoryStore(self.path)
+        self.equal(first.add("first")["id"], 1)
+        self.equal(second.add("second")["id"], 2)
+        self.check(condition=first.remove(1))
+        self.equal(second.add("third")["id"], 3)
+        self.equal(
+            _rc_memory.MemoryStore(self.path).all(),
+            [
+                {"id": 2, "content": "second"},
+                {"id": 3, "content": "third"},
+            ],
+        )
 
     def test_all_returns_defensive_copies(self) -> None:
         """All returns defensive copies."""
@@ -458,7 +473,7 @@ class MemoryStoreTests(_MemoryAssertions):
         before = self.path.read_bytes()
 
         with (
-            mock.patch.object(os, "replace", side_effect=OSError("failed")),
+            mock.patch.object(Path, "replace", side_effect=OSError("failed")),
             self.rejecting(OSError),
         ):
             store.add("must not commit")
@@ -477,7 +492,7 @@ class MemoryStoreTests(_MemoryAssertions):
         store.add("one")
         before = self.path.read_bytes()
         with (
-            mock.patch.object(os, "replace", side_effect=OSError("failed")),
+            mock.patch.object(Path, "replace", side_effect=OSError("failed")),
             self.rejecting(OSError),
         ):
             store.remove(1)

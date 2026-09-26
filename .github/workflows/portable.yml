@@ -2,6 +2,7 @@ name: Portable standard-library build
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -122,12 +123,19 @@ jobs:
             tests.test_http_replay \
             -v 2>&1 | tee ci-output/http-debug-tests.log
 
+      - name: Verify filesystem publication and process coordination
+        shell: bash
+        run: |
+          set -o pipefail
+          python -B -S -m tools.verify_filesystem 2>&1 | tee ci-output/filesystem.log
+
       - name: Verify supervisor recovery persistence
         shell: bash
         run: |
           set -o pipefail
           python -B -S -m unittest \
             tests.test_supervisor_persistence \
+            tests.test_bootstrap_filesystem \
             tests.test_live_recovery_qa \
             -v 2>&1 | tee ci-output/supervisor-recovery.log
 
@@ -176,3 +184,32 @@ jobs:
             ci-output/acceptance
             ci-output/*.log
           if-no-files-found: warn
+
+  windows-standard-user:
+    name: Windows standard user and Defender / Python ${{ matrix.python }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Verify filesystem behavior with ordinary privileges and antivirus
+        shell: pwsh
+        run: ./tools/verify_windows_filesystem.ps1 -Python (Get-Command python).Source
+
+      - name: Retain identity, antivirus state and test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-standard-user-python-${{ matrix.python }}
+          path: ci-output/windows-standard-user
+          if-no-files-found: error

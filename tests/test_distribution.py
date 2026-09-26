@@ -6,17 +6,23 @@ import hashlib
 import json
 import os
 import tempfile
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path, PureWindowsPath
+from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat.distribution import read_distribution
+from raychat.package_transactions import PackageTransaction
 from raychat.packages import pack, read_manifest
-from raychat.plugin_manager import PackageManager
+from raychat.plugin_manager import PackageManager, read_bytes
 from raychat.plugins import Runtime
 from raychat.sdk import PluginError
+from raychat.validation import json_object, object_field
 from tests.plugin_support import package
 from tests.test_package_system import PackageTestCase
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _json(value: object) -> str:
@@ -103,6 +109,115 @@ class DistributionValidationTests(PackageTestCase):
                         "Invalid installation catalog",
                     ):
                         read_distribution(profile)
+
+
+class DistributionCoordinationTests(PackageTestCase):
+    """Revalidate profile inputs before publishing packages or completion receipts."""
+
+    def test_profile_rejects_an_intervening_install_in_either_scope(self) -> None:
+        """A stale profile plan cannot replace a new operator choice or graph."""
+        for scope in ("user", "workspace"):
+            with self.subTest(scope=scope):
+                self._intervening_install(scope)
+
+    def _intervening_install(self, scope: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = read_distribution(_write_distribution(root))
+            manager = PackageManager(root / "work", root / "home")
+            writer = PackageManager(manager.workspace, manager.home)
+            identifier = "example" if scope == "user" else "operator"
+            operator = package(
+                root / "operator-source",
+                "# Operator-owned release.\ndef register(api): pass\n",
+                name=identifier,
+            )
+            reads: list[Path] = []
+
+            def archive_read(path: str | Path) -> bytes:
+                if Path(path).resolve() == (root / "example.zip").resolve():
+                    reads.append(Path(path))
+                    writer.install(str(operator), scope=scope)
+                    manager.inventory()
+                return read_bytes(path)
+
+            with (
+                mock.patch("raychat.plugin_manager.read_bytes", archive_read),
+                self.rejected(PluginError, "Installation state changed"),
+            ):
+                manager.ensure_profile(profile)
+            self.equal(len(reads), 1)
+            restarted = PackageManager(manager.workspace, manager.home)
+            installed = restarted.paths()
+            self.equal(set(installed), {identifier})
+            self.equal(
+                (installed[identifier] / "__init__.py").read_bytes(),
+                (operator / "__init__.py").read_bytes(),
+            )
+            state = object_field(
+                json_object(restarted.state_file("user").read_bytes()),
+                "receipt",
+            )
+            self.equal(state.get("profiles", []), [])
+
+    def test_profile_membership_is_published_with_its_packages(self) -> None:
+        """Interruption after commit cannot leave an unrecorded completed profile."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = read_distribution(_write_distribution(root))
+            manager = PackageManager(root / "work", root / "home")
+            original_commit = PackageTransaction.commit
+
+            def interrupted(transaction: PackageTransaction) -> None:
+                original_commit(transaction)
+                raise KeyboardInterrupt
+
+            with (
+                mock.patch.object(PackageTransaction, "commit", interrupted),
+                self.rejected(KeyboardInterrupt),
+            ):
+                manager.ensure_profile(profile)
+            restarted = PackageManager(manager.workspace, manager.home)
+            self.equal(set(restarted.paths()), {"example"})
+            state = object_field(
+                json_object(restarted.state_file("user").read_bytes()),
+                "receipt",
+            )
+            self.equal(state["profiles"], [profile.id])
+
+    def test_unchanged_profile_revalidates_before_recording_membership(self) -> None:
+        """A metadata-only profile completion also rejects intervening state."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = read_distribution(_write_distribution(root))
+            manager = PackageManager(root / "work", root / "home")
+            manager.catalog("add", profile.id, str(profile.catalog), scope="user")
+            manager.install("local/example@1.0.0", scope="user")
+            writer = PackageManager(manager.workspace, manager.home)
+            operator = package(root / "operator", "def register(api): pass\n")
+            source_read = manager.source_read
+            reads: list[str] = []
+
+            @contextmanager
+            def concurrent_read() -> Iterator[None]:
+                reads.append("read")
+                with source_read():
+                    yield
+                if len(reads) == 1:
+                    writer.install(str(operator))
+
+            with (
+                mock.patch.object(manager, "source_read", concurrent_read),
+                self.rejected(PluginError, "Installation state changed"),
+            ):
+                manager.ensure_profile(profile)
+            restarted = PackageManager(manager.workspace, manager.home)
+            state = object_field(
+                json_object(restarted.state_file("user").read_bytes()),
+                "receipt",
+            )
+            self.equal(state.get("profiles", []), [])
+            self.equal(set(restarted.paths()), {"example", "operator"})
 
 
 class DistributionPathTests(PackageTestCase):

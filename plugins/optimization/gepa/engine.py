@@ -193,10 +193,20 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         # Prepare valset
         """Run candidate search until its configured stopping condition is reached.
 
+        The optimize_anything entry point owns the run directory before adapter
+        construction and retains it through this call. Internal callers must
+        provide the same exclusive ownership. I/O failures always propagate;
+        the candidate-error policy must not replay a failed persistence workflow.
+
         Returns
         -------
         GEPAState
             The final typed optimizer state, including evaluation counters and history.
+
+        Raises
+        ------
+        OSError
+            If persistence or other run I/O fails, regardless of candidate policy.
 
         """
         valset = self.valset
@@ -268,6 +278,8 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             try:
                 self._run_iteration(state)
 
+            except OSError:
+                raise
             except Exception as e:
                 self.logger.log(
                     f"Iteration {state.i + 1}: Exception during optimization: {e}",
