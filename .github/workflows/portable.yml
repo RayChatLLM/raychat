@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_diagnostic:
+        description: Diagnose full Windows discovery using the previous direct launch path
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,16 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            name: Linux
-            artifact: linux
-          - os: macos-latest
-            name: macOS
-            artifact: macos
-          - os: windows-latest
-            name: Windows + Defender
-            artifact: windows
+        include: ${{ fromJSON(inputs.windows_diagnostic && '[{"os":"windows-latest","name":"Windows + Defender","artifact":"windows"}]' || '[{"os":"ubuntu-latest","name":"Linux","artifact":"linux"},{"os":"macos-latest","name":"macOS","artifact":"macos"},{"os":"windows-latest","name":"Windows + Defender","artifact":"windows"}]') }}
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONIOENCODING: utf-8
@@ -64,7 +60,7 @@ jobs:
       - name: Unit suite and real release console as a standard user with Defender
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./tools/verify_windows_filesystem.ps1 -Python (Get-Command python).Source
+        run: ./tools/verify_windows_filesystem.ps1 -Python (Get-Command python).Source -Diagnostic:('${{ inputs.windows_diagnostic }}' -eq 'true')
       - name: Retain tested archive, checksums, timings and terminal evidence
         if: always()
         uses: actions/upload-artifact@v4

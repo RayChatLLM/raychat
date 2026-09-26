@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
     [string] $ExpectedSid,
+    [switch] $Diagnostic,
     [string] $OutputDirectory = "ci-output"
 )
 
@@ -38,7 +39,11 @@ if ($Child) {
     } catch [UnauthorizedAccessException] {
         Write-Output 'Confirmed: the installation denies standard-user writes.'
     }
-    & $Python -B -m tools.ci_release --output $OutputDirectory
+    if ($Diagnostic) {
+        & $Python -B -S -c "import faulthandler, unittest; faulthandler.dump_traceback_later(60, repeat=True); unittest.main(module=None)" discover -s tests -v
+    } else {
+        & $Python -B -m tools.ci_release --output $OutputDirectory
+    }
     exit $LASTEXITCODE
 }
 
@@ -174,7 +179,7 @@ try {
             ArgumentList = '-NoLogo -NoProfile -NonInteractive -File "' +
                 (Join-Path $Source 'tools/verify_windows_filesystem.ps1') +
                 '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value +
-                ' -OutputDirectory "' + $ChildOutput + '"'
+                ' -OutputDirectory "' + $ChildOutput + '"' + $(if ($Diagnostic) { ' -Diagnostic' } else { '' })
             Credential = $Credential
             LoadUserProfile = $true
             Environment = $ChildEnvironment
@@ -188,16 +193,20 @@ try {
         $Retired = $false
         # Short waits keep cancellation responsive and expose each Python stage.
         $Waiting = [Diagnostics.Stopwatch]::StartNew()
-        $PrintedLines = 0
+        $PrintedLines = @{}
+        $BudgetMinutes = if ($Diagnostic) { 8 } else { 20 }
         do {
             $Exited = $Process.WaitForExit(1000)
-            $Lines = @(Get-Content -LiteralPath $Launch.RedirectStandardOutput -ErrorAction SilentlyContinue)
-            if ($Lines.Count -gt $PrintedLines) {
-                $Lines[$PrintedLines..($Lines.Count - 1)] | Write-Output
-                $PrintedLines = $Lines.Count
+            foreach ($LogPath in @($Launch.RedirectStandardOutput, $Launch.RedirectStandardError)) {
+                $Lines = @(Get-Content -LiteralPath $LogPath -ErrorAction SilentlyContinue)
+                $Count = if ($PrintedLines.ContainsKey($LogPath)) { $PrintedLines[$LogPath] } else { 0 }
+                if ($Lines.Count -gt $Count) {
+                    $Lines[$Count..($Lines.Count - 1)] | Write-Output
+                    $PrintedLines[$LogPath] = $Lines.Count
+                }
             }
-            if ($Waiting.Elapsed.TotalMinutes -ge 20) {
-                throw "$Phase tests exceeded twenty minutes."
+            if ($Waiting.Elapsed.TotalMinutes -ge $BudgetMinutes) {
+                throw "$Phase tests exceeded $BudgetMinutes minutes."
             }
         } while (-not $Exited)
         $Retired = $true
