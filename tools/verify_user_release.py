@@ -66,15 +66,27 @@ def readonly_installation(root: Path) -> Iterator[None]:
     """Deny installation writes while the actual application runs."""
     if os.name == "nt":
         sid = os.environ["RAYCHAT_TEST_SID"]
-        _command(
-            ("icacls", str(root), "/deny", f"*{sid}:(OI)(CI)(WD,AD,WEA,WA,D,DC)"),
-            root.parent,
-        )
         try:
+            _command(
+                (
+                    "icacls",
+                    str(root),
+                    "/inheritance:d",
+                    "/grant:r",
+                    f"*{sid}:(OI)(CI)(RX)",
+                ),
+                root.parent,
+            )
             yield
         finally:
             _command(
-                ("icacls", str(root), "/remove:d", f"*{sid}", "/T", "/Q"),
+                (
+                    "icacls",
+                    str(root),
+                    "/grant:r",
+                    f"*{sid}:(OI)(CI)(F)",
+                    "/inheritance:e",
+                ),
                 root.parent,
             )
     else:
