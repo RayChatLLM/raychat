@@ -1307,7 +1307,12 @@ class AgentWorkerTests(TypedTestCase):
         )
         try:
             first_id = worker.submit("first prompt")
-            first, _ = collect_until(worker, "completed")
+            # The first job lazily loads real plugins under Defender on Windows.
+            first, _ = collect_until(
+                worker,
+                "completed",
+                timeout=30 if os.name == "nt" else 2,
+            )
             self.equal(first.payload["job_id"], first_id)
 
             second_id = worker.submit("second prompt")
