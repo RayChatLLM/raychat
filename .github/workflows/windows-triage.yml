@@ -26,13 +26,8 @@ jobs:
             mode: background
             idle: '1'
             finish: finish-diagnostic
-          - variant: foreground
+          - variant: full
             os: windows-latest
-            mode: foreground
-            idle: '0'
-            finish: finish
-          - variant: older-image
-            os: windows-2022
             mode: background
             idle: '0'
             finish: finish
@@ -52,12 +47,16 @@ jobs:
           cache-dependency-path: requirements-windows-test.txt
       - name: Install CI-only console driver
         run: python -m pip install -r requirements-windows-test.txt
-      - name: Run unchanged full acceptance in the foreground
-        if: matrix.mode == 'foreground'
-        timeout-minutes: 22
+      - name: Capture runner identity before security changes
         run: |
           $Python = (Get-Command python).Source
-          ./tools/verify_windows_filesystem.ps1 -Python $Python
+          ./tools/verify_windows_filesystem.ps1 -Python $Python -InspectHost
+      - name: Retain runner provenance before Defender activation
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-${{ matrix.variant }}-provenance
+          path: ci-output/windows-standard-user/
+          if-no-files-found: error
       - name: Start supervised background acceptance
         if: matrix.mode == 'background'
         timeout-minutes: 2

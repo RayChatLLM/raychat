@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
     [switch] $IdleDiagnostic,
+    [switch] $InspectHost,
     [string] $ExpectedSid,
     [string] $OutputDirectory = "ci-output"
 )
@@ -251,9 +252,39 @@ function Save-Progress([string] $Stage) {
     Write-Output "Windows acceptance: $Stage; $($Processes.Count) processes at $([DateTime]::UtcNow.ToString('o'))."
 }
 
+function Save-RunnerProvenance {
+    $Evidence = @(foreach ($NativeProcess in @(Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -like 'provjobd*' -or $_.Name -eq 'provisioner.exe' })) {
+        $Item = [ordered]@{
+            pid = $NativeProcess.ProcessId
+            parent_pid = $NativeProcess.ParentProcessId
+            name = $NativeProcess.Name
+            path = $NativeProcess.ExecutablePath
+            created = $NativeProcess.CreationDate
+        }
+        try {
+            $Owner = Invoke-CimMethod -InputObject $NativeProcess -MethodName GetOwner
+            $Item['owner'] = "$($Owner.Domain)\$($Owner.User)"
+            if ($NativeProcess.ExecutablePath) {
+                $Item['sha256'] = (Get-FileHash -LiteralPath $NativeProcess.ExecutablePath -Algorithm SHA256).Hash
+                $Signature = Get-AuthenticodeSignature -LiteralPath $NativeProcess.ExecutablePath
+                $Item['signature_status'] = $Signature.Status.ToString()
+                $Item['signer'] = if ($Signature.SignerCertificate) { $Signature.SignerCertificate.Subject } else { $null }
+                $Item['signer_thumbprint'] = if ($Signature.SignerCertificate) { $Signature.SignerCertificate.Thumbprint } else { $null }
+            }
+        } catch {
+            $Item['evidence_error'] = $_.Exception.Message
+        }
+        $Item
+    })
+    [ordered]@{ captured_utc = [DateTime]::UtcNow.ToString('o'); processes = $Evidence } |
+        ConvertTo-Json -Depth 5 |
+        Set-Content -Encoding utf8 (Join-Path $Reports 'runner-provenance.json')
+}
+
 function Save-DefenderState([string] $Name) {
     $Status = Get-MpComputerStatus | Select-Object AMRunningMode, AMServiceEnabled,
-        AMProductVersion, AntivirusEnabled, AntivirusSignatureVersion,
+        AMProductVersion, AMEngineVersion, AntivirusEnabled, AntivirusSignatureVersion,
         AntivirusSignatureLastUpdated, RealTimeProtectionEnabled, BehaviorMonitorEnabled,
         IoavProtectionEnabled, OnAccessProtectionEnabled, IsTamperProtected
     $Preferences = Get-MpPreference | Select-Object DisableRealtimeMonitoring,
@@ -285,6 +316,13 @@ function Assert-DefenderEnabled([string] $Name) {
         @($Preferences.ExclusionExtension).Where({ $_ }).Count -ne 0) {
         throw "Defender coverage is not enabled; inspect $Name.json."
     }
+}
+
+if ($InspectHost) {
+    Save-RunnerProvenance
+    $null = Save-DefenderState 'inherited'
+    $Password.Dispose()
+    exit 0
 }
 
 try {
@@ -335,7 +373,13 @@ try {
         RAYCHAT_TEST_SID = $Account.SID.Value
         RAYCHAT_TEST_DENIED_DIRECTORY = $Denied; RAYCHAT_TEST_OTHER_VOLUME = $OtherRoot
     }
+    Save-RunnerProvenance
     $null = Save-DefenderState 'inherited'
+    Write-Output "Updating Defender security intelligence at $([DateTime]::UtcNow.ToString('o'))."
+    Start-Service WinDefend
+    Update-MpSignature
+    $null = Save-DefenderState 'after-signature-update'
+    Save-Progress 'updated Defender security intelligence'
     foreach ($Phase in @('defender')) {
         if ($Phase -eq 'defender') {
             Write-Output "Enabling Defender at $([DateTime]::UtcNow.ToString('o'))."
