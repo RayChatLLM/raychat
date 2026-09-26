@@ -90,6 +90,7 @@ function Assert-DefenderEnabled([string] $Name) {
 }
 
 try {
+    Write-Output "Provisioning ordinary-user acceptance at $([DateTime]::UtcNow.ToString('o'))."
     $Account = New-LocalUser -Name $AccountName -Password $Password -AccountNeverExpires
     Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $Account
     $Credential = [pscredential]::new("$env:COMPUTERNAME\$AccountName", $Password)
@@ -108,6 +109,7 @@ try {
     $Archive = Join-Path $TestRoot 'source.zip'
     & git archive --format=zip --output $Archive HEAD
     if ($LASTEXITCODE -ne 0) { throw 'Could not archive the tested commit.' }
+    Write-Output "Extracting tested source at $([DateTime]::UtcNow.ToString('o'))."
     [IO.Compression.ZipFile]::ExtractToDirectory($Archive, $Source)
     $Data = New-Item -ItemType Directory (Join-Path $TestRoot 'data')
     $DataAcl = Get-Acl -LiteralPath $Data.FullName
@@ -137,6 +139,7 @@ try {
     $null = Save-DefenderState 'inherited'
     foreach ($Phase in @('defender')) {
         if ($Phase -eq 'defender') {
+            Write-Output "Enabling Defender at $([DateTime]::UtcNow.ToString('o'))."
             # Strengthen this disposable VM's protection; never add exclusions.
             $Preferences = Get-MpPreference
             foreach ($Kind in @('ExclusionPath', 'ExclusionProcess', 'ExclusionExtension')) {
@@ -180,9 +183,11 @@ try {
             RedirectStandardError = Join-Path $Reports "$Phase.stderr.log"
             PassThru = $true
         }
+        Write-Output "Starting tests at $([DateTime]::UtcNow.ToString('o'))."
         $Process = Start-Process @Launch
         $Retired = $false
-        if (-not $Process.WaitForExit(900000)) { throw "$Phase tests exceeded fifteen minutes." }
+        # Let the Python checker reach its own deadline and retain diagnostics first.
+        if (-not $Process.WaitForExit(1200000)) { throw "$Phase tests exceeded twenty minutes." }
         $Retired = $true
         Get-Content -LiteralPath (Join-Path $Reports "$Phase.stdout.log")
         Get-Content -LiteralPath (Join-Path $Reports "$Phase.stderr.log")

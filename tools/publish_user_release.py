@@ -92,6 +92,9 @@ async def _publish(artifacts: Path, version: str, commit: str) -> int:
                     "existing tag and assets are unchanged.\n",
                 )
                 return 0
+            if existing.get("target_commitish") != commit:
+                message = "The existing draft targets a different source commit."
+                raise ValueError(message)
         elif "HTTP 404" not in lookup.stderr:
             raise RuntimeError(lookup.stderr)
         refs = array_field(

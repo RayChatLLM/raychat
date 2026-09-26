@@ -52,7 +52,7 @@ def _environment() -> dict[str, str]:
         "RAYCHAT_CONFIG",
         "RAYCHAT_HTTP_DEBUG_DIR",
     ):
-        environment.pop(name, None)
+        environment[name] = ""
     environment["PYTHONNOUSERSITE"] = "1"
     return environment
 
