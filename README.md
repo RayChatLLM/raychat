@@ -521,7 +521,7 @@ Routine CI runs Python 3.12 on Linux, macOS, and Windows. Each job runs the full
 unit suite once and tests the extracted public launcher. Windows uses a standard
 user with Defender enabled and a CI-only ConPTY driver. Windows runs the stress
 module first, then runs each remaining module in a fresh standard-library test
-process, with at most three running concurrently. Every discovered test runs once.
+process, with at most four running concurrently. Every discovered test runs once.
 On hosted Windows runners, CI verifies the provisioning daemon’s identity before
 exempting that single infrastructure executable from Defender scanning. This
 works around a reproduced detection that disconnects the runner even while idle;

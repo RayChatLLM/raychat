@@ -65,7 +65,7 @@ if ($Child) {
             } else {
                 $Modules | Where-Object { $_ -ne 'tests.test_workflow_stress' }
             })
-            $Parallelism = if ($Phase -eq 'remaining') { 3 } else { 1 }
+            $Parallelism = if ($Phase -eq 'remaining') { 4 } else { 1 }
             $ActiveShards = @{}
             $NextModule = 0
             Write-Output "Running $Phase phase: $($PhaseModules.Count) modules in fresh interpreters, at most $Parallelism concurrently."
