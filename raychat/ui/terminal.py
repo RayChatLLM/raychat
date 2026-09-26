@@ -86,6 +86,7 @@ class KeyDecoder:
     PASTE_START = b"\x1b[200~"
     PASTE_END = b"\x1b[201~"
     _SEQUENCES: ClassVar[dict[bytes, str]] = {
+        b"\x1b[Z": "shift_tab",
         b"\x1b[A": "up",
         b"\x1b[1;2A": "shift_up",
         b"\x1b[1;2B": "shift_down",

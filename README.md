@@ -10,17 +10,23 @@ Run it with Python 3.10 or newer. No third-party runtime packages are required.
 feature archives on first launch.
 
 ```bash
-export RAYCHAT_AUTH_TOKEN="your-api-token"
-export RAYCHAT_MODEL="your-model-id"
-export RAYCHAT_BASE_URL="https://provider.example/v1"
-python3 -B -S raychat.py --workspace ./workspace
+python raychat.py --workspace ./workspace
 ```
+
+On first launch, a setup window asks for your API token, model ID, and API base
+URL. Paste each value, then choose **Save and continue**. RayChat checks the token
+and API base URL by querying `GET /models`. If authentication or the request fails,
+the setup window shows an error and keeps your entries so you can correct them
+and retry. Settings are saved only after the check succeeds. RayChat saves them in
+`~/.raychat/environment/.env` in your user storage and loads them automatically
+on later runs. The installation directory can be read-only.
 
 Use `/models` in the TUI to fetch all model IDs from the configured provider's
 OpenAI-compatible `GET /models` endpoint. Type to filter; use arrows, Page Up/Down,
 Home/End, Enter, or click to inspect an ID. Escape closes the menu. To change the
-active model, set `RAYCHAT_MODEL` and restart RayChat. Saved sessions and profile
-settings cannot override it. Child chats, task evaluation, and optimization
+active model, edit `RAYCHAT_MODEL` in your saved environment file and restart
+RayChat. Saved sessions and profile settings cannot override it. Child chats,
+task evaluation, and optimization
 reflection use the same endpoint, model, and token as the main chat.
 The `/system` panel wraps the complete model identifier onto multiple lines,
 including its provider path.
@@ -29,67 +35,98 @@ Self-Harness is disabled by default. The ordinary chat agent still has the core'
 source inspection, live-update, status, and recovery tools. See
 [live core updates](docs/LIVE_CORE.md) for activation and recovery controls.
 
-On Windows, use `py -3` in place of `python3`. Every launch requires exactly these
-three provider variables; missing or blank values produce an error listing the
-variables to set. `--help` works without them. `RAYCHAT_BASE_URL` is the API root;
-RayChat derives `/chat/completions` and `/models` from it. A complete URL ending
+Every launch requires exactly three provider settings. Incomplete settings open
+the interactive setup window; `--exec` or launches without a terminal report the
+missing values instead. `--help` works without them. `RAYCHAT_BASE_URL` is the API
+root; RayChat derives `/chat/completions` and `/models` from it. A complete URL ending
 in `/chat/completions` is also normalized to that same root. There is no default
 provider address or model, and `--model` and `--url` are removed. Other providers'
 credential environment variables are not consulted.
 
 Plugin selection, request options, limits, storage, and rendering settings live
 in [raychat.json](raychat.json). `--config PATH` selects another complete JSON
-configuration. Those settings cannot change the provider token, model, or URL.
+configuration. Provider values belong in the selected environment file;
+`storage.home_directory` controls the default location of that file.
 Configuration rejects duplicate keys, invalid types and ranges, non-finite values,
 unsupported versions, and oversized files.
 
 ### Environment files
 
-Copy the template for your platform to `.env`, fill in all three values, and load
-it into the shell before launching. RayChat reads the process environment; it
-does not silently load another configuration file. `.env` is ignored by Git.
-The templates contain no credentials, endpoint, or model defaults.
+You can use the setup window or edit the saved file directly. The window has
+three editable fields, a masked token, and a **Save and continue** button. Use
+Tab/Shift+Tab or click to move between fields; Enter advances or saves. Escape
+cancels without saving. Invalid values and write failures stay in the form so
+you can correct them. At 80×14 or 80×12, the form uses a compact layout with the
+fields, Save button, errors, and keyboard controls visible. Resizing preserves
+your entries and focus.
 
-Editing a file or assigning a shell variable alone does not export it to RayChat.
-Every launch checks the provider environment automatically, before opening the
-terminal or loading plugins. If any variable is missing or blank, startup stops
-with the exact names to fix and a separate `set`, `missing`, or `empty` status for
-each variable. Configured values are never displayed in these diagnostics.
-If you filled in a platform template directly, source that file in the commands
-below instead of `.env` (for example, `. ./environment/macos.env`). Start RayChat
-in that same shell.
+By default, settings live in `~/.raychat/environment/.env` on every platform.
+Changing `storage.home_directory` in your selected JSON configuration also moves
+this file to that application storage directory. RayChat creates the settings
+directory when you save; it does not need write access to its installation.
 
-Linux or macOS (Bash or Zsh):
+Use `--env-file PATH` to select another writable settings file for both loading
+and saving:
 
 ```bash
-cp environment/linux.env .env  # macOS: use environment/macos.env
-# Edit .env and fill in all three values, retaining the single quotes.
-set -a
-. ./.env
-set +a
-python3 -B -S raychat.py --workspace ./workspace
+python raychat.py --env-file ~/raychat-provider.env
+```
+
+For an explicit portable setup, use `--portable`. This loads and saves
+`environment/.env` beside the launcher instead of the user-storage file. The
+installation must be writable for the setup window to save there. These two
+options are mutually exclusive; use the same option on subsequent launches.
+
+To fill in a portable file manually, copy your platform's example once:
+
+Linux or macOS:
+
+```bash
+cp environment/linux.env environment/.env  # macOS: use environment/macos.env
+# Edit environment/.env with your preferred text editor.
+python raychat.py --portable --workspace ./workspace
 ```
 
 Windows (PowerShell):
 
 ```powershell
-Copy-Item environment/windows.env .env
-notepad .env
-# Fill in all three values without quotes, then save and close Notepad.
-Get-Content .env | ForEach-Object {
-    if ($_ -match '^\s*(RAYCHAT_AUTH_TOKEN|RAYCHAT_MODEL|RAYCHAT_BASE_URL)\s*=(.*)$') {
-        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2].Trim(), 'Process')
-    }
-}
-py -3 -B -S raychat.py --workspace ./workspace
+Copy-Item environment/windows.env environment/.env
+notepad environment/.env
+# Fill in all three values, save, and close Notepad.
+python raychat.py --portable --workspace ./workspace
 ```
+
+All locations use the same format:
+
+```dotenv
+RAYCHAT_AUTH_TOKEN=your-api-token
+RAYCHAT_MODEL=your-model-id
+RAYCHAT_BASE_URL=https://provider.example/v1
+```
+
+Quotes around values are optional. Blank lines and full-line `#` comments are
+supported; values are literal text, with no shell expansion. Do not source the
+file or run an export/PowerShell import command.
+
+Nonblank shell variables override file values; missing or blank variables use
+the selected file. Relative `--env-file` paths are resolved from the launch
+directory. Portable paths are resolved relative to the launcher, independent of
+the current directory or workspace. Other environment files and the platform
+examples are not loaded automatically. If you already filled in the installation's
+`environment/.env`, launch with `--portable` or move it to your user-storage path.
+Restart RayChat after editing settings.
+
+The default file lives outside the installation; the portable `.env` is ignored
+by Git. Neither is included in releases or core snapshots. Keep custom settings
+files private too. The setup window saves atomically and uses owner-only
+permissions on POSIX. There are no default provider values or extra packages.
 
 ## Raw HTTP debugging
 
 Enable raw HTTP capture for a launch with `--debug`:
 
 ```bash
-python3 -B -S raychat.py --debug --debug-dir ./build/http-debug --workspace ./workspace
+python raychat.py --debug --debug-dir ./build/http-debug --workspace ./workspace
 ```
 
 The default directory is `.raychat-http-debug`, resolved relative to the launch
@@ -162,7 +199,7 @@ paths stay within the configured workspace.
 Interactive conversations save automatically, grouped by workspace.
 
 ```bash
-python3 -B -S raychat.py --workspace ./workspace --resume
+python raychat.py --workspace ./workspace --resume
 ```
 
 With one saved session, it opens immediately. With several, a window lists
@@ -171,7 +208,7 @@ or click a session. The selected chat restores its visible transcript, model
 context, and committed plugin state.
 
 ```bash
-python3 -B -S raychat.py --workspace ./workspace --resume SESSION_ID
+python raychat.py --workspace ./workspace --resume SESSION_ID
 ```
 
 `--session-dir PATH` changes the storage location; `--no-session` disables
@@ -202,9 +239,9 @@ application run; the parent's saved transcript includes their workflow reports.
 For automation, pass an explicit prompt or plugin command with `--exec`:
 
 ```bash
-python3 -B -S raychat.py --exec "Inspect the workspace and summarize it" --workspace ./workspace
-python3 -B -S raychat.py --exec /plugins --no-memory
-python3 -B -S raychat.py --exec "/optimize verify" --no-memory
+python raychat.py --exec "Inspect the workspace and summarize it" --workspace ./workspace
+python raychat.py --exec /plugins --no-memory
+python raychat.py --exec "/optimize verify" --no-memory
 ```
 
 This prints the final result to stdout and errors to stderr. It never reads
@@ -257,7 +294,7 @@ proposes bounded prompt/plugin changes and validates them before live promotion.
 example:
 
 ```text
-/self-harness --scores -- python3 -B -S evaluator.py
+/self-harness --scores -- python evaluator.py
 ```
 
 Its default gate requires improvement without a held-in or held-out regression;
@@ -330,7 +367,7 @@ provenance, unchanged prompt templates, and the deterministic transcript oracle.
 | `plugin_catalog/` | Distributable feature ZIPs, catalog metadata and standard profile; rebuild after plugin edits |
 | `tools/` | Acceptance drivers and development/release commands, including `tools/release.py` |
 | `tests/` | Executable unit and integration regression tests |
-| `environment/` | Windows, Linux, and macOS provider environment templates |
+| `environment/` | Local provider settings and credential-free platform examples |
 | `build/` | Ignored generated ZIP, release folder and local verification output |
 
 There is no root `optimization/` implementation or checked-in `dist/` release
@@ -345,14 +382,14 @@ development tools; the harness and behavioral drivers use only the standard
 library. Run static checks with Python 3.12 or newer:
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
-python3 -B -S -m tools.build_plugin_catalog
+python -m tools.build_plugin_catalog
 .venv/bin/python tools/verify_quality.py
 .venv/bin/python tools/check_types.py
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
-python3 -B -S -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
 After a catalog rebuild changes artifact names, copy the builder's printed paths
@@ -383,21 +420,21 @@ application measurements, not measurements of a terminal emulator's display.
 Use `--read-bytes-per-second 1000000` to also test output backpressure.
 
 ```bash
-python3 -B -S -m tools.fps_tui --output ./build/verification-run-1/fps
-python3 -B -S -m tools.bare_tui --output ./build/verification-run-1/bare
-python3 -B -S -m tools.accept_tui --output ./build/verification-run-1/interaction
-python3 -B -S -m tools.features_tui --output ./build/verification-run-1/features
-python3 -B -S -m tools.startup_tui --output ./build/verification-run-1/startup
-python3 -B -S -m tools.profile_upgrade_tui --output ./build/verification-run-1/profile-upgrade
-python3 -B -S -m tools.persistence_tui --output ./build/verification-run-1/persistence
-python3 -B -S -m tools.package_download_tui --output ./build/verification-run-1/package-download
-python3 -B -S -m tools.adversarial_agents_tui --output ./build/verification-run-1/adversarial-agents
-python3 -B -S -m tools.ui_stress_tui --output ./build/verification-run-1/ui-stress
-python3 -B -S -m tools.composer_tui --output ./build/verification-run-1/composer
-python3 -B -S -m tools.collective_tui --agents 50 --parallel 8 --output ./build/verification-run-1/collective
-python3 -B -S -m tools.optimization_tui --output ./build/verification-run-1/optimization
-python3 -B -S -m tools.plugin_guide_tui --output ./build/verification-run-1/plugin-guide
-python3 -B -S -m tools.reload_race_tui --output ./build/verification-run-1/reload-race
+python -m tools.fps_tui --output ./build/verification-run-1/fps
+python -m tools.bare_tui --output ./build/verification-run-1/bare
+python -m tools.accept_tui --output ./build/verification-run-1/interaction
+python -m tools.features_tui --output ./build/verification-run-1/features
+python -m tools.startup_tui --output ./build/verification-run-1/startup
+python -m tools.profile_upgrade_tui --output ./build/verification-run-1/profile-upgrade
+python -m tools.persistence_tui --output ./build/verification-run-1/persistence
+python -m tools.package_download_tui --output ./build/verification-run-1/package-download
+python -m tools.adversarial_agents_tui --output ./build/verification-run-1/adversarial-agents
+python -m tools.ui_stress_tui --output ./build/verification-run-1/ui-stress
+python -m tools.composer_tui --output ./build/verification-run-1/composer
+python -m tools.collective_tui --agents 50 --parallel 8 --output ./build/verification-run-1/collective
+python -m tools.optimization_tui --output ./build/verification-run-1/optimization
+python -m tools.plugin_guide_tui --output ./build/verification-run-1/plugin-guide
+python -m tools.reload_race_tui --output ./build/verification-run-1/reload-race
 ```
 
 These fourteen drivers use deterministic offline model fixtures while exercising
@@ -417,7 +454,7 @@ a workflow child while its parent and sibling remain active.
 To measure Self-Harness with the configured live provider:
 
 ```bash
-python3 -B -S -m tools.self_harness_tui --repetitions 2 --output ./build/verification-run-1/self-harness
+python -m tools.self_harness_tui --repetitions 2 --output ./build/verification-run-1/self-harness
 ```
 
 This spends provider credits. It requires an accepted candidate and improved
@@ -429,8 +466,8 @@ collective driver also accepts `--live` for a real-provider run.
 Build and test the exact release with retained evidence:
 
 ```bash
-python3 -B -S -m tools.build_portable --smoke --smoke-output ./build/verification-run-1/release
-python3 -B -S -m tools.build_portable --check --no-smoke
+python -m tools.build_portable --smoke --smoke-output ./build/verification-run-1/release
+python -m tools.build_portable --check --no-smoke
 ```
 
 On POSIX, release smoke repeats the offline TUI acceptance against the extracted

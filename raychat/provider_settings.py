@@ -11,11 +11,11 @@ if TYPE_CHECKING:
 
 _REQUIRED = ("RAYCHAT_AUTH_TOKEN", "RAYCHAT_MODEL", "RAYCHAT_BASE_URL")
 _HELP = (
-    "Export the missing or empty variables in the same shell that launches RayChat. "
-    "Environment files are not loaded automatically. In Bash/Zsh, load your "
-    "filled-in file with: set -a; . ./.env; set +a\n"
-    "See environment/windows.env, environment/linux.env, or environment/macos.env "
-    "and README.md for setup instructions."
+    "Launch interactively to save settings in application storage, use --env-file "
+    "PATH, or use --portable for installation-local environment/.env. "
+    "Settings load automatically; nonblank shell "
+    "variables take precedence. See README.md and environment/windows.env, "
+    "environment/linux.env, or environment/macos.env for examples."
 )
 
 
