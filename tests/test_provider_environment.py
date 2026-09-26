@@ -100,7 +100,7 @@ class ProviderFormTests(TypedTestCase):
         """Pasted tokens stay masked and mouse/keyboard navigation edits each field."""
         form = SetupForm({})
         decoder = KeyDecoder()
-        for event in decoder.feed(b"\x1b[200~synthetic-token\r\n\x1b[201~\tmodel\t"):
+        for event in decoder.feed(b"\x1b[200~synthetic-token\r\n\x1b[201~\t"):
             form.handle(event)
         form.handle(KeyEvent("paste", "https://provider.invalid/v1"))
         form.handle(KeyEvent("home"))
@@ -110,7 +110,7 @@ class ProviderFormTests(TypedTestCase):
         form.handle(KeyEvent("tab"))
         for event in decoder.feed(b"\x1b[Z"):
             form.handle(event)
-        self.equal(form.focus, 2)
+        self.equal(form.focus, 1)
         surface = Surface(100, 28)
         form.paint(surface)
         rendered = surface.to_ansi()
@@ -120,7 +120,13 @@ class ProviderFormTests(TypedTestCase):
         self.require(form.handle(KeyEvent("click", x=button.x, y=button.y)))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"
-            with mock.patch("raychat.ui.provider_setup.verify_provider"):
+            with mock.patch(
+                "raychat.ui.provider_setup.available_models",
+                return_value=list[str](["test"]),
+            ):
+                self.equal(form.submit(path), None)
+                self.require(not path.exists())
+                self.require(form.handle(KeyEvent("enter")))
                 self.equal(form.submit(path), form.values())
             self.equal(load({}, path), form.values())
 
@@ -130,7 +136,7 @@ class ProviderFormTests(TypedTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"
             self.equal(form.submit(path), None)
-            self.require("all three" in form.error)
+            self.require("API token and base URL" in form.error)
             form = SetupForm(provider_environment(url="invalid"))
             form.handle(KeyEvent("paste", "bad\ninput"))
             self.require("single-line" in form.error)
@@ -139,12 +145,17 @@ class ProviderFormTests(TypedTestCase):
             self.require(not path.exists())
             form = SetupForm(provider_environment())
             with (
-                mock.patch("raychat.ui.provider_setup.verify_provider"),
+                mock.patch(
+                    "raychat.ui.provider_setup.available_models",
+                    return_value=list[str](["test"]),
+                ),
                 mock.patch(
                     "raychat.ui.provider_setup.save",
                     side_effect=PermissionError,
                 ),
             ):
+                self.equal(form.submit(path), None)
+                self.require(form.handle(KeyEvent("enter")))
                 self.equal(form.submit(path), None)
             self.require("write permissions" in form.error)
             self.equal(form.values(), provider_environment())
@@ -152,23 +163,23 @@ class ProviderFormTests(TypedTestCase):
     def test_compact_layout_keeps_controls_errors_and_drafts_visible(self) -> None:
         """Reflow at 80x14 and 80x12 without dropping controls or editing state."""
         form = SetupForm(provider_environment())
-        form.focus = 2
-        form.error = "Fill in all three fields before continuing."
+        form.focus = 1
+        form.error = "Fill in the API token and base URL before continuing."
         previous = form.values()
         for rows in (24, 14, 12, 9, 6, 24):
             with self.subTest(rows=rows):
                 surface = Surface(80, rows)
                 form.paint(surface)
                 screen = surface.to_plain()
-                self.require("Save and continue" in screen)
+                self.require("Choose model" in screen)
                 self.require("Esc: cancel" in screen)
                 self.require(form.error in screen)
                 if rows >= _ALL_FIELDS_ROWS:
                     self.require("Token" in screen or "API token" in screen)
-                    self.require("Model" in screen)
+                    self.require("Model ID" not in screen)
                     self.require("URL" in screen)
                 self.equal(form.values(), previous)
-                self.equal(form.focus, 2)
+                self.equal(form.focus, 1)
                 self.require("fixture-token" not in screen)
 
     def test_compact_mouse_navigation_uses_reflowed_field_bounds(self) -> None:
@@ -178,7 +189,7 @@ class ProviderFormTests(TypedTestCase):
         for index, bounds in enumerate(form.bounds):
             self.equal(
                 form.handle(KeyEvent("click", x=bounds.x, y=bounds.y)),
-                index == len(NAMES),
+                index == len(NAMES) - 1,
             )
             self.equal(form.focus, index)
 
@@ -186,7 +197,7 @@ class ProviderFormTests(TypedTestCase):
 @dataclass
 class _ProbeResponse:
     status: int = 200
-    payload: bytes = b'{"data":[{"id":"fixture-model"}]}'
+    payload: bytes = b'{"data":[{"id":"test"}]}'
 
     def read(self, maximum: int) -> bytes:
         return self.payload[:maximum]
@@ -231,6 +242,37 @@ class _SetupTerminal:
 class ProviderProbeTests(TypedTestCase):
     """Keep setup open until the authenticated models request succeeds."""
 
+    def test_model_menu_filters_provider_ids_before_saving(self) -> None:
+        """Do not save credentials or permit an unlisted model through filtering."""
+        connection = _ProbeConnection(
+            _ProbeResponse(payload=b'{"data":[{"id":"beta"},{"id":"alpha"}]}'),
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch(
+                "raychat.provider_probe.HTTPConnection",
+                return_value=connection,
+            ),
+        ):
+            path = Path(directory) / ".env"
+            form = SetupForm(provider_environment())
+            self.equal(form.submit(path), None)
+            self.require(not path.exists())
+            for rows in (14, 12, 9, 6):
+                surface = Surface(80, rows)
+                form.paint(surface)
+                self.require("Choose a model" in surface.to_plain())
+                self.require("Esc back" in surface.to_plain())
+            form.handle(KeyEvent("paste", "missing"))
+            self.require(not form.handle(KeyEvent("enter")))
+            self.require(not path.exists())
+            for _ in "missing":
+                form.handle(KeyEvent("backspace"))
+            form.handle(KeyEvent("paste", "beta"))
+            self.require(form.handle(KeyEvent("enter")))
+            self.require(form.submit(path) is not None)
+            self.equal(load({}, path)["RAYCHAT_MODEL"], "beta")
+
     def test_setup_loop_shows_error_then_accepts_corrected_token(self) -> None:
         """Keep the actual setup loop open after rejection and show checking status."""
         values = provider_environment()
@@ -239,14 +281,9 @@ class ProviderProbeTests(TypedTestCase):
             terminal = _SetupTerminal(
                 path,
                 [
-                    (
-                        "wrong-token\t"
-                        + values[NAMES[1]]
-                        + "\t"
-                        + values[NAMES[2]]
-                        + "\t\r"
-                    ).encode(),
-                    ("\t\x1b[H\x0b" + values[NAMES[0]] + "\t\t\t\r").encode(),
+                    ("wrong-token\t" + values[NAMES[2]] + "\t\r").encode(),
+                    ("\t\x1b[H\x0b" + values[NAMES[0]] + "\t\t\r").encode(),
+                    b"\r",
                 ],
             )
             connections = [
@@ -254,6 +291,10 @@ class ProviderProbeTests(TypedTestCase):
                 _ProbeConnection(),
             ]
             with (
+                mock.patch.dict(
+                    os.environ,
+                    dict[str, str](TERM_PROGRAM="Apple_Terminal"),
+                ),
                 mock.patch(
                     "raychat.ui.provider_setup.TerminalSession",
                     return_value=nullcontext[_SetupTerminal](terminal),
@@ -268,7 +309,7 @@ class ProviderProbeTests(TypedTestCase):
                 ),
             ):
                 self.equal(configure(path, {}), values)
-            self.equal(terminal.file_before_input, [False, False])
+            self.equal(terminal.file_before_input, [False, False, False])
             self.equal(load({}, path), values)
             screen = TerminalScreen(80, 12)
             screens = []
@@ -276,6 +317,8 @@ class ProviderProbeTests(TypedTestCase):
                 screen.feed(frame.encode())
                 screens.append(screen.text())
             frames = "\n".join(screens)
+            self.require(all(";38;2;" not in frame for frame in terminal.frames))
+            self.require(any(";38;5;" in frame for frame in terminal.frames))
             self.require("Checking provider" in frames)
             self.require("API token rejected" in frames)
             self.require("wrong-token" not in frames)
@@ -293,6 +336,9 @@ class ProviderProbeTests(TypedTestCase):
             ) as factory,
         ):
             path = Path(directory) / ".env"
+            self.equal(form.submit(path), None)
+            self.require(not path.exists())
+            self.require(form.handle(KeyEvent("enter")))
             self.equal(form.submit(path), form.values())
             self.equal(load({}, path), form.values())
             factory.assert_called_once_with("provider.invalid", None, timeout=10)
@@ -321,6 +367,7 @@ class ProviderProbeTests(TypedTestCase):
             (200, b"secret-token", "Invalid models response"),
             (200, b'{"data":[{"id":null}]}', "Invalid models response"),
             (200, b'{"data":{}}', "Invalid models response"),
+            (200, b'{"data":[]}', "No models available"),
             (200, b"x" * (1024 * 1024 + 1), "too large"),
         )
         connection = _ProbeConnection()
@@ -350,7 +397,9 @@ class ProviderProbeTests(TypedTestCase):
                         form.paint(surface)
                         self.require(form.error in surface.to_plain())
             response.status = 200
-            response.payload = b'{"data":[]}'
+            response.payload = b'{"data":[{"id":"test"}]}'
+            self.equal(form.submit(path), None)
+            self.require(form.handle(KeyEvent("enter")))
             self.equal(form.submit(path), form.values())
 
     def test_unreachable_endpoint_never_creates_settings(self) -> None:

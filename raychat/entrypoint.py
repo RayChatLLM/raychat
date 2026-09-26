@@ -30,6 +30,7 @@ from .resources import AgentResources, create_resources, create_worker
 from .storage import SessionStore
 from .ui import controller, picker, terminal_control
 from .ui import terminal as terminal_ui
+from .ui.renderer import supports_truecolor
 from .validation import boolean_field, configuration_fields, integer_field, text_field
 
 
@@ -205,7 +206,8 @@ def build_parser(
         "--256-color",
         action="store_true",
         dest="color_256",
-        default=SETTINGS.tui.color_256,
+        default=SETTINGS.tui.color_256 or not supports_truecolor(environ),
+        help="Use indexed colors (selected automatically in macOS Terminal)",
     )
     add_arguments(parser)
     add_plugin_arguments(parser, environ, argv)

@@ -20,11 +20,12 @@ feature archives on first launch.
 python raychat.py --workspace ./workspace
 ```
 
-On first launch, a setup window asks for your API token, model ID, and API base
-URL. Paste each value, then choose **Save and continue**. RayChat checks the token
-and API base URL by querying `GET /models`. If authentication or the request fails,
-the setup window shows an error and keeps your entries so you can correct them
-and retry. Settings are saved only after the check succeeds. RayChat saves them in
+First-run setup has two steps. Paste your API token and API base URL, then choose
+**Choose model**. RayChat validates the connection with `GET /models` and opens a
+separate searchable menu of available models. Type to filter, then press Enter or
+click a model to save and continue. Connection errors keep the first window open.
+Escape from the model menu returns to the connection form without saving.
+RayChat saves settings in
 `~/.raychat/environment/.env` in your user storage and loads them automatically
 on later runs. The installation directory can be read-only.
 
@@ -59,13 +60,15 @@ unsupported versions, and oversized files.
 
 ### Environment files
 
-You can use the setup window or edit the saved file directly. The window has
-three editable fields, a masked token, and a **Save and continue** button. Use
-Tab/Shift+Tab or click to move between fields; Enter advances or saves. Escape
-cancels without saving. Invalid values and write failures stay in the form so
-you can correct them. At 80×14 or 80×12, the form uses a compact layout with the
-fields, Save button, errors, and keyboard controls visible. Resizing preserves
-your entries and focus.
+You can use setup or edit the saved file directly. The first window has two
+fields: a masked API token and the base URL. Use Tab/Shift+Tab or click to move;
+Enter advances to the separate model menu after validation. The menu lists only
+models returned by your provider. Settings are saved after selection, and write
+failures leave the menu open for retry. Both steps fit small terminals, including
+80×14 and 80×12. Resizing preserves your entries and selection.
+
+macOS Terminal uses 256 colors automatically. Other terminals can opt into this
+mode with `--256-color` if their colors look incorrect.
 
 By default, settings live in `~/.raychat/environment/.env` on every platform.
 Changing `storage.home_directory` in your selected JSON configuration also moves

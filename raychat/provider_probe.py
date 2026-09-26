@@ -23,14 +23,18 @@ _SUCCESS = 200
 _UNAUTHORIZED = {401, 403}
 
 
-def verify_provider(settings: ProviderSettings) -> None:
-    """Require an authenticated, valid models response before saving settings.
+def available_models(settings: ProviderSettings) -> list[str]:
+    """Fetch selectable model IDs using the supplied provider credentials.
+
+    Returns
+    -------
+    list[str]
+        Sorted, unique model IDs from the authenticated endpoint.
 
     Raises
     ------
     ValueError
-        The endpoint is unreachable, rejects authentication, or returns an
-        unusable catalog. Messages never include credentials or response bodies.
+        The provider cannot be reached or offers no usable model IDs.
 
     """
     address = urlsplit(settings.models_url)
@@ -38,7 +42,13 @@ def verify_provider(settings: ProviderSettings) -> None:
     connection = connection_type(address.hostname or "", address.port, timeout=_TIMEOUT)
     try:
         payload = _request_catalog(connection, settings)
-        _validate_catalog(payload)
+        models = _validate_catalog(payload)
+        if not models:
+            message = (
+                "No models available. Check your provider account and permissions."
+            )
+            raise ValueError(message)
+        return sorted(models)
     except TimeoutError:
         message = "Models endpoint timed out. Check your connection and retry."
         raise ValueError(message) from None
@@ -72,11 +82,17 @@ def _request_catalog(connection: HTTPConnection, settings: ProviderSettings) -> 
     return payload
 
 
-def _validate_catalog(payload: bytes) -> None:
+def _validate_catalog(payload: bytes) -> set[str]:
     try:
         fields = object_field(json_object(payload), "models")
-        for item in array_field(fields.get("data"), "models.data"):
+        models = {
             text_field(object_field(item, "model").get("id"), "model.id")
+            for item in array_field(fields.get("data"), "models.data")
+        }
     except (ValueError, ConfigurationError):
         message = "Invalid models response. Check the API base URL."
         raise ValueError(message) from None
+    if any(not model or not model.isprintable() for model in models):
+        message = "Invalid models response. Check the API base URL."
+        raise ValueError(message)
+    return models
