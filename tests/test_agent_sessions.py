@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import time
@@ -227,8 +228,10 @@ class AgentSessionTests(PackageTestCase):
                 action,
             )
             try:
-                require(left.started.wait(2))
-                require(right.started.wait(2))
+                # Construct both real child runtimes before measuring cancellation.
+                startup_timeout = 30 if os.name == "nt" else 2
+                require(left.started.wait(startup_timeout))
+                require(right.started.wait(startup_timeout))
                 chats = {e.name: e for e in self.sessions.entries()}
                 selected = chats["left"]
                 require(selected.worker.cancel_current(selected.job_id))
