@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
     [string] $ExpectedSid,
+    [string] $DiagnosticTest = "",
     [string] $OutputDirectory = "ci-output"
 )
 
@@ -12,6 +13,9 @@ $ErrorActionPreference = 'Stop'
 if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or
     $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
     throw 'This acceptance script requires an ephemeral GitHub-hosted Windows VM.'
+}
+if ($DiagnosticTest -and $DiagnosticTest -ne 'tests.test_workflow_stress.WorkflowStressTests.test_fifty_children_collective_task_compaction_and_recovery') {
+    throw 'Only the fixed fifty-worker diagnostic selection is permitted.'
 }
 
 if ($Child) {
@@ -39,8 +43,14 @@ if ($Child) {
     } catch [UnauthorizedAccessException] {
         Write-Output 'Confirmed: the installation denies standard-user writes.'
     }
-    & $Python -B -m tools.ci_release --output $OutputDirectory --release-only
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($DiagnosticTest) {
+        $null = New-Item -ItemType Directory -Force $OutputDirectory
+        '{}' | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'timings.json')
+        Write-Output "DIAGNOSTIC ONLY: $DiagnosticTest"
+    } else {
+        & $Python -B -m tools.ci_release --output $OutputDirectory --release-only
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
     # Each discovered module runs once. Supervise native unittest processes
     # directly: a crashed interpreter must fail, not strand a process-pool task.
     # Fail-fast emits a failing shard's traceback immediately. A green run still
@@ -49,8 +59,13 @@ if ($Child) {
         ForEach-Object {
             ([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName) -replace '\.py$', '') -replace '[\\/]', '.'
         })
+    if ($DiagnosticTest) { $Modules = @($DiagnosticTest) }
     if ($Modules.Count -eq 0) { throw 'No unit-test modules were discovered.' }
-    $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
+    $ExpectedTests = if ($DiagnosticTest) {
+        & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.loadTestsFromName('$DiagnosticTest').countTestCases())"
+    } else {
+        & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
+    }
     if ($LASTEXITCODE -ne 0) { throw 'Unit discovery failed.' }
     $ExpectedTests = [int]$ExpectedTests
     $Shards = @()
@@ -117,7 +132,10 @@ if ($Child) {
         }
         Write-Output "Completed $ActualTests of $ExpectedTests discovered tests."
         if ($ActualTests -ne $ExpectedTests) { $UnitExit = 1 }
-        [ordered]@{ expected = $ExpectedTests; completed = $ActualTests; passed = ($UnitExit -eq 0) } |
+        [ordered]@{
+            expected = $ExpectedTests; completed = $ActualTests; passed = ($UnitExit -eq 0)
+            diagnostic = [bool]$DiagnosticTest; selection = $DiagnosticTest
+        } |
             ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-report.json')
     } finally {
         foreach ($Shard in $Shards) {
@@ -157,7 +175,21 @@ function Save-Progress([string] $Stage) {
     $Processes = @(Get-Process -ErrorAction SilentlyContinue)
     $Details = @($Processes | Where-Object {
         $_.ProcessName -in @('python', 'pwsh', 'conhost', 'MsMpEng', 'Runner.Worker', 'Runner.Listener')
-    } | Select-Object Id, ProcessName, CPU, WorkingSet64, HandleCount -ErrorAction SilentlyContinue)
+    } | Select-Object Id, ProcessName, CPU, WorkingSet64, HandleCount,
+        @{ Name = 'ThreadCount'; Expression = { $_.Threads.Count } } -ErrorAction SilentlyContinue)
+    $Memory = $null
+    if ($DiagnosticTest) {
+        $OperatingSystem = Get-CimInstance Win32_OperatingSystem
+        $Counters = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
+        $Memory = [ordered]@{
+            physical_total_bytes = [long]$OperatingSystem.TotalVisibleMemorySize * 1024
+            physical_free_bytes = [long]$OperatingSystem.FreePhysicalMemory * 1024
+            committed_bytes = $Counters.CommittedBytes
+            commit_limit_bytes = $Counters.CommitLimit
+            pool_nonpaged_bytes = $Counters.PoolNonpagedBytes
+            pool_paged_bytes = $Counters.PoolPagedBytes
+        }
+    }
     $Logs = @()
     if ($null -ne $ChildOutput -and (Test-Path -LiteralPath $ChildOutput)) {
         foreach ($Log in @(Get-ChildItem -LiteralPath $ChildOutput -File -Filter 'unit-*.*')) {
@@ -170,6 +202,7 @@ function Save-Progress([string] $Stage) {
         stage = $Stage
         process_count = $Processes.Count
         processes = $Details
+        memory = $Memory
         disks = @(Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free)
         tcp_states = @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpConnections() |
             Group-Object State | Select-Object Name, Count)
@@ -301,7 +334,8 @@ try {
             ArgumentList = '-NoLogo -NoProfile -NonInteractive -File "' +
                 (Join-Path $Source 'tools/verify_windows_filesystem.ps1') +
                 '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value +
-                ' -OutputDirectory "' + $ChildOutput + '"'
+                ' -OutputDirectory "' + $ChildOutput + '"' +
+                $(if ($DiagnosticTest) { ' -DiagnosticTest ' + $DiagnosticTest } else { '' })
             Credential = $Credential
             LoadUserProfile = $true
             Environment = $ChildEnvironment
@@ -319,7 +353,8 @@ try {
         $Waiting = [Diagnostics.Stopwatch]::StartNew()
         $PrintedLines = @{}
         $BudgetMinutes = 20
-        $NextSnapshot = 30
+        $SnapshotSeconds = if ($DiagnosticTest) { 5 } else { 30 }
+        $NextSnapshot = $SnapshotSeconds
         do {
             $Exited = $Process.WaitForExit(1000)
             foreach ($LogPath in @($Launch.RedirectStandardOutput, $Launch.RedirectStandardError)) {
@@ -332,7 +367,7 @@ try {
             }
             if ($Waiting.Elapsed.TotalSeconds -ge $NextSnapshot) {
                 Save-Progress "running standard-user process $($Process.Id)"
-                $NextSnapshot = $Waiting.Elapsed.TotalSeconds + 30
+                $NextSnapshot = $Waiting.Elapsed.TotalSeconds + $SnapshotSeconds
             }
             if ($Waiting.Elapsed.TotalMinutes -ge $BudgetMinutes) {
                 throw "$Phase tests exceeded $BudgetMinutes minutes."

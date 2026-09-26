@@ -312,6 +312,7 @@
       ".github/workflows/extended.yml",
       ".github/workflows/portable.yml",
       ".github/workflows/publish.yml",
+      ".github/workflows/windows-triage.yml",
       ".gitignore",
       "LICENSE",
       "README.md",

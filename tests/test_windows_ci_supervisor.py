@@ -102,6 +102,15 @@ class WindowsSupervisorTests(TypedTestCase):
             ("unit-report.json", {"expected": 2, "completed": 1, "passed": True}),
             ("unit-report.json", {"expected": 0, "completed": 0, "passed": True}),
             ("unit-report.json", {"expected": 2, "completed": 2, "passed": False}),
+            (
+                "unit-report.json",
+                {
+                    "expected": 2,
+                    "completed": 2,
+                    "passed": True,
+                    "diagnostic": True,
+                },
+            ),
             ("acceptance/report.json", None),
             ("acceptance/report.json", {"passed": False}),
             ("windows-standard-user/enabled-before.json", None),
@@ -132,6 +141,31 @@ class WindowsSupervisorTests(TypedTestCase):
                     self.equal(supervisor.wait_harness(output, 0), 0)
                     with self.rejected(RuntimeError):
                         supervisor.wait_harness(output, None)
+
+    def test_diagnostic_evidence_never_satisfies_the_release_gate(self) -> None:
+        """A focused stress pass has a separate result from full acceptance."""
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            _passing_evidence(output)
+            (output / "windows-supervisor.json").write_text(
+                json_text({"deadline": time.time() + 30}),
+                encoding="utf-8",
+            )
+            (output / "windows-supervisor.exit").write_text("0\n", encoding="utf-8")
+            (output / "unit-report.json").write_text(
+                json_text({
+                    "expected": 1,
+                    "completed": 1,
+                    "passed": True,
+                    "diagnostic": True,
+                    "selection": "tests.test_workflow_stress.WorkflowStressTests."
+                    "test_fifty_children_collective_task_compaction_and_recovery",
+                }),
+                encoding="utf-8",
+            )
+            self.equal(supervisor.wait_harness(output, None, diagnostic=True), 0)
+            with self.rejected(RuntimeError, "diagnostic test selection"):
+                supervisor.wait_harness(output, None)
 
     def test_timeout_cannot_publish_a_successful_exit_marker(self) -> None:
         """Retire an overdue real child without misreporting completed tests."""

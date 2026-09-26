@@ -18,8 +18,14 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _ROOT = Path(__file__).resolve().parents[1]
+# PowerShell needs console initialization even with redirected streams. Keep
+# these two fixed supervisors windowless; application workers are detached.
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _BUDGET_SECONDS = 1200
+_STRESS_TEST = (
+    "tests.test_workflow_stress.WorkflowStressTests."
+    "test_fifty_children_collective_task_compaction_and_recovery"
+)
 
 
 class _Arguments(argparse.Namespace):
@@ -27,6 +33,7 @@ class _Arguments(argparse.Namespace):
     output: Path
     seconds: float
     deadline: float
+    stress_diagnostic: bool
 
 
 def _status(output: Path) -> int | None:
@@ -93,13 +100,28 @@ def _defender_evidence(path: Path) -> None:
         raise RuntimeError(message)
 
 
-def _completed_evidence(output: Path) -> None:
+def _completed_evidence(output: Path, *, diagnostic: bool = False) -> None:
     unit = _report(output / "unit-report.json")
     expected = integer_field(unit.get("expected"), "expected unit tests")
     completed = integer_field(unit.get("completed"), "completed unit tests")
     if expected <= 0 or completed != expected or unit.get("passed") is not True:
         message = "Windows acceptance did not complete the full passing unit suite."
         raise RuntimeError(message)
+    if diagnostic:
+        if (
+            unit.get("diagnostic") is not True
+            or expected != 1
+            or unit.get("selection") != _STRESS_TEST
+        ):
+            message = "Windows diagnostic did not complete its exact stress selection."
+            raise RuntimeError(message)
+    elif unit.get("diagnostic") is not None and unit.get("diagnostic") is not False:
+        message = "A diagnostic test selection cannot certify release acceptance."
+        raise RuntimeError(message)
+    for phase in ("before", "after"):
+        _defender_evidence(output / f"windows-standard-user/enabled-{phase}.json")
+    if diagnostic:
+        return
     release = _report(output / "acceptance/report.json")
     if (
         release.get("passed") is not True
@@ -108,18 +130,16 @@ def _completed_evidence(output: Path) -> None:
     ):
         message = "Windows acceptance lacks a successful native release launch."
         raise RuntimeError(message)
-    for phase in ("before", "after"):
-        _defender_evidence(output / f"windows-standard-user/enabled-{phase}.json")
 
 
-def _start(output: Path) -> None:
+def _start(output: Path, *, diagnostic: bool = False) -> None:
     output.mkdir(parents=True, exist_ok=True)
     state = output / "windows-supervisor.json"
     if state.exists() or (output / "windows-supervisor.exit").exists():
         message = "A Windows acceptance run already owns this output directory."
         raise RuntimeError(message)
     deadline = time.time() + _BUDGET_SECONDS
-    command = (
+    command: tuple[str, ...] = (
         sys.executable,
         "-B",
         "-S",
@@ -130,6 +150,7 @@ def _start(output: Path) -> None:
         str(output),
         "--deadline",
         str(deadline),
+        *(("--stress-diagnostic",) if diagnostic else ()),
     )
     # Regular standard streams and close_fds prevent an inherited Actions output
     # pipe from keeping the launching workflow step open until the tests finish.
@@ -202,7 +223,12 @@ def run_harness(command: Sequence[str], output: Path, deadline: float) -> int:
     return result
 
 
-def wait_harness(output: Path, seconds: float | None) -> int:
+def wait_harness(
+    output: Path,
+    seconds: float | None,
+    *,
+    diagnostic: bool = False,
+) -> int:
     """Wait briefly for a checkpoint or require the harness's final exit status.
 
     Returns
@@ -222,7 +248,7 @@ def wait_harness(output: Path, seconds: float | None) -> int:
         status = _status(output)
         if status is not None:
             if seconds is None and status == 0:
-                _completed_evidence(output)
+                _completed_evidence(output, diagnostic=diagnostic)
             return status if seconds is None else 0
         remaining = limit - time.time()
         if remaining <= 0:
@@ -255,14 +281,18 @@ def main() -> int:
         message = "This supervisor requires an ephemeral GitHub-hosted Windows VM."
         raise RuntimeError(message)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("start", "run", "checkpoint", "finish"))
+    parser.add_argument(
+        "operation",
+        choices=("start", "run", "checkpoint", "finish", "diagnostic-finish"),
+    )
     parser.add_argument("--output", type=Path, default=Path("ci-output"))
     parser.add_argument("--seconds", type=float, default=180)
     parser.add_argument("--deadline", type=float, default=0)
+    parser.add_argument("--stress-diagnostic", action="store_true")
     args = parser.parse_args(namespace=_Arguments())
     output = args.output.resolve()
     if args.operation == "start":
-        _start(output)
+        _start(output, diagnostic=args.stress_diagnostic)
         return 0
     if args.operation == "run":
         powershell = shutil.which("pwsh")
@@ -279,11 +309,16 @@ def main() -> int:
                 str(_ROOT / "tools/verify_windows_filesystem.ps1"),
                 "-Python",
                 sys.executable,
+                *(("-DiagnosticTest", _STRESS_TEST) if args.stress_diagnostic else ()),
             ),
             output,
             args.deadline,
         )
-    return wait_harness(output, None if args.operation == "finish" else args.seconds)
+    return wait_harness(
+        output,
+        None if args.operation in {"finish", "diagnostic-finish"} else args.seconds,
+        diagnostic=args.operation == "diagnostic-finish",
+    )
 
 
 if __name__ == "__main__":
