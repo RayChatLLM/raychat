@@ -481,6 +481,7 @@
       "raychat/presentation.py",
       "raychat/protocol.py",
       "raychat/provider_environment.py",
+      "raychat/provider_probe.py",
       "raychat/provider_settings.py",
       "raychat/provider_setup.py",
       "raychat/resources.py",

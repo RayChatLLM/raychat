@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
 from raychat.provider_environment import NAMES, save
+from raychat.provider_probe import verify_provider
 from raychat.provider_settings import provider_settings
 from raychat.ui.renderer import CellStyle, Surface
 from raychat.ui.state import Rect, sanitize_text, wrap_display
@@ -117,7 +118,7 @@ class SetupForm:
             self.error = "Fill in all three fields before continuing."
             return None
         try:
-            provider_settings(values)
+            verify_provider(provider_settings(values))
             save(path, values)
         except ValueError as error:
             self.error = str(error)
@@ -267,23 +268,29 @@ def configure(path: Path, values: Mapping[str, str]) -> dict[str, str] | None:
                     deadline = None
             else:
                 deadline = None
-            finished, saved = _apply_events(form, events, path)
+            finished, requested = _apply_events(form, events)
             if finished:
-                return saved
+                return None
+            if requested:
+                form.error = "Checking provider..."
+                checking = Surface(max(1, columns), max(1, rows))
+                form.paint(checking)
+                terminal.present(checking.to_ansi(home=False, previous=previous))
+                previous = checking
+                saved = form.submit(path)
+                if saved is not None:
+                    return saved
 
 
 def _apply_events(
     form: SetupForm,
     events: list[KeyEvent],
-    path: Path,
-) -> tuple[bool, dict[str, str] | None]:
+) -> tuple[bool, bool]:
     for event in events:
         if event.kind == "interrupt":
             raise KeyboardInterrupt
         if event.kind in {"escape", "eof"}:
-            return True, None
+            return True, False
         if form.handle(event):
-            saved = form.submit(path)
-            if saved is not None:
-                return True, saved
-    return False, None
+            return False, True
+    return False, False

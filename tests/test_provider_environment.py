@@ -5,19 +5,22 @@ from __future__ import annotations
 import io
 import os
 import tempfile
-from contextlib import redirect_stderr
-from dataclasses import replace
+from contextlib import nullcontext, redirect_stderr
+from dataclasses import dataclass, field, replace
+from http.client import RemoteDisconnected
 from pathlib import Path
+from ssl import SSLError
 from unittest import mock
 
 from raychat.configuration import SETTINGS
 from raychat.provider_environment import NAMES, load, save
 from raychat.provider_setup import prepare, settings_file
-from raychat.ui.provider_setup import SetupForm
+from raychat.ui.provider_setup import SetupForm, configure
 from raychat.ui.renderer import Surface
 from raychat.ui.terminal import KeyDecoder, KeyEvent
 from tests.assertions import TypedTestCase
 from tests.environment_support import provider_environment
+from tools.terminal_screen import TerminalScreen
 
 _ALL_FIELDS_ROWS = 9
 
@@ -117,7 +120,8 @@ class ProviderFormTests(TypedTestCase):
         self.require(form.handle(KeyEvent("click", x=button.x, y=button.y)))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"
-            self.equal(form.submit(path), form.values())
+            with mock.patch("raychat.ui.provider_setup.verify_provider"):
+                self.equal(form.submit(path), form.values())
             self.equal(load({}, path), form.values())
 
     def test_invalid_input_and_failed_save_keep_drafts(self) -> None:
@@ -134,9 +138,12 @@ class ProviderFormTests(TypedTestCase):
             self.require("RAYCHAT_BASE_URL" in form.error)
             self.require(not path.exists())
             form = SetupForm(provider_environment())
-            with mock.patch(
-                "raychat.ui.provider_setup.save",
-                side_effect=PermissionError,
+            with (
+                mock.patch("raychat.ui.provider_setup.verify_provider"),
+                mock.patch(
+                    "raychat.ui.provider_setup.save",
+                    side_effect=PermissionError,
+                ),
             ):
                 self.equal(form.submit(path), None)
             self.require("write permissions" in form.error)
@@ -174,6 +181,199 @@ class ProviderFormTests(TypedTestCase):
                 index == len(NAMES),
             )
             self.equal(form.focus, index)
+
+
+@dataclass
+class _ProbeResponse:
+    status: int = 200
+    payload: bytes = b'{"data":[{"id":"fixture-model"}]}'
+
+    def read(self, maximum: int) -> bytes:
+        return self.payload[:maximum]
+
+
+@dataclass
+class _ProbeConnection:
+    response: _ProbeResponse = field(default_factory=_ProbeResponse)
+    error: Exception | None = None
+    request_details: tuple[str, str, dict[str, str]] | None = None
+    closed: bool = False
+
+    def request(self, method: str, path: str, *, headers: dict[str, str]) -> None:
+        if self.error is not None:
+            raise self.error
+        self.request_details = method, path, headers
+
+    def getresponse(self) -> _ProbeResponse:
+        return self.response
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class _SetupTerminal:
+    path: Path
+    inputs: list[bytes]
+    frames: list[str] = field(default_factory=list)
+    file_before_input: list[bool] = field(default_factory=list)
+
+    def read(self, _timeout: float) -> bytes:
+        self.file_before_input.append(self.path.exists())
+        if not self.inputs:
+            raise EOFError
+        return self.inputs.pop(0)
+
+    def present(self, frame: str) -> None:
+        self.frames.append(frame)
+
+
+class ProviderProbeTests(TypedTestCase):
+    """Keep setup open until the authenticated models request succeeds."""
+
+    def test_setup_loop_shows_error_then_accepts_corrected_token(self) -> None:
+        """Keep the actual setup loop open after rejection and show checking status."""
+        values = provider_environment()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env"
+            terminal = _SetupTerminal(
+                path,
+                [
+                    (
+                        "wrong-token\t"
+                        + values[NAMES[1]]
+                        + "\t"
+                        + values[NAMES[2]]
+                        + "\t\r"
+                    ).encode(),
+                    ("\t\x1b[H\x0b" + values[NAMES[0]] + "\t\t\t\r").encode(),
+                ],
+            )
+            connections = [
+                _ProbeConnection(_ProbeResponse(status=401)),
+                _ProbeConnection(),
+            ]
+            with (
+                mock.patch(
+                    "raychat.ui.provider_setup.TerminalSession",
+                    return_value=nullcontext[_SetupTerminal](terminal),
+                ),
+                mock.patch(
+                    "raychat.ui.provider_setup.shutil.get_terminal_size",
+                    return_value=os.terminal_size((80, 12)),
+                ),
+                mock.patch(
+                    "raychat.provider_probe.HTTPConnection",
+                    side_effect=connections,
+                ),
+            ):
+                self.equal(configure(path, {}), values)
+            self.equal(terminal.file_before_input, [False, False])
+            self.equal(load({}, path), values)
+            screen = TerminalScreen(80, 12)
+            screens = []
+            for frame in terminal.frames:
+                screen.feed(frame.encode())
+                screens.append(screen.text())
+            frames = "\n".join(screens)
+            self.require("Checking provider" in frames)
+            self.require("API token rejected" in frames)
+            self.require("wrong-token" not in frames)
+            self.require(values[NAMES[0]] not in frames)
+
+    def test_authenticated_catalog_saves_only_after_success(self) -> None:
+        """Use the normalized models URL and bearer token, then persist settings."""
+        form = SetupForm(provider_environment(url="https://provider.invalid/v1/"))
+        connection = _ProbeConnection()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch(
+                "raychat.provider_probe.HTTPSConnection",
+                return_value=connection,
+            ) as factory,
+        ):
+            path = Path(directory) / ".env"
+            self.equal(form.submit(path), form.values())
+            self.equal(load({}, path), form.values())
+            factory.assert_called_once_with("provider.invalid", None, timeout=10)
+            self.equal(
+                connection.request_details,
+                (
+                    "GET",
+                    "/v1/models",
+                    {
+                        "Authorization": "Bearer " + form.values()[NAMES[0]],
+                        "Accept": "application/json",
+                    },
+                ),
+            )
+            self.require(connection.closed)
+
+    def test_rejected_catalog_preserves_file_and_allows_retry(self) -> None:
+        """Reject HTTP errors, redirects and malformed bodies without leaking data."""
+        cases = (
+            (401, b"secret-token", "API token rejected"),
+            (403, b"secret-token", "API token rejected"),
+            (404, b"secret-token", "HTTP 404"),
+            (429, b"secret-token", "HTTP 429"),
+            (500, b"secret-token", "HTTP 500"),
+            (302, b"secret-token", "HTTP 302"),
+            (200, b"secret-token", "Invalid models response"),
+            (200, b'{"data":[{"id":null}]}', "Invalid models response"),
+            (200, b'{"data":{}}', "Invalid models response"),
+            (200, b"x" * (1024 * 1024 + 1), "too large"),
+        )
+        connection = _ProbeConnection()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch(
+                "raychat.provider_probe.HTTPConnection",
+                return_value=connection,
+            ),
+        ):
+            response = connection.response
+            path = Path(directory) / ".env"
+            original = provider_environment(model="old-model")
+            save(path, original)
+            form = SetupForm(provider_environment())
+            for status, body, message in cases:
+                with self.subTest(status=status, message=message):
+                    response.status = status
+                    response.payload = body
+                    self.equal(form.submit(path), None)
+                    self.require(message in form.error)
+                    self.require("secret-token" not in form.error)
+                    self.equal(load({}, path), original)
+                    self.equal(form.values(), provider_environment())
+                    for rows in (14, 12):
+                        surface = Surface(80, rows)
+                        form.paint(surface)
+                        self.require(form.error in surface.to_plain())
+            response.status = 200
+            response.payload = b'{"data":[]}'
+            self.equal(form.submit(path), form.values())
+
+    def test_unreachable_endpoint_never_creates_settings(self) -> None:
+        """Handle DNS, TLS, disconnects and timeout errors without leaving setup."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env"
+            form = SetupForm(provider_environment(url="http://localhost:8000/v1"))
+            for error in (OSError, SSLError, RemoteDisconnected, TimeoutError):
+                connection = _ProbeConnection(error=error("secret-token"))
+                with (
+                    self.subTest(error=error),
+                    mock.patch(
+                        "raychat.provider_probe.HTTPConnection",
+                        return_value=connection,
+                    ),
+                ):
+                    self.equal(form.submit(path), None)
+                    self.require(not path.exists())
+                    self.require("secret-token" not in form.error)
+                    self.require(
+                        "timed out" in form.error or "Cannot reach" in form.error,
+                    )
+                    self.require(connection.closed)
 
 
 class ProviderLocationTests(TypedTestCase):
