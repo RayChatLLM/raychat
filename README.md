@@ -10,7 +10,7 @@ Run it with Python 3.10 or newer. No third-party runtime packages are required.
 feature archives on first launch.
 
 ```bash
-python3 -B -S raychat.py --workspace ./workspace
+python raychat.py --workspace ./workspace
 ```
 
 On first launch, a setup window asks for your API token, model ID, and API base
@@ -20,8 +20,8 @@ URL. Paste each value, then choose **Save and continue**. RayChat saves them in
 Use `/models` in the TUI to fetch all model IDs from the configured provider's
 OpenAI-compatible `GET /models` endpoint. Type to filter; use arrows, Page Up/Down,
 Home/End, Enter, or click to inspect an ID. Escape closes the menu. To change the
-active model, edit `RAYCHAT_MODEL` in `environment/.env` and restart RayChat. Saved sessions and profile
-settings cannot override it. Child chats, task evaluation, and optimization
+active model, edit `RAYCHAT_MODEL` in `environment/.env` and restart RayChat.
+Saved sessions and profile settings cannot override it. Child chats, task evaluation, and optimization
 reflection use the same endpoint, model, and token as the main chat.
 The `/system` panel wraps the complete model identifier onto multiple lines,
 including its provider path.
@@ -30,9 +30,10 @@ Self-Harness is disabled by default. The ordinary chat agent still has the core'
 source inspection, live-update, status, and recovery tools. See
 [live core updates](docs/LIVE_CORE.md) for activation and recovery controls.
 
-On Windows, use `py -3` in place of `python3`. Every launch requires exactly these
-three provider settings. Incomplete settings open the interactive setup window;
-`--exec` or launches without a terminal report the missing values instead. `--help` works without them. `RAYCHAT_BASE_URL` is the API root;
+Every launch requires exactly three provider settings. Incomplete settings open
+the interactive setup window; `--exec` or launches without a terminal report the
+missing values instead. `--help` works without them. `RAYCHAT_BASE_URL` is the API
+root;
 RayChat derives `/chat/completions` and `/models` from it. A complete URL ending
 in `/chat/completions` is also normalized to that same root. There is no default
 provider address or model, and `--model` and `--url` are removed. Other providers'
@@ -59,7 +60,7 @@ Linux or macOS:
 ```bash
 cp environment/linux.env environment/.env  # macOS: use environment/macos.env
 # Edit environment/.env with your preferred text editor.
-python3 -B -S raychat.py --workspace ./workspace
+python raychat.py --workspace ./workspace
 ```
 
 Windows (PowerShell):
@@ -68,7 +69,7 @@ Windows (PowerShell):
 Copy-Item environment/windows.env environment/.env
 notepad environment/.env
 # Fill in all three values, save, and close Notepad.
-py -3 -B -S raychat.py --workspace ./workspace
+python raychat.py --workspace ./workspace
 ```
 
 The file uses the same format on every platform:
@@ -99,7 +100,7 @@ and no additional packages to install.
 Enable raw HTTP capture for a launch with `--debug`:
 
 ```bash
-python3 -B -S raychat.py --debug --debug-dir ./build/http-debug --workspace ./workspace
+python raychat.py --debug --debug-dir ./build/http-debug --workspace ./workspace
 ```
 
 The default directory is `.raychat-http-debug`, resolved relative to the launch
@@ -172,7 +173,7 @@ paths stay within the configured workspace.
 Interactive conversations save automatically, grouped by workspace.
 
 ```bash
-python3 -B -S raychat.py --workspace ./workspace --resume
+python raychat.py --workspace ./workspace --resume
 ```
 
 With one saved session, it opens immediately. With several, a window lists
@@ -181,7 +182,7 @@ or click a session. The selected chat restores its visible transcript, model
 context, and committed plugin state.
 
 ```bash
-python3 -B -S raychat.py --workspace ./workspace --resume SESSION_ID
+python raychat.py --workspace ./workspace --resume SESSION_ID
 ```
 
 `--session-dir PATH` changes the storage location; `--no-session` disables
@@ -212,9 +213,9 @@ application run; the parent's saved transcript includes their workflow reports.
 For automation, pass an explicit prompt or plugin command with `--exec`:
 
 ```bash
-python3 -B -S raychat.py --exec "Inspect the workspace and summarize it" --workspace ./workspace
-python3 -B -S raychat.py --exec /plugins --no-memory
-python3 -B -S raychat.py --exec "/optimize verify" --no-memory
+python raychat.py --exec "Inspect the workspace and summarize it" --workspace ./workspace
+python raychat.py --exec /plugins --no-memory
+python raychat.py --exec "/optimize verify" --no-memory
 ```
 
 This prints the final result to stdout and errors to stderr. It never reads
@@ -267,7 +268,7 @@ proposes bounded prompt/plugin changes and validates them before live promotion.
 example:
 
 ```text
-/self-harness --scores -- python3 -B -S evaluator.py
+/self-harness --scores -- python evaluator.py
 ```
 
 Its default gate requires improvement without a held-in or held-out regression;
@@ -355,14 +356,14 @@ development tools; the harness and behavioral drivers use only the standard
 library. Run static checks with Python 3.12 or newer:
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
-python3 -B -S -m tools.build_plugin_catalog
+python -m tools.build_plugin_catalog
 .venv/bin/python tools/verify_quality.py
 .venv/bin/python tools/check_types.py
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format --check .
-python3 -B -S -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
 After a catalog rebuild changes artifact names, copy the builder's printed paths
@@ -393,21 +394,21 @@ application measurements, not measurements of a terminal emulator's display.
 Use `--read-bytes-per-second 1000000` to also test output backpressure.
 
 ```bash
-python3 -B -S -m tools.fps_tui --output ./build/verification-run-1/fps
-python3 -B -S -m tools.bare_tui --output ./build/verification-run-1/bare
-python3 -B -S -m tools.accept_tui --output ./build/verification-run-1/interaction
-python3 -B -S -m tools.features_tui --output ./build/verification-run-1/features
-python3 -B -S -m tools.startup_tui --output ./build/verification-run-1/startup
-python3 -B -S -m tools.profile_upgrade_tui --output ./build/verification-run-1/profile-upgrade
-python3 -B -S -m tools.persistence_tui --output ./build/verification-run-1/persistence
-python3 -B -S -m tools.package_download_tui --output ./build/verification-run-1/package-download
-python3 -B -S -m tools.adversarial_agents_tui --output ./build/verification-run-1/adversarial-agents
-python3 -B -S -m tools.ui_stress_tui --output ./build/verification-run-1/ui-stress
-python3 -B -S -m tools.composer_tui --output ./build/verification-run-1/composer
-python3 -B -S -m tools.collective_tui --agents 50 --parallel 8 --output ./build/verification-run-1/collective
-python3 -B -S -m tools.optimization_tui --output ./build/verification-run-1/optimization
-python3 -B -S -m tools.plugin_guide_tui --output ./build/verification-run-1/plugin-guide
-python3 -B -S -m tools.reload_race_tui --output ./build/verification-run-1/reload-race
+python -m tools.fps_tui --output ./build/verification-run-1/fps
+python -m tools.bare_tui --output ./build/verification-run-1/bare
+python -m tools.accept_tui --output ./build/verification-run-1/interaction
+python -m tools.features_tui --output ./build/verification-run-1/features
+python -m tools.startup_tui --output ./build/verification-run-1/startup
+python -m tools.profile_upgrade_tui --output ./build/verification-run-1/profile-upgrade
+python -m tools.persistence_tui --output ./build/verification-run-1/persistence
+python -m tools.package_download_tui --output ./build/verification-run-1/package-download
+python -m tools.adversarial_agents_tui --output ./build/verification-run-1/adversarial-agents
+python -m tools.ui_stress_tui --output ./build/verification-run-1/ui-stress
+python -m tools.composer_tui --output ./build/verification-run-1/composer
+python -m tools.collective_tui --agents 50 --parallel 8 --output ./build/verification-run-1/collective
+python -m tools.optimization_tui --output ./build/verification-run-1/optimization
+python -m tools.plugin_guide_tui --output ./build/verification-run-1/plugin-guide
+python -m tools.reload_race_tui --output ./build/verification-run-1/reload-race
 ```
 
 These fourteen drivers use deterministic offline model fixtures while exercising
@@ -427,7 +428,7 @@ a workflow child while its parent and sibling remain active.
 To measure Self-Harness with the configured live provider:
 
 ```bash
-python3 -B -S -m tools.self_harness_tui --repetitions 2 --output ./build/verification-run-1/self-harness
+python -m tools.self_harness_tui --repetitions 2 --output ./build/verification-run-1/self-harness
 ```
 
 This spends provider credits. It requires an accepted candidate and improved
@@ -439,8 +440,8 @@ collective driver also accepts `--live` for a real-provider run.
 Build and test the exact release with retained evidence:
 
 ```bash
-python3 -B -S -m tools.build_portable --smoke --smoke-output ./build/verification-run-1/release
-python3 -B -S -m tools.build_portable --check --no-smoke
+python -m tools.build_portable --smoke --smoke-output ./build/verification-run-1/release
+python -m tools.build_portable --check --no-smoke
 ```
 
 On POSIX, release smoke repeats the offline TUI acceptance against the extracted
