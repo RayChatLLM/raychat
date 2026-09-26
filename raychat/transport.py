@@ -37,7 +37,7 @@ _STOP_SECONDS = SETTINGS.limits.worker_stop_seconds
 _MAX_INPUT_BYTES = SETTINGS.limits.max_child_input_bytes
 _MAX_OUTPUT_BYTES = SETTINGS.limits.max_child_output_bytes
 _READ_BYTES = SETTINGS.limits.child_read_bytes
-_CREATE_NO_WINDOW = 0x08000000
+_DETACHED_PROCESS = 0x00000008
 
 
 @dataclass(frozen=True)
@@ -458,7 +458,9 @@ async def _run_process(request: _ChildRequest) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         limit=_READ_BYTES,
-        creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        # Pipe-only workers need no console server; CREATE_NO_WINDOW would
+        # still allocate a conhost process for every isolated worker.
+        creationflags=_DETACHED_PROCESS if sys.platform == "win32" else 0,
         start_new_session=os.name == "posix",
     )
     process = await creation

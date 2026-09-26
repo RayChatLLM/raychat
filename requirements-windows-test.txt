@@ -1,0 +1,2 @@
+# CI-only native console driver; never needed to run the downloaded application.
+pywinpty==3.0.5

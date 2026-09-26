@@ -83,6 +83,33 @@ class CheckerProcessTests(TypedTestCase):
 
         asyncio.run(exercise())
 
+    def test_deadline_retires_child_and_preserves_diagnostics(self) -> None:
+        """A bounded checker leaves a log and no live child or private scratch."""
+
+        async def exercise() -> None:
+            gate = _SpawnGate()
+            gate.release.set()
+            with tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "timeout.log"
+                workspace = CheckerWorkspace(prefix="checker-timeout-")
+                with (
+                    mock.patch.object(checker_process, "_spawn", gate.spawn),
+                    self.rejected(asyncio.TimeoutError),
+                ):
+                    async with workspace:
+                        await workspace.run(
+                            _SLEEPER,
+                            workspace.path,
+                            log=log,
+                            timeout=0.1,
+                        )
+                self.equal(len(gate.children), 1)
+                self.require(gate.children[0].returncode is not None)
+                self.require(log.is_file())
+                self.require(not workspace.path.exists())
+
+        asyncio.run(exercise())
+
     def test_cancel_during_creation_joins_before_cleanup(self) -> None:
         """Repeated cancellation cannot discard an in-flight spawn or its streams."""
 

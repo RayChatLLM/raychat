@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import re
 import sys
@@ -107,6 +108,10 @@ async def _main(root: Path) -> int:
     return int(any(results))
 
 
+class _Arguments(argparse.Namespace):
+    contracts_only: bool
+
+
 def main() -> int:
     """Check project code, the identical launcher and invalid consumer fixtures.
 
@@ -116,7 +121,13 @@ def main() -> int:
         Zero only when both source checks and the rejection check succeed.
 
     """
-    return asyncio.run(_main(Path(__file__).resolve().parents[1]))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--contracts-only", action="store_true")
+    options = parser.parse_args(namespace=_Arguments())
+    root = Path(__file__).resolve().parents[1]
+    if options.contracts_only:
+        return check_contract_rejections(root)
+    return asyncio.run(_main(root))
 
 
 if __name__ == "__main__":

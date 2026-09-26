@@ -64,7 +64,11 @@ async def _launch(arguments: list[str], cwd: Path) -> _LaunchResult:
     )
     try:
         completion: Awaitable[tuple[bytes, bytes]] = process.communicate()
-        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(completion, 5)
+        # Cold core/plugin startup is scanned under Defender in ordinary-user CI.
+        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(
+            completion,
+            30 if os.name == "nt" else 5,
+        )
         stdout, stderr = await bounded
         status = process.returncode
         if status is None:
@@ -412,7 +416,7 @@ class ResumeTests(_EntrypointFixture):
             ),
         )
         self.equal(result.returncode, 0, result.stderr)
-        self.equal(result.stdout, "7\n")
+        self.equal(result.stdout, "7" + os.linesep)
 
     def test_locked_session_is_not_stolen(self) -> None:
         """Check locked session is not stolen."""

@@ -22,6 +22,9 @@ ignore = ["missing-copyright-notice"]
 "plugins/optimization/gepa/candidate_selector.py" = ["suspicious-non-cryptographic-random-usage"]
 "plugins/optimization/gepa/merge.py" = ["suspicious-non-cryptographic-random-usage"]
 "plugins/optimization/gepa/optimize_anything.py" = ["suspicious-non-cryptographic-random-usage"]
+# This hosted-CI supervisor uses fixed, trusted argument vectors without a shell;
+# explicit Popen handle isolation keeps Actions output pipes out of descendants.
+"tools/windows_ci_supervisor.py" = ["suspicious-subprocess-import", "subprocess-without-shell-equals-true"]
 
 [tool.ruff.lint.flake8-annotations]
 allow-star-arg-any = false

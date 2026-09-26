@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 import tempfile
 import threading
@@ -759,8 +760,7 @@ class SelfHarnessIsolationTests(_HarnessFixture):
             condition="validated"
             in runtime.command(
                 "/self-harness --exit-code -- "
-                + sys.executable
-                + ' -c "raise SystemExit(0)"',
+                + shlex.join([sys.executable, "-c", "raise SystemExit(0)"]),
             ),
         )
         self.equal(self.overlay.read_text(), "GOOD")
@@ -777,7 +777,8 @@ class SelfHarnessIsolationTests(_HarnessFixture):
         )
         with self.rejecting(ValueError, "recurring failure"):
             runtime.command(
-                "/self-harness --exit-code -- " + sys.executable + ' -c "pass"',
+                "/self-harness --exit-code -- "
+                + shlex.join([sys.executable, "-c", "pass"]),
             )
         self.equal(self.chats[id(runtime)].calls, [])
 
@@ -865,8 +866,7 @@ class SelfHarnessIsolationTests(_HarnessFixture):
             future = executor.submit(
                 runtime.command,
                 "/self-harness --exit-code -- "
-                + sys.executable
-                + ' -c "import time; time.sleep(30)"',
+                + shlex.join([sys.executable, "-c", "import time; time.sleep(30)"]),
                 cancel_check=check,
             )
             self.check(condition=bool(started.wait(2)))
