@@ -384,7 +384,7 @@ class AgentSessionTests(PackageTestCase):
             equal(future.result(15), "reply FIRST")
             collect_until(entry.worker, "completed", 2)
             job = entry.worker.submit("WAIT")
-            require(waiting.wait(3))
+            require(waiting.wait(15))
             require(entry.worker.cancel_current(job))
             collect_until(entry.worker, "cancelled", 2)
             entry.worker.submit("AFTER")

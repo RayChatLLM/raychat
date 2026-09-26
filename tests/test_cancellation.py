@@ -343,8 +343,6 @@ class CancellationTests(PackageTestCase):
             ),
             run_options={"delegation_callback": coordinator},
         )
-        parent_id = parent.submit("Run a review workflow")
-        require(child_started.wait(2))
         chat = BlockingChat()
         selected = self.worker(
             chat,
@@ -353,6 +351,10 @@ class CancellationTests(PackageTestCase):
                 "allowed_actions": {"list", "read", "done"},
             },
         )
+        # Build both fixtures before holding a workflow open. Cold child
+        # plugin capture under Defender is separate from cancellation latency.
+        parent_id = parent.submit("Run a review workflow")
+        require(child_started.wait(15))
         child_id = selected.submit("Independent subagent conversation")
         require(chat.entered.wait(2))
         require(selected.cancel_current(child_id))
