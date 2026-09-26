@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import html
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,7 +25,9 @@ from .acceptance_support import (
     verification_paths,
     write_report,
 )
-from .drive_tui import TerminalChat, TerminalOptions
+
+if TYPE_CHECKING or os.name == "posix":
+    from .drive_tui import TerminalChat, TerminalOptions
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -220,7 +223,15 @@ def run(root: Path, output: Path) -> dict[str, object]:
     dict[str, object]
         Captured screens, active process identities and model conversation evidence.
 
+    Raises
+    ------
+    RuntimeError
+        The live POSIX terminal driver is unavailable on this platform.
+
     """
+    if os.name != "posix":
+        message = "This live terminal driver requires POSIX."
+        raise RuntimeError(message)
     output.mkdir(parents=True, exist_ok=False)
     chat = TerminalChat(
         root,

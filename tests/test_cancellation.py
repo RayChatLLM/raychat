@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
-from raychat.composition import create_runtime
+from raychat.composition import create_runtime, package_manager
 from raychat.sdk import (
     CancelCheck,
     Chat,
@@ -252,6 +252,10 @@ class CancellationTests(PackageTestCase):
             The worker attached to this test workspace.
 
         """
+        # Install the real profile before starting lifecycle deadlines. A cold
+        # installation under Defender is not part of the cancellation contract.
+        if not run_options or "runtime" not in run_options:
+            package_manager(self.root)
         worker = AgentWorker(chat, self.root, run_options=run_options)
 
         def cleanup() -> None:
