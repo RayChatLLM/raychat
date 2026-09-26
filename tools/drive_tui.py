@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import logging
 import os
 import pty
 import re
@@ -20,11 +21,28 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
 
 from .terminal_process import TerminalProcess
 from .terminal_screen import TerminalScreen
+
+_LOG = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _cleanup(action: Callable[[], None], operation: str) -> Iterator[None]:
+    """Run one cleanup, retaining a primary failure and reporting a secondary."""
+    try:
+        yield
+    except BaseException:
+        try:
+            action()
+        except (OSError, RuntimeError):
+            _LOG.exception("Acceptance cleanup failed operation=%s", operation)
+        raise
+    else:
+        action()
 
 
 def _terminal_modes(fd: int) -> list[object]:
@@ -272,21 +290,30 @@ class TerminalChat:
             Original terminal modes were not restored or the exit status was unexpected.
 
         """
-        if self.process.poll() is None:
-            self.send(b"\x04")
-            deadline = time.monotonic() + 10
-            while self.process.poll() is None and time.monotonic() < deadline:
-                self.poll()
-        if self.process.poll() is None:
-            self.process.kill()
-        code = self.process.wait(timeout=5)
-        actual = _terminal_modes(self.slave)
-        transcript.write_bytes(self.output)
-        os.close(self.master)
-        os.close(self.slave)
+        with contextlib.ExitStack() as terminal:
+            terminal.enter_context(
+                _cleanup(lambda: os.close(self.slave), "close slave"),
+            )
+            terminal.enter_context(
+                _cleanup(lambda: os.close(self.master), "close master"),
+            )
+            with _cleanup(self._retire, "retire child"):
+                if self.process.poll() is None:
+                    self.send(b"\x04")
+                    deadline = time.monotonic() + 10
+                    while self.process.poll() is None and time.monotonic() < deadline:
+                        self.poll()
+            code = self.process.poll()
+            actual = _terminal_modes(self.slave)
+            transcript.write_bytes(self.output)
         if actual != self.original:
             error_message = "Terminal modes were not restored."
             raise AssertionError(error_message)
         if code != expected_exit:
             error_message = f"TUI exited with status {code}."
             raise AssertionError(error_message)
+
+    def _retire(self) -> None:
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=5)

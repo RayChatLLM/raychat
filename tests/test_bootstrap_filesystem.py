@@ -547,6 +547,54 @@ class BootstrapFilesystemTests(TypedTestCase):
             ):
                 asyncio.run(Releases.validate(root, root / "validation.log"))
 
+    def test_checker_diagnostics_bound_reads_before_copying_the_suffix(self) -> None:
+        """A large checker log is read as a bounded suffix after checker failure."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            details = root / "build" / "quality" / "mypy.txt"
+            details.parent.mkdir(parents=True)
+            suffix = b"last diagnostic\n" * 5000
+            details.write_bytes(b"discarded prefix\n" + suffix)
+            log = root / "validation.log"
+            process = mock.Mock()
+            process.returncode = 7
+            process.wait = mock.AsyncMock(return_value=7)
+            with (
+                mock.patch(
+                    "asyncio.create_subprocess_exec",
+                    new=mock.AsyncMock(return_value=process),
+                ),
+                mock.patch.object(
+                    Path,
+                    "read_bytes",
+                    side_effect=OSError("unbounded diagnostic read"),
+                ),
+                self.rejected(RuntimeError, r"validation failed \(7\)"),
+            ):
+                asyncio.run(Releases.validate(root, log))
+            self.require(log.read_bytes().endswith(suffix[-65536:]))
+
+    def test_invalid_diagnostic_input_preserves_failed_checker_status(self) -> None:
+        """A log replaced by a nonregular input cannot hide the checker failure."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = mock.Mock()
+            process.returncode = 7
+            process.wait = mock.AsyncMock(return_value=7)
+            with (
+                mock.patch(
+                    "asyncio.create_subprocess_exec",
+                    new=mock.AsyncMock(return_value=process),
+                ),
+                mock.patch.object(
+                    releases,
+                    "_quality_diagnostics",
+                    side_effect=ValueError("nonregular diagnostic"),
+                ),
+                self.rejected(RuntimeError, r"validation failed \(7\)"),
+            ):
+                asyncio.run(Releases.validate(root, root / "validation.log"))
+
 
 class BootstrapPathTests(TypedTestCase):
     """Reject linked, aliased or changing inputs before accepting release bytes."""

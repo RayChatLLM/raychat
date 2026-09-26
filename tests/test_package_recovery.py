@@ -113,6 +113,44 @@ manager.update('example')
 class PackageRecoveryTests(TypedTestCase):
     """Recover exact journal-owned trees without touching unrelated scratch work."""
 
+    def test_scope_close_preserves_recovery_and_package_failures(self) -> None:
+        """Both ownership handoffs release locks without masking earlier errors."""
+        original_close = FileLock.close
+
+        def fail() -> None:
+            message = "primary package failure"
+            raise ValueError(message)
+
+        for phase in ("recovery", "operation"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manager = PackageManager(root / "work", root / "home")
+
+                def close(lock: FileLock) -> None:
+                    original_close(lock)
+                    message = "secondary scope close failure"
+                    raise OSError(message)
+
+                with (
+                    mock.patch.object(FileLock, "close", close),
+                    self.assertLogs("raychat.filesystem", level="ERROR") as logs,
+                    self.rejected(ValueError, "primary package failure"),
+                    ExitStack() as patches,
+                ):
+                    if phase == "recovery":
+                        patches.enter_context(
+                            mock.patch.object(
+                                PackageTransaction,
+                                "recover",
+                                side_effect=ValueError("primary package failure"),
+                            ),
+                        )
+                    with manager.source_read():
+                        fail()
+                self.require("secondary scope close failure" in "\n".join(logs.output))
+                with manager.source_read():
+                    pass
+
     def test_cli_and_startup_read_metadata_before_releasing_locks(self) -> None:
         """Declaration and execution use captured metadata after read locks end."""
         for operation in ("cli", "startup"):
