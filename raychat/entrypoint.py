@@ -102,9 +102,10 @@ def build_parser(
     parser = argparse.ArgumentParser(
         description=__doc__,
         epilog=(
-            "Required environment: RAYCHAT_AUTH_TOKEN (API token), "
+            "Provider settings: RAYCHAT_AUTH_TOKEN (API token), "
             "RAYCHAT_MODEL (model ID), RAYCHAT_BASE_URL (HTTP(S) API root). "
-            "See environment/ for platform templates and README.md for loading them."
+            "Edit environment/.env or use interactive setup; "
+            "shell variables override the file."
         ),
     )
     parser.set_defaults(initial_prompt=SETTINGS.tui.initial_prompt)
