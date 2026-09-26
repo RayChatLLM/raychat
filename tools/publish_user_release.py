@@ -125,7 +125,7 @@ async def _publish(artifacts: Path, version: str, commit: str) -> int:
                 "Download and extract the entire ZIP, then run `python raychat`.\n\n"
                 "Requires Python 3.10+. Provider setup opens on first launch.\n\n"
                 "This exact archive passed Linux, macOS, and Windows console "
-                "acceptance, including ordinary-user Windows with Defender active.\n",
+                "acceptance, including ordinary-user Windows.\n",
                 encoding="utf-8",
             )
             await _gh(
