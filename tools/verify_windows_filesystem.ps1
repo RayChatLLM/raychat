@@ -28,6 +28,7 @@ if ($Child) {
         profile = $env:USERPROFILE
         temporary = [IO.Path]::GetTempPath()
         python = $Python
+        processors = [Environment]::ProcessorCount
     } | ConvertTo-Json -Depth 3 | Write-Output
     $Probe = Join-Path (Get-Location) ('.write-probe-' + [guid]::NewGuid().ToString('N'))
     try {
@@ -38,8 +39,90 @@ if ($Child) {
     } catch [UnauthorizedAccessException] {
         Write-Output 'Confirmed: the installation denies standard-user writes.'
     }
-    & $Python -B -m tools.ci_release --output $OutputDirectory
-    exit $LASTEXITCODE
+    & $Python -B -m tools.ci_release --output $OutputDirectory --release-only
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Each discovered module runs once. Supervise native unittest processes
+    # directly: a crashed interpreter must fail, not strand a process-pool task.
+    $Modules = @(Get-ChildItem tests -Recurse -File -Filter 'test*.py' | Sort-Object FullName |
+        ForEach-Object {
+            [IO.Path]::ChangeExtension([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName), $null) -replace '[\\/]', '.'
+        })
+    if ($Modules.Count -eq 0) { throw 'No unit-test modules were discovered.' }
+    $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
+    if ($LASTEXITCODE -ne 0) { throw 'Unit discovery failed.' }
+    $ExpectedTests = [int]$ExpectedTests
+    $Shards = @()
+    $UnitClock = [Diagnostics.Stopwatch]::StartNew()
+    $UnitExit = 1
+    $PrintedUnitLines = @{}
+    try {
+        for ($Index = 0; $Index -lt 3; $Index++) {
+            $Selection = @(for ($Offset = $Index; $Offset -lt $Modules.Count; $Offset += 3) { $Modules[$Offset] })
+            if ($Selection.Count -eq 0) { continue }
+            $UnitOut = Join-Path $OutputDirectory "unit-$Index.stdout.log"
+            $UnitErr = Join-Path $OutputDirectory "unit-$Index.stderr.log"
+            $UnitLaunch = @{
+                FilePath = $Python
+                ArgumentList = @('-B', '-S', '-X', 'faulthandler', '-m', 'unittest', '-v', '--durations', '20') + $Selection
+                WorkingDirectory = (Get-Location).Path
+                RedirectStandardOutput = $UnitOut
+                RedirectStandardError = $UnitErr
+                PassThru = $true
+            }
+            $Shards += [pscustomobject]@{
+                Process = (Start-Process @UnitLaunch)
+                Stdout = $UnitOut; Stderr = $UnitErr; Modules = $Selection
+            }
+        }
+        $Shards | Select-Object Modules | ConvertTo-Json -Depth 4 |
+            Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-modules.json')
+        Write-Output "Running $($Modules.Count) modules once across $($Shards.Count) native unittest processes."
+        do {
+            $AllExited = $true
+            foreach ($Shard in $Shards) {
+                if (-not $Shard.Process.WaitForExit(250)) { $AllExited = $false }
+                foreach ($UnitLog in @($Shard.Stdout, $Shard.Stderr)) {
+                    $Lines = @(Get-Content -LiteralPath $UnitLog -ErrorAction SilentlyContinue)
+                    $Count = if ($PrintedUnitLines.ContainsKey($UnitLog)) { $PrintedUnitLines[$UnitLog] } else { 0 }
+                    if ($Lines.Count -gt $Count) {
+                        $Lines[$Count..($Lines.Count - 1)] | Write-Output
+                        $PrintedUnitLines[$UnitLog] = $Lines.Count
+                    }
+                }
+            }
+            if ($UnitClock.Elapsed.TotalSeconds -ge 900) { throw 'Unit suite exceeded 900 seconds.' }
+        } while (-not $AllExited)
+        $UnitExit = 0
+        $ActualTests = 0
+        foreach ($Shard in $Shards) {
+            Write-Output "Unit process $($Shard.Process.Id): exit $($Shard.Process.ExitCode)."
+            if ($Shard.Process.ExitCode -ne 0) { $UnitExit = 1 }
+            $Summary = Select-String -LiteralPath $Shard.Stderr -Pattern '^Ran (\d+) tests? in ' | Select-Object -Last 1
+            if ($null -eq $Summary) { $UnitExit = 1 } else { $ActualTests += [int]$Summary.Matches[0].Groups[1].Value }
+        }
+        Write-Output "Completed $ActualTests of $ExpectedTests discovered tests."
+        if ($ActualTests -ne $ExpectedTests) { $UnitExit = 1 }
+        [ordered]@{ expected = $ExpectedTests; completed = $ActualTests; passed = ($UnitExit -eq 0) } |
+            ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-report.json')
+    } finally {
+        foreach ($Shard in $Shards) {
+            try {
+                if (-not $Shard.Process.HasExited) {
+                    $Shard.Process.Kill($true)
+                    if (-not $Shard.Process.WaitForExit(30000)) { throw 'Unit process tree did not retire.' }
+                }
+                $Shard.Process.Dispose()
+            } catch {
+                $UnitExit = 1
+                Write-Warning $_
+            }
+        }
+        $TimingsPath = Join-Path $OutputDirectory 'timings.json'
+        $Timings = Get-Content -Raw $TimingsPath | ConvertFrom-Json -AsHashtable
+        $Timings['unit'] = [Math]::Round($UnitClock.Elapsed.TotalSeconds, 3)
+        $Timings | ConvertTo-Json | Set-Content -Encoding utf8 $TimingsPath
+    }
+    exit $UnitExit
 }
 
 $Reports = New-Item -ItemType Directory -Force 'ci-output/windows-standard-user'

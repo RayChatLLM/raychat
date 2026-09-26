@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 import time
 from pathlib import Path
@@ -16,38 +15,25 @@ from tools.checker_process import CheckerWorkspace
 
 class _Arguments(argparse.Namespace):
     output: Path
+    release_only: bool
 
 
-async def _run(root: Path, output: Path) -> int:
+async def _run(root: Path, output: Path, *, release_only: bool = False) -> int:
     archive = output / f"raychat-v{release_version(root)}.zip"
     durations: tuple[str, ...] = (
         ("--durations", "20") if sys.version_info >= (3, 12) else ()
     )
-    unit: tuple[str, ...] = (
-        (
-            "-B",
-            "-m",
-            "unittest_parallel",
-            "-s",
-            "tests",
-            "-j",
-            "2",
-            "--level=module",
-            "-v",
-        )
-        if os.name == "nt"
-        else (
-            "-B",
-            "-S",
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            "tests",
-            "-v",
-            "-f",
-            *durations,
-        )
+    unit = (
+        "-B",
+        "-S",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v",
+        "-f",
+        *durations,
     )
     stages = (
         (
@@ -70,6 +56,8 @@ async def _run(root: Path, output: Path) -> int:
     timings: dict[str, float] = {}
     async with CheckerWorkspace(prefix="raychat-ci-") as workspace:
         for name, arguments in stages:
+            if name == "unit" and release_only:
+                continue
             sys.stdout.write(f"{name}: starting\n")
             sys.stdout.flush()
             started = time.monotonic()
@@ -105,10 +93,17 @@ def main() -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("ci-output"))
+    parser.add_argument("--release-only", action="store_true")
     args = parser.parse_args(namespace=_Arguments())
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    return asyncio.run(_run(Path(__file__).resolve().parents[1], output))
+    return asyncio.run(
+        _run(
+            Path(__file__).resolve().parents[1],
+            output,
+            release_only=args.release_only,
+        ),
+    )
 
 
 if __name__ == "__main__":

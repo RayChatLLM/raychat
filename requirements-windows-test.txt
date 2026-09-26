@@ -1,5 +1,2 @@
 # CI-only native console driver; never needed to run the downloaded application.
 pywinpty==3.0.5
-# Run module fixtures in two isolated processes; no repeated test selections.
-unittest-parallel==1.8.6
-coverage==7.16.1

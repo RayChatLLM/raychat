@@ -13,6 +13,7 @@ from unittest import mock
 from tests.assertions import TypedTestCase
 from tools import build_user_release, release_launcher
 from tools.smoke_process import SmokeCommand, run_checked
+from tools.verify_user_release import verify_plugins
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,6 +55,20 @@ class UserReleaseTests(TypedTestCase):
                         archive.read(prefix + name),
                         archive.read(prefix + original),
                     )
+
+    def test_stale_plugin_archive_fails_release_verification(self) -> None:
+        """Matching archive hashes cannot conceal stale bundled plugin sources."""
+        version, raw = build_user_release.build(_ROOT)
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                archive.extractall(parent)
+            root = parent / f"raychat-v{version}"
+            verify_plugins(root, parent / "original")
+            source = root / "_raychat/plugins/context/__init__.py"
+            source.write_bytes(source.read_bytes() + b"\n# changed plugin source\n")
+            with self.rejected(RuntimeError, "Release folder"):
+                verify_plugins(root, parent / "changed")
 
     def test_public_launcher_works_from_another_directory(self) -> None:
         """Launch without development packages from an unrelated directory."""

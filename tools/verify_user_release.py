@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Protocol
 from raychat.provider_environment import NAMES, load
 from raychat.validation import json_object, object_field
 from tools.acceptance_support import json_text, require
+from tools.build_plugin_catalog import build_catalog
+from tools.build_portable import verify_release_folder
 from tools.build_user_release import build
 from tools.release_provider import MODEL, TOKEN, Provider
 from tools.smoke_process import SmokeCommand, run_checked
@@ -167,6 +169,19 @@ def _assert_readonly(root: Path) -> None:
         raise AssertionError(message)
 
 
+def verify_plugins(root: Path, parent: Path) -> None:
+    """Rebuild plugin sources and require both shipped catalogs to match."""
+    rebuilt = parent / "rebuilt-catalog"
+    build_catalog(root / "_raychat/plugins", rebuilt)
+    expected = {
+        path.relative_to(rebuilt).as_posix(): path.read_bytes()
+        for path in rebuilt.rglob("*")
+        if path.is_file()
+    }
+    verify_release_folder(root / "_raychat/plugin_catalog", expected)
+    verify_release_folder(root / "plugins", expected)
+
+
 def exercise(root: Path, parent: Path, output: Path) -> dict[str, object]:
     """Test the public launcher independently of repository location and packages.
 
@@ -176,6 +191,7 @@ def exercise(root: Path, parent: Path, output: Path) -> dict[str, object]:
         Evidence of terminal, HTTP, and credential persistence checks.
 
     """
+    verify_plugins(root, parent)
     cwd = parent / "Other working directory Ω"
     cwd.mkdir()
     config = object_field(
@@ -249,6 +265,7 @@ def exercise(root: Path, parent: Path, output: Path) -> dict[str, object]:
                 "connection-error",
                 "setup-save",
                 "bundled-plugins",
+                "plugin-source-integrity",
                 "http-worker",
                 "chat",
                 "restart",
