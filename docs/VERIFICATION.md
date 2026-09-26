@@ -10,6 +10,15 @@ The portable smoke gate also includes this driver. It verifies keyboard queue
 navigation and editing, dispatch suspension, draft restoration, command
 completion without execution, exact clipboard bytes on mouse release, footer
 feedback without saved-history changes, and independent workflow-child chats.
+It also verifies per-chat Up/Down input recall while idle and busy, original draft
+cursor restoration, recalled commands and edited resubmission, and Ctrl+E in
+multiline/Unicode composers and queue editors. The live-core driver checks that
+history, browsing position, and the suspended draft survive process replacement.
+Run that driver with the pinned development environment:
+
+```bash
+.venv/bin/python -B -S -m tools.live_core_tui --output /tmp/raychat-navigation-live
+```
 
 
 Verification requires the complete unittest suite, strict typing and lint/format
