@@ -451,7 +451,9 @@ clears selection because wrapped cell coordinates change.
 Up/Down recalls messages and commands submitted in the current chat during this
 run, including queued messages. Down past the newest entry restores your unfinished
 draft and cursor. Recalled text can be edited and resubmitted without changing the
-original history. Menus retain their arrow navigation; Page Up/Down and the mouse
+original history. Recall retains up to 256 recent inputs and 256 KiB of UTF-8 text
+per chat, always keeping at least one input. Older entries are discarded.
+Menus retain their arrow navigation; Page Up/Down and the mouse
 wheel scroll the transcript. Shift+Up/Down continues to edit queued messages.
 Ctrl+A moves to the start of the text, Ctrl+E to the end of the entire text
 (including multiline input), and Ctrl+K deletes from the cursor to the end.

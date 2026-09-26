@@ -16,6 +16,60 @@ from tests.assertions import TypedTestCase
 class InputHistoryTests(TypedTestCase):
     """Exercise history through submitted text and observable editor state."""
 
+    def test_retention_bounds_entries_without_losing_draft(self) -> None:
+        """Old submissions expire while recall still restores the original cursor."""
+        history = InputHistory()
+        for index in range(300):
+            history.record(str(index))
+        self.equal(history.items, [str(index) for index in range(44, 300)])
+        editor = LineEditor("draft")
+        editor.set_text(editor.text, 2)
+        for _ in range(300):
+            history.navigate(editor, -1)
+        self.equal(editor.text, "44")
+        for _ in range(256):
+            history.navigate(editor, 1)
+        self.equal((editor.text, editor.cursor), ("draft", 2))
+
+    def test_ten_large_unicode_histories_fit_handoff_after_browsing(self) -> None:
+        """Bound encoded history even after repeated recall and new submissions."""
+        histories: list[dict[str, object]] = []
+        for _ in range(10):
+            history = InputHistory()
+            editor = LineEditor("draft")
+            for index in range(40):
+                history.record(str(index).zfill(4) + "🙂" * 16_380)
+                history.navigate(editor, -1)
+                history.navigate(editor, 1)
+            self.equal(len(history.items), 4)
+            self.equal(history.items[0][:4], "0036")
+            self.equal(editor.text, "draft")
+            histories.append(history.export_handoff())
+        self.require(len(encode({"histories": histories})) < 8 * 1024 * 1024)
+
+    def test_legacy_handoff_trims_around_selection_and_preserves_draft(self) -> None:
+        """Trim old unlimited history without dropping a selected input or draft."""
+        items = [str(index).zfill(4) + "🙂" * 16_380 for index in range(40)]
+        for selected in (None, 0, 20, 39):
+            history = InputHistory()
+            history.restore_handoff({
+                "items": items,
+                "selected": selected,
+                "draft": None if selected is None else {"text": "draft", "cursor": 2},
+            })
+            self.equal(len(history.items), 4)
+            if selected is not None:
+                self.equal(history.items[history.selected or 0], items[selected])
+                editor = LineEditor(items[selected])
+                for _ in range(4):
+                    history.navigate(editor, 1)
+                self.equal((editor.text, editor.cursor), ("draft", 2))
+            history.record("new")
+            self.equal(len(history.items), 5)
+            history.restore_handoff()
+            history.record(items[0])
+            self.equal(history.items, [items[0]])
+
     def test_order_boundaries_and_original_draft_cursor(self) -> None:
         """Browse oldest/newest bounds and restore the untouched draft cursor."""
         history = InputHistory()
