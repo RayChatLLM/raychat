@@ -40,7 +40,12 @@ if ($Child) {
         Write-Output 'Confirmed: the installation denies standard-user writes.'
     }
     if ($Diagnostic) {
-        & $Python -B -S -c "import faulthandler, unittest; faulthandler.dump_traceback_later(60, repeat=True); unittest.main(module=None)" discover -s tests -v
+        if ($env:RAYCHAT_DIAGNOSTIC_TESTS) {
+            $Tests = $env:RAYCHAT_DIAGNOSTIC_TESTS.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+            & $Python -B -S -X faulthandler -m unittest -v -f @Tests
+        } else {
+            & $Python -B -S -X faulthandler -m unittest discover -s tests -v -f
+        }
     } else {
         & $Python -B -m tools.ci_release --output $OutputDirectory
     }

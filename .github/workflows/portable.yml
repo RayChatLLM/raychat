@@ -10,6 +10,10 @@ on:
         description: Diagnose full Windows discovery using the previous direct launch path
         type: boolean
         default: false
+      diagnostic_tests:
+        description: Space-separated unittest names for an isolated diagnostic
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -31,6 +35,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
+      RAYCHAT_DIAGNOSTIC_TESTS: ${{ inputs.diagnostic_tests }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
