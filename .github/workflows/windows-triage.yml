@@ -1,0 +1,335 @@
+# Temporary full-suite diagnosis; this job is never a release publication check.
+name: Windows stress diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release-build]
+    paths: [.github/workflows/windows-triage.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-triage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows full-suite diagnostic
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-windows-test.txt
+      - name: Install CI-only console driver
+        run: python -m pip install -r requirements-windows-test.txt
+      - name: Start the unchanged full Windows acceptance harness
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor start
+      - name: Wait for diagnostic checkpoint 1
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 1
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-1-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 2
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 2
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-2-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 3
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 3
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-3-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 4
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 4
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-4-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 5
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 5
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-5-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 6
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 6
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-6-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 7
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 7
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-7-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 8
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 8
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-8-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 9
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 9
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-9-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 10
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 10
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-10-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 11
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 11
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-11-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 12
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 12
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-12-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 13
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 13
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-13-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 14
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 14
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-14-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 15
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 15
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-15-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 16
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 16
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-16-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 17
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 17
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-17-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 18
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 18
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-18-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 19
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 19
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-19-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 20
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 20
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-20-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 21
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 21
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-21-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 22
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 22
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-22-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 23
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 23
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-23-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for diagnostic checkpoint 24
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain diagnostic checkpoint 24
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-24-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Require actual full acceptance evidence
+        timeout-minutes: 9
+        run: python -B -S -m tools.windows_ci_supervisor finish
+      - name: Retain complete diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-triage-final
+          path: ci-output/
+          if-no-files-found: error
