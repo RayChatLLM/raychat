@@ -1640,6 +1640,22 @@ class ActionProtocolTests(PackageTestCase):
 class TransportBoundaryTests(PackageTestCase):
     """Exercise framing and failure cleanup through real isolated interpreters."""
 
+    def test_windows_worker_has_no_attached_console(self) -> None:
+        """Pipe-only workers allocate neither a console window nor a server."""
+        if os.name != "nt":
+            self.skipTest("Windows console APIs are required")
+        launcher = ChildLauncher(
+            "import ctypes,json,sys\nsys.stdin.buffer.read()\n"
+            "kernel = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+            "processes = (ctypes.c_uint32 * 1)()\n"
+            "count = kernel.GetConsoleProcessList(processes, 1)\n"
+            "message = f'{count} {ctypes.get_last_error()}'\n"
+            "print(json.dumps({'type': 'final', 'message': message}))\n",
+        )
+        with mock.patch.object(asyncio, "create_subprocess_exec", new=launcher):
+            equal(process_runtime.run_child(None, {}, None), "0 6")
+        require(launcher.processes[0].returncode is not None)
+
     def test_parent_sigkill_cancels_isolated_command_process_tree(self) -> None:
         """Reap an isolated command tree when its owning core is killed."""
         if os.name != "posix":

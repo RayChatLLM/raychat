@@ -931,8 +931,9 @@ class ProcessExecutionTests(_WorkspaceFixture):
         script = (
             "import ctypes; "
             "kernel = ctypes.WinDLL('kernel32', use_last_error=True); "
-            "kernel.GetConsoleWindow.restype = ctypes.c_void_p; "
-            "print(bool(kernel.GetConsoleWindow()))"
+            "processes = (ctypes.c_uint32 * 1)(); "
+            "count = kernel.GetConsoleProcessList(processes, 1); "
+            "print(count, ctypes.get_last_error())"
         )
         result = _rc_process.run_command(
             [sys.executable, "-I", "-S", "-c", script],
@@ -940,7 +941,7 @@ class ProcessExecutionTests(_WorkspaceFixture):
             30,
         )
         self.check(condition=bool(result["ok"]))
-        self.equal(result["stdout"].strip(), "False")
+        self.equal(result["stdout"].strip(), "0 6")
 
     def test_windows_job_kills_descendants_after_timeout_and_normal_exit(self) -> None:
         """Windows job kills descendants after timeout and normal exit."""
@@ -1331,7 +1332,7 @@ class WindowsJobTests(_Assertions):
         self.equal(command[:4], [sys.executable, "-I", "-S", "-c"])
         self.equal(
             options["creationflags"],
-            _windows.CREATE_NEW_PROCESS_GROUP | _windows.CREATE_NO_WINDOW,
+            _windows.CREATE_NEW_PROCESS_GROUP | _windows.DETACHED_PROCESS,
         )
         self.check(condition=bool(options["close_fds"]))
 

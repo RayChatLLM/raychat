@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _ROOT = Path(__file__).resolve().parents[1]
-_CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_DETACHED_PROCESS = 0x00000008 if os.name == "nt" else 0
 _BUDGET_SECONDS = 1200
 
 
@@ -78,7 +78,7 @@ def _start(output: Path) -> None:
             stderr=stderr,
             close_fds=True,
             shell=False,
-            creationflags=_CREATE_NO_WINDOW,
+            creationflags=_DETACHED_PROCESS,
         )
     try:
         state.write_text(
@@ -115,7 +115,7 @@ def run_harness(command: Sequence[str], output: Path, deadline: float) -> int:
         stdin=subprocess.DEVNULL,
         close_fds=True,
         shell=False,
-        creationflags=_CREATE_NO_WINDOW,
+        creationflags=_DETACHED_PROCESS,
     )
     try:
         result = process.wait(timeout=max(0.01, deadline - time.time()))

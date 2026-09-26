@@ -43,6 +43,8 @@ if ($Child) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Each discovered module runs once. Supervise native unittest processes
     # directly: a crashed interpreter must fail, not strand a process-pool task.
+    # Fail-fast emits a failing shard's traceback immediately. A green run still
+    # requires every discovered test to complete, checked below.
     $Modules = @(Get-ChildItem tests -Recurse -File -Filter 'test*.py' | Sort-Object FullName |
         ForEach-Object {
             ([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName) -replace '\.py$', '') -replace '[\\/]', '.'
@@ -70,7 +72,7 @@ if ($Child) {
                 Join-Path $env:TEMP "unit-$Index")).FullName
             $UnitLaunch = @{
                 FilePath = $Python
-                ArgumentList = @('-B', '-S', '-X', 'faulthandler', '-m', 'unittest', '-v', '--durations', '20') + $Selection
+                ArgumentList = @('-B', '-S', '-X', 'faulthandler', '-m', 'unittest', '-v', '--failfast', '--durations', '20') + $Selection
                 WorkingDirectory = (Get-Location).Path
                 RedirectStandardOutput = $UnitOut
                 RedirectStandardError = $UnitErr

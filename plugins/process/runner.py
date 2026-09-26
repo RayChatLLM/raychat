@@ -21,7 +21,7 @@ from raychat.validation import ConfigurationError, array_field
 
 from .configuration import load as load_settings
 from .lifecycle import FailureCapture, raise_saved_exception
-from .windows import CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, WindowsJob
+from .windows import CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, WindowsJob
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -51,8 +51,8 @@ async def main():
             *specification["argv"],
             cwd=specification["cwd"],
             stdin=asyncio.subprocess.DEVNULL,
-            # A console-less helper does not suppress its child's console.
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
+            # Suppress the console server itself, not just its window.
+            creationflags=0x00000008,  # DETACHED_PROCESS
             close_fds=True,
         )
     except (KeyError, OSError, TypeError, ValueError) as exc:
@@ -368,7 +368,7 @@ async def spawn_windows_command(
             stderr=asyncio.subprocess.PIPE,
             # Commands use captured pipes and Job Object termination, so no
             # console is needed for either I/O or process-tree cancellation.
-            creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
             close_fds=True,
             limit=COMMAND_READ_BYTES,
         )
