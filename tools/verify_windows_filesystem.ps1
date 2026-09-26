@@ -186,10 +186,21 @@ try {
         Write-Output "Starting tests at $([DateTime]::UtcNow.ToString('o'))."
         $Process = Start-Process @Launch
         $Retired = $false
-        # Let the Python checker reach its own deadline and retain diagnostics first.
-        if (-not $Process.WaitForExit(1200000)) { throw "$Phase tests exceeded twenty minutes." }
+        # Short waits keep cancellation responsive and expose each Python stage.
+        $Waiting = [Diagnostics.Stopwatch]::StartNew()
+        $PrintedLines = 0
+        do {
+            $Exited = $Process.WaitForExit(1000)
+            $Lines = @(Get-Content -LiteralPath $Launch.RedirectStandardOutput -ErrorAction SilentlyContinue)
+            if ($Lines.Count -gt $PrintedLines) {
+                $Lines[$PrintedLines..($Lines.Count - 1)] | Write-Output
+                $PrintedLines = $Lines.Count
+            }
+            if ($Waiting.Elapsed.TotalMinutes -ge 20) {
+                throw "$Phase tests exceeded twenty minutes."
+            }
+        } while (-not $Exited)
         $Retired = $true
-        Get-Content -LiteralPath (Join-Path $Reports "$Phase.stdout.log")
         Get-Content -LiteralPath (Join-Path $Reports "$Phase.stderr.log")
         if ($Process.ExitCode -ne 0) { throw "$Phase tests exited $($Process.ExitCode)." }
         $Process.Dispose()

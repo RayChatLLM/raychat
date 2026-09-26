@@ -20,7 +20,6 @@ class _Arguments(argparse.Namespace):
 async def _run(root: Path, output: Path) -> int:
     archive = output / f"raychat-v{release_version(root)}.zip"
     stages = (
-        ("unit", ("-B", "-S", "-m", "unittest", "discover", "-s", "tests", "-v")),
         (
             "build",
             ("-B", "-S", "-m", "tools.build_user_release", "--output", str(output)),
@@ -36,15 +35,19 @@ async def _run(root: Path, output: Path) -> int:
                 str(output / "acceptance"),
             ),
         ),
+        ("unit", ("-B", "-S", "-m", "unittest", "discover", "-s", "tests", "-v")),
     )
     timings: dict[str, float] = {}
     async with CheckerWorkspace(prefix="raychat-ci-") as workspace:
         for name, arguments in stages:
+            sys.stdout.write(f"{name}: starting\n")
+            sys.stdout.flush()
             started = time.monotonic()
             result = await workspace.run(
                 (sys.executable, *arguments),
                 root,
                 log=output / f"{name}.log",
+                timeout={"unit": 900, "release": 180, "build": 60}[name],
             )
             timings[name] = round(time.monotonic() - started, 3)
             sys.stdout.write(
