@@ -10,16 +10,17 @@ Run it with Python 3.10 or newer. No third-party runtime packages are required.
 feature archives on first launch.
 
 ```bash
-export RAYCHAT_AUTH_TOKEN="your-api-token"
-export RAYCHAT_MODEL="your-model-id"
-export RAYCHAT_BASE_URL="https://provider.example/v1"
 python3 -B -S raychat.py --workspace ./workspace
 ```
+
+On first launch, a setup window asks for your API token, model ID, and API base
+URL. Paste each value, then choose **Save and continue**. RayChat saves them in
+`environment/.env` beside the launcher and loads them automatically on later runs.
 
 Use `/models` in the TUI to fetch all model IDs from the configured provider's
 OpenAI-compatible `GET /models` endpoint. Type to filter; use arrows, Page Up/Down,
 Home/End, Enter, or click to inspect an ID. Escape closes the menu. To change the
-active model, set `RAYCHAT_MODEL` and restart RayChat. Saved sessions and profile
+active model, edit `RAYCHAT_MODEL` in `environment/.env` and restart RayChat. Saved sessions and profile
 settings cannot override it. Child chats, task evaluation, and optimization
 reflection use the same endpoint, model, and token as the main chat.
 The `/system` panel wraps the complete model identifier onto multiple lines,
@@ -30,8 +31,8 @@ source inspection, live-update, status, and recovery tools. See
 [live core updates](docs/LIVE_CORE.md) for activation and recovery controls.
 
 On Windows, use `py -3` in place of `python3`. Every launch requires exactly these
-three provider variables; missing or blank values produce an error listing the
-variables to set. `--help` works without them. `RAYCHAT_BASE_URL` is the API root;
+three provider settings. Incomplete settings open the interactive setup window;
+`--exec` or launches without a terminal report the missing values instead. `--help` works without them. `RAYCHAT_BASE_URL` is the API root;
 RayChat derives `/chat/completions` and `/models` from it. A complete URL ending
 in `/chat/completions` is also normalized to that same root. There is no default
 provider address or model, and `--model` and `--url` are removed. Other providers'
@@ -45,44 +46,53 @@ unsupported versions, and oversized files.
 
 ### Environment files
 
-Copy the template for your platform to `.env`, fill in all three values, and load
-it into the shell before launching. RayChat reads the process environment; it
-does not silently load another configuration file. `.env` is ignored by Git.
-The templates contain no credentials, endpoint, or model defaults.
+You can use the setup window or edit `environment/.env` directly. The window has
+three editable fields, a masked token, and a **Save and continue** button. Use
+Tab/Shift+Tab or click to move between fields; Enter advances or saves. Escape
+cancels without saving. Invalid values and write failures stay in the form so
+you can correct them.
 
-Editing a file or assigning a shell variable alone does not export it to RayChat.
-Every launch checks the provider environment automatically, before opening the
-terminal or loading plugins. If any variable is missing or blank, startup stops
-with the exact names to fix and a separate `set`, `missing`, or `empty` status for
-each variable. Configured values are never displayed in these diagnostics.
-If you filled in a platform template directly, source that file in the commands
-below instead of `.env` (for example, `. ./environment/macos.env`). Start RayChat
-in that same shell.
+For manual setup, copy your platform's example once, then fill in all three values:
 
-Linux or macOS (Bash or Zsh):
+Linux or macOS:
 
 ```bash
-cp environment/linux.env .env  # macOS: use environment/macos.env
-# Edit .env and fill in all three values, retaining the single quotes.
-set -a
-. ./.env
-set +a
+cp environment/linux.env environment/.env  # macOS: use environment/macos.env
+# Edit environment/.env with your preferred text editor.
 python3 -B -S raychat.py --workspace ./workspace
 ```
 
 Windows (PowerShell):
 
 ```powershell
-Copy-Item environment/windows.env .env
-notepad .env
-# Fill in all three values without quotes, then save and close Notepad.
-Get-Content .env | ForEach-Object {
-    if ($_ -match '^\s*(RAYCHAT_AUTH_TOKEN|RAYCHAT_MODEL|RAYCHAT_BASE_URL)\s*=(.*)$') {
-        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2].Trim(), 'Process')
-    }
-}
+Copy-Item environment/windows.env environment/.env
+notepad environment/.env
+# Fill in all three values, save, and close Notepad.
 py -3 -B -S raychat.py --workspace ./workspace
 ```
+
+The file uses the same format on every platform:
+
+```dotenv
+RAYCHAT_AUTH_TOKEN=your-api-token
+RAYCHAT_MODEL=your-model-id
+RAYCHAT_BASE_URL=https://provider.example/v1
+```
+
+Quotes around values are optional. Blank lines and full-line `#` comments are
+supported; values are literal text, with no shell expansion. Do not source the
+file or run an export/PowerShell import command.
+
+Nonblank shell variables override file values; missing or blank variables use
+the file. The file is resolved relative to the RayChat launcher, regardless of
+the current directory, workspace, or JSON configuration. A root-level `.env` and
+the example platform files are not loaded; move existing saved settings into
+`environment/.env`. Restart RayChat after editing settings.
+
+`environment/.env` is ignored by Git and excluded from releases and core snapshots.
+It contains your token, so keep it private. The setup window saves it atomically
+and uses owner-only permissions on POSIX. There are no default provider values
+and no additional packages to install.
 
 ## Raw HTTP debugging
 
@@ -330,7 +340,7 @@ provenance, unchanged prompt templates, and the deterministic transcript oracle.
 | `plugin_catalog/` | Distributable feature ZIPs, catalog metadata and standard profile; rebuild after plugin edits |
 | `tools/` | Acceptance drivers and development/release commands, including `tools/release.py` |
 | `tests/` | Executable unit and integration regression tests |
-| `environment/` | Windows, Linux, and macOS provider environment templates |
+| `environment/` | Local provider settings and credential-free platform examples |
 | `build/` | Ignored generated ZIP, release folder and local verification output |
 
 There is no root `optimization/` implementation or checked-in `dist/` release

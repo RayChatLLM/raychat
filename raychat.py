@@ -14,6 +14,11 @@ class _Launcher(Protocol):
 
 
 @runtime_checkable
+class _ProviderSetup(Protocol):
+    def __call__(self, root: Path, *, interactive: bool) -> int | None: ...
+
+
+@runtime_checkable
 class _Recovery(Protocol):
     def __call__(self) -> None: ...
 
@@ -48,22 +53,33 @@ def main() -> int:
     config: object = options.config
     if isinstance(config, Path) and "RAYCHAT_RECOVERY" not in os.environ:
         os.environ["RAYCHAT_CONFIG"] = str(config.resolve())
-    try:
-        # Host settings load on import, after the bootstrap configuration above.
-        interactive = (
-            os.isatty(0)
-            and os.isatty(1)
-            and not any(
-                arg in {"--exec", "--help", "-h"} or arg.startswith("--exec=")
-                for arg in sys.argv[1:]
-            )
+    # Host settings load on import, after the bootstrap configuration above.
+    interactive = (
+        os.isatty(0)
+        and os.isatty(1)
+        and not any(
+            arg in {"--exec", "--help", "-h"} or arg.startswith("--exec=")
+            for arg in sys.argv[1:]
         )
-        module = "raychat_bootstrap.supervisor" if interactive else "raychat.entrypoint"
-        launch: object = importlib.import_module(module).main
+    )
+    try:
+        return _launch(interactive=interactive)
     except RuntimeError as exc:
         message = str(exc).encode("unicode_escape").decode("ascii")
         sys.stderr.write("Configuration error: " + message + "\n")
         return 1
+
+
+def _launch(*, interactive: bool) -> int:
+    setup: object = importlib.import_module("raychat.provider_setup").prepare
+    if not isinstance(setup, _ProviderSetup):
+        message = "The provider setup entrypoint is unavailable."
+        raise TypeError(message)
+    status = setup(Path(__file__).resolve().parent, interactive=interactive)
+    if status is not None:
+        return status
+    module = "raychat_bootstrap.supervisor" if interactive else "raychat.entrypoint"
+    launch: object = importlib.import_module(module).main
     if not isinstance(launch, _Launcher):
         message = "The RayChat entrypoint does not provide a callable launcher."
         raise TypeError(message)
