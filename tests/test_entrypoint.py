@@ -174,6 +174,23 @@ class _EntrypointFixture(TypedTestCase):
 class EntrypointTests(_EntrypointFixture):
     """Check explicit jobs, startup validation and cleanup reporting."""
 
+    def test_terminal_color_default_and_explicit_override(self) -> None:
+        """Use indexed colors in macOS Terminal and retain the explicit override."""
+        for terminal, flags, expected in (
+            ("Apple_Terminal", [], True),
+            ("iTerm.app", [], False),
+            ("vscode", [], False),
+            ("iTerm.app", ["--256-color"], True),
+        ):
+            with self.subTest(terminal=terminal, flags=flags):
+                environ = {**provider_environment(), "TERM_PROGRAM": terminal}
+                args = entrypoint.build_parser(environ).parse_args([
+                    *self.flags,
+                    *flags,
+                ])
+                raw: object = vars(args)
+                self.equal(object_field(raw, "arguments")["color_256"], expected)
+
     def test_exec_returns_only_sanitized_final_response(self) -> None:
         """Check exec returns only sanitized final response."""
         chat = ScriptedChat(

@@ -136,13 +136,16 @@ class ProviderLaunchTests(TypedTestCase):
             )
             try:
                 chat.wait("Esc: cancel")
-                chat.send("wrong-token\t" + _MODEL + "\t" + self.url + "\t\r")
+                chat.send("wrong-token\t" + self.url + "\t\r")
                 chat.wait("API token rejected")
-                self.require("Save and continue" in chat.screen())
+                self.require("Choose model" in chat.screen())
                 self.require("Esc: cancel" in chat.screen())
                 self.require(not path.exists())
                 self.require(b"RAY/CHAT" not in chat.output)
-                chat.send("\t\x1b[H\x0b" + _KEY + "\t\t\t\r")
+                chat.send("\t\x1b[H\x0b" + _KEY + "\t\t\r")
+                chat.wait("Choose a model (2/2)")
+                self.require(not path.exists())
+                chat.send("\r")
                 chat.wait("RAY/CHAT", seconds=30)
                 self.require(path.is_file())
                 chat.resize(110, 30)
@@ -173,15 +176,16 @@ class ProviderLaunchTests(TypedTestCase):
             chat = TerminalChat(root, arguments, environ=environment)
             try:
                 chat.wait("Esc: cancel")
-                chat.send(b"\t\t\t\r")
-                chat.wait("Fill in all three")
+                chat.send(b"\t\t\r")
+                chat.wait("Fill in the API token")
                 chat.send(b"\t")
                 chat.send("\x1b[200~" + _KEY + "\r\n\x1b[201~\t")
-                chat.send(_MODEL + "\tinvalid\t\r")
+                chat.send("invalid\t\r")
                 chat.wait("RAYCHAT_BASE_URL must")
                 self.require(_KEY not in chat.screen())
                 # Shift+Tab, Home, Ctrl+K replace the invalid URL.
                 chat.send("\x1b[Z\x1b[H\x0b" + self.url + "\t\r")
+                self._select_model_after_back(chat, path)
                 chat.wait("MESSAGE", seconds=30)
                 chat.send("hello\r")
                 chat.wait("SETUP_CHAT_OK", seconds=30)
@@ -195,12 +199,23 @@ class ProviderLaunchTests(TypedTestCase):
             chat = TerminalChat(root, arguments, environ=environment)
             try:
                 chat.wait("MESSAGE", seconds=30)
-                self.require(b"Welcome to RayChat" not in chat.output)
+                self.require(b"Provider connection (1/2)" not in chat.output)
                 chat.send("hello again\r")
                 chat.wait("SETUP_CHAT_OK", seconds=30)
             finally:
                 chat.close(root / "restart.log")
             self._check_release_exclusion(root)
+
+    def _select_model_after_back(self, chat: TerminalChat, path: Path) -> None:
+        chat.wait("Choose a model (2/2)")
+        self.require(not path.exists())
+        chat.send("\x1b")
+        chat.wait("Provider connection (1/2)")
+        self.require(not path.exists())
+        self.require(_KEY not in chat.screen())
+        chat.send("\r")
+        chat.wait("Choose a model (2/2)")
+        chat.send(_MODEL + "\r")
 
     def test_readonly_installation_saves_outside_source_and_reopens(self) -> None:
         """Complete first run with immutable source and writable configured storage."""
@@ -244,7 +259,9 @@ class ProviderLaunchTests(TypedTestCase):
         chat = TerminalChat(root, arguments, environ=dict.fromkeys(NAMES, ""))
         try:
             chat.wait("Esc: cancel")
-            chat.send(_KEY + "\t" + _MODEL + "\t" + self.url + "\t\r")
+            chat.send(_KEY + "\t" + self.url + "\t\r")
+            chat.wait("Choose a model (2/2)")
+            chat.send("\r")
             chat.wait("MESSAGE", seconds=30)
             chat.send("hello\r")
             chat.wait("SETUP_CHAT_OK", seconds=30)
@@ -256,7 +273,7 @@ class ProviderLaunchTests(TypedTestCase):
         chat = TerminalChat(root, arguments, environ=dict.fromkeys(NAMES, ""))
         try:
             chat.wait("MESSAGE", seconds=30)
-            self.require(b"Welcome to RayChat" not in chat.output)
+            self.require(b"Provider connection (1/2)" not in chat.output)
             chat.send("hello\r")
             chat.wait("SETUP_CHAT_OK", seconds=30)
         finally:
@@ -285,23 +302,25 @@ class ProviderLaunchTests(TypedTestCase):
         )
         try:
             chat.wait("Esc: cancel")
-            for label in ("Token:", "Model:", "URL:", "Save and continue"):
+            for label in ("Token:", "URL:", "Choose model"):
                 self.require(label in chat.screen())
-            chat.send("\t\t\t\r")
-            chat.wait("Fill in all three")
-            chat.send("\t" + _KEY + "\t" + _MODEL + "\tinvalid\t\r")
+            chat.send("\t\t\r")
+            chat.wait("Fill in the API token")
+            chat.send("\t" + _KEY + "\tinvalid\t\r")
             chat.wait("RAYCHAT_BASE_URL must")
             self.require("Esc: cancel" in chat.screen())
             chat.resize(110, 30)
             chat.wait("API token (hidden)")
             chat.resize(80, rows)
             chat.wait("Token:")
-            chat.wait(_MODEL)
+            chat.wait("invalid")
             chat.wait("RAYCHAT_BASE_URL must")
             chat.wait("Esc: cancel")
             chat.send("\x1b[Z\x1b[H\x0b" + self.url)
             # The compact save button is at zero-based row 6, column 3.
             chat.send("\x1b[<0;5;7M\x1b[<0;5;7m")
+            chat.wait("Choose a model (2/2)")
+            chat.send("\r")
             chat.wait("RAY/CHAT", seconds=30)
             self.require((root / "environment" / ".env").is_file())
             # Main chat has its own existing 14-row minimum; setup is complete.

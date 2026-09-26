@@ -14,10 +14,11 @@ These instructions are the same on Windows, macOS, and Linux. The `python`
 command must refer to Python 3.10 or newer. There is no RayChat installer and
 no package installation is needed for ordinary use.
 
-The first-run window asks for your API token, model ID, and API base URL.
-Paste each value and choose **Save and continue**. RayChat checks the provider's
-models endpoint before saving. If it fails, the window explains the error and
-keeps your entries for correction. Chat requires an internet connection and a
+Setup has two steps. First, paste your API token and API base URL and choose
+**Choose model**. RayChat validates the connection and opens a separate menu of
+available models. Type to filter, then press **Enter** or click a model to save
+and continue. **Esc** returns to the connection form without saving. Connection
+errors keep the form open and preserve your entries for correction. Chat requires an internet connection and a
 working OpenAI-compatible provider.
 
 Settings are saved privately in `~/.raychat/environment/.env`. Run
@@ -52,6 +53,8 @@ they are not required for normal chat.
   in the terminal. Check `python --version`.
 - **Missing application files:** extract the entire archive; do not launch from
   inside a ZIP viewer or move the `raychat` file by itself.
+- **Colors look wrong:** macOS Terminal automatically uses 256 colors. In other
+  terminals, try `python raychat --256-color`.
 - **Setup rejects the token or URL:** check the provider's token permissions and
   API base URL, your connection, and whether it supports `GET /models`.
 - **A different provider is used:** nonblank `RAYCHAT_*` variables already set in

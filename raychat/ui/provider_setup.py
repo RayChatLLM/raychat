@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
 from raychat.provider_environment import NAMES, save
-from raychat.provider_probe import verify_provider
+from raychat.provider_probe import available_models
 from raychat.provider_settings import provider_settings
-from raychat.ui.renderer import CellStyle, Surface
+from raychat.ui.picker import Choice, Picker
+from raychat.ui.renderer import CellStyle, Surface, supports_truecolor
 from raychat.ui.state import Rect, sanitize_text, wrap_display
 from raychat.ui.terminal import KeyDecoder, KeyEvent, LineEditor, TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
@@ -19,11 +21,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-_LABELS = ("API token (hidden)", "Model ID", "API base URL")
-_FIELD_COUNT = len(NAMES)
+_FIELDS = (NAMES[0], NAMES[2])
+_LABELS = ("API token (hidden)", "API base URL")
+_FIELD_COUNT = len(_FIELDS)
 _FORM_HEIGHT = 17
 _COMPACT_MIN_HEIGHT = 9
-_SHORT_LABELS = ("Token", "Model", "URL")
+_SHORT_LABELS = ("Token", "URL")
 
 
 class SetupForm:
@@ -35,8 +38,10 @@ class SetupForm:
         *,
         destination: Path | None = None,
     ) -> None:
-        """Prefill the three fields and focus the first missing value."""
-        self.editors = [LineEditor(values.get(name, "").strip()) for name in NAMES]
+        """Prefill connection fields and retain an existing model for selection."""
+        self.editors = [LineEditor(values.get(name, "").strip()) for name in _FIELDS]
+        self.model = values.get(NAMES[1], "").strip()
+        self.picker: Picker | None = None
         self.focus = next((i for i, e in enumerate(self.editors) if not e.text), 0)
         self.error = ""
         self.destination = (
@@ -54,8 +59,11 @@ class SetupForm:
 
         """
         return {
-            name: editor.text.strip()
-            for name, editor in zip(NAMES, self.editors, strict=True)
+            NAMES[1]: self.model,
+            **{
+                name: editor.text.strip()
+                for name, editor in zip(_FIELDS, self.editors, strict=True)
+            },
         }
 
     def handle(self, event: KeyEvent) -> bool:
@@ -67,6 +75,12 @@ class SetupForm:
             Whether Save and continue was activated.
 
         """
+        if self.picker is not None:
+            closed, selected = self.picker.handle(event)
+            if closed and selected is not None:
+                self.model = selected
+                return True
+            return False
         if event.kind in {"tab", "down", "enter"}:
             if event.kind == "enter" and self.focus == _FIELD_COUNT:
                 return True
@@ -105,7 +119,7 @@ class SetupForm:
             self.error = ""
 
     def submit(self, path: Path) -> dict[str, str] | None:
-        """Save a valid form, retaining drafts and a useful message on failure.
+        """Discover models first, then save the explicit selection atomically.
 
         Returns
         -------
@@ -114,12 +128,14 @@ class SetupForm:
 
         """
         values = self.values()
-        if any(not value for value in values.values()):
-            self.error = "Fill in all three fields before continuing."
+        if any(not values[name] for name in _FIELDS):
+            self.error = "Fill in the API token and base URL before continuing."
             return None
         try:
-            verify_provider(provider_settings(values))
-            save(path, values)
+            if self.picker is None:
+                self._discover(values)
+                return None
+            self._save_selection(path, values)
         except ValueError as error:
             self.error = str(error)
         except OSError:
@@ -128,9 +144,39 @@ class SetupForm:
             return values
         return None
 
+    def _discover(self, values: Mapping[str, str]) -> None:
+        settings = provider_settings({**values, NAMES[1]: "_setup"})
+        models = available_models(settings)
+        self.picker = Picker(
+            "Choose a model (2/2)",
+            [Choice(model, model) for model in models],
+            selected=self.model,
+            searchable=True,
+        )
+        self.error = ""
+
+    def _save_selection(self, path: Path, values: Mapping[str, str]) -> None:
+        if self.picker is None or self.model not in {
+            choice.id for choice in self.picker.all_choices
+        }:
+            message = "Choose an available model before saving."
+            raise ValueError(message)
+        save(path, values)
+
     def paint(self, surface: Surface) -> None:
         """Reflow fields, errors and controls to fit the current terminal size."""
         colors = SETTINGS.tui.palette
+        if self.picker is not None:
+            self.picker.paint(surface)
+            if self.error:
+                surface.text(
+                    1,
+                    surface.height - 1,
+                    self.error,
+                    max_width=max(1, surface.width - 2),
+                    style=CellStyle(foreground=colors.ink, background=colors.panel),
+                )
+            return
         width = max(1, min(84, surface.width - 2))
         height = min(_FORM_HEIGHT, surface.height)
         box = Rect(
@@ -145,36 +191,34 @@ class SetupForm:
             box,
             border=colors.cyan,
             background=colors.panel,
-            title="Welcome to RayChat",
+            title="Provider connection (1/2)",
             ascii_only=True,
         )
         self.bounds = [Rect(0, -1, 0, 0) for _ in range(_FIELD_COUNT + 1)]
         self._paint_fields(surface, box, compact=compact, paged=paged)
-        save_row = (
-            max(2, height - 4) if paged else min(6, height - 4) if compact else 12
-        )
+        save_row = max(2, height - 4) if paged else min(6, height - 4) if compact else 9
         button = Rect(box.x + 2, box.y + save_row, max(1, width - 4), 1)
         self.bounds[-1] = button
         _text(
             surface,
             box,
             save_row,
-            ("> " if self.focus == _FIELD_COUNT else "  ") + "[ Save and continue ]",
+            ("> " if self.focus == _FIELD_COUNT else "  ") + "[ Choose model ]",
         )
         if not paged:
             destination = sanitize_text(self.destination)
             available = max(1, width - 13)
             if len(destination) > available:
                 destination = "..." + destination[-max(1, available - 3) :]
-            _text(surface, box, 1 if compact else 13, "Save to: " + destination)
+            _text(surface, box, 1 if compact else 10, "Save to: " + destination)
         if not compact:
-            _text(surface, box, 1, "Enter your provider settings to get started.")
-        error_row = save_row + 1 if compact else 14
+            _text(surface, box, 1, "Connect to your provider, then choose a model.")
+        error_row = save_row + 1 if compact else 11
         for row, line in enumerate(wrap_display(self.error, max(1, width - 4))):
             if error_row + row >= height - 2:
                 break
             _text(surface, box, error_row + row, line)
-        _text(surface, box, height - 2, "Tab: move  Enter: next/save  Esc: cancel")
+        _text(surface, box, height - 2, "Tab: move  Enter: next  Esc: cancel")
 
     def _paint_fields(
         self,
@@ -244,6 +288,7 @@ def configure(path: Path, values: Mapping[str, str]) -> dict[str, str] | None:
 
     """
     form, decoder = SetupForm(values, destination=path), KeyDecoder()
+    truecolor = supports_truecolor(os.environ) and not SETTINGS.tui.color_256
     deadline = None
     previous: Surface | None = None
     with termination_signal_bridge(), TerminalSession() as terminal:
@@ -251,7 +296,7 @@ def configure(path: Path, values: Mapping[str, str]) -> dict[str, str] | None:
             columns, rows = shutil.get_terminal_size((80, 24))
             surface = Surface(max(1, columns), max(1, rows))
             form.paint(surface)
-            frame = surface.to_ansi(home=False, previous=previous)
+            frame = surface.to_ansi(home=False, previous=previous, truecolor=truecolor)
             if frame:
                 terminal.present(frame)
             previous = surface
@@ -272,10 +317,20 @@ def configure(path: Path, values: Mapping[str, str]) -> dict[str, str] | None:
             if finished:
                 return None
             if requested:
-                form.error = "Checking provider..."
+                form.error = (
+                    "Checking provider..."
+                    if form.picker is None
+                    else "Saving settings..."
+                )
                 checking = Surface(max(1, columns), max(1, rows))
                 form.paint(checking)
-                terminal.present(checking.to_ansi(home=False, previous=previous))
+                terminal.present(
+                    checking.to_ansi(
+                        home=False,
+                        previous=previous,
+                        truecolor=truecolor,
+                    ),
+                )
                 previous = checking
                 saved = form.submit(path)
                 if saved is not None:
@@ -290,6 +345,10 @@ def _apply_events(
         if event.kind == "interrupt":
             raise KeyboardInterrupt
         if event.kind in {"escape", "eof"}:
+            if event.kind == "escape" and form.picker is not None:
+                form.picker = None
+                form.error = ""
+                continue
             return True, False
         if form.handle(event):
             return False, True

@@ -133,11 +133,11 @@ def _first_run(
     chat = launch.terminal()
     try:
         chat.wait("Esc: cancel")
-        chat.send("wrong-token\t" + MODEL + "\t" + provider.url + "\t\r")
+        chat.send("wrong-token\t" + provider.url + "\t\r")
         chat.wait("API token rejected")
         require(not settings.exists(), "Rejected credentials were saved.")
         chat.send(
-            "\t\x1b[H\x0b" + TOKEN + "\t\t\x1b[H\x0b" + provider.url + "/wrong\t\r",
+            "\t\x1b[H\x0b" + TOKEN + "\t\x1b[H\x0b" + provider.url + "/wrong\t\r",
         )
         chat.wait("HTTP 404")
         require(not settings.exists(), "An invalid endpoint was saved.")
@@ -147,6 +147,13 @@ def _first_run(
         require(not settings.exists(), "A disconnected endpoint was saved.")
         (output / "connection-error.txt").write_text(chat.screen(), encoding="utf-8")
         chat.send("\x1b[Z\x1b[H\x0b" + provider.url + "\t\r")
+        chat.wait("Choose a model (2/2)")
+        require(not settings.exists(), "Settings saved before model selection.")
+        chat.send("no-such-model")
+        chat.wait("No matches.")
+        chat.send("\r")
+        require(not settings.exists(), "An unavailable model was saved.")
+        chat.send("\x7f" * len("no-such-model") + MODEL + "\r")
         chat.wait("MESSAGE", seconds=45)
         require(load({}, settings).get(NAMES[0]) == TOKEN, "Settings were not saved.")
         chat.send("Say hello\r")
