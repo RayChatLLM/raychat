@@ -662,6 +662,7 @@
       "tools/release_provider.py",
       "tools/reload_race_tui.py",
       "tools/self_harness_tui.py",
+      "tools/set_release_acl.ps1",
       "tools/smoke_process.py",
       "tools/startup_tui.py",
       "tools/terminal_process.py",

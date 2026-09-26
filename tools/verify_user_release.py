@@ -66,29 +66,23 @@ def readonly_installation(root: Path) -> Iterator[None]:
     """Deny installation writes while the actual application runs."""
     if os.name == "nt":
         sid = os.environ["RAYCHAT_TEST_SID"]
+        command = (
+            "pwsh",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(Path(__file__).with_name("set_release_acl.ps1")),
+            "-Root",
+            str(root),
+            "-ExpectedSid",
+            sid,
+        )
         try:
-            _command(
-                (
-                    "icacls",
-                    str(root),
-                    "/inheritance:d",
-                    "/grant:r",
-                    f"*{sid}:(OI)(CI)(RX)",
-                ),
-                root.parent,
-            )
+            _command(command, root.parent)
             yield
         finally:
-            _command(
-                (
-                    "icacls",
-                    str(root),
-                    "/grant:r",
-                    f"*{sid}:(OI)(CI)(F)",
-                    "/inheritance:e",
-                ),
-                root.parent,
-            )
+            _command((*command, "-Writable"), root.parent)
     else:
         modes = [
             (path, path.stat().st_mode & 0o777) for path in (root, *root.rglob("*"))
@@ -161,6 +155,18 @@ def _first_run(
         _finish(chat, output, "first-run")
 
 
+def _assert_readonly(root: Path) -> None:
+    require(bool((root / "raychat").read_bytes()), "Read-only launcher is unreadable.")
+    for path in (root / "write-probe", root / "raychat"):
+        try:
+            with path.open("ab"):
+                pass
+        except PermissionError:
+            continue
+        message = "The release permits writes to " + path.name
+        raise AssertionError(message)
+
+
 def exercise(root: Path, parent: Path, output: Path) -> dict[str, object]:
     """Test the public launcher independently of repository location and packages.
 
@@ -168,11 +174,6 @@ def exercise(root: Path, parent: Path, output: Path) -> dict[str, object]:
     -------
     dict[str, object]
         Evidence of terminal, HTTP, and credential persistence checks.
-
-    Raises
-    ------
-    AssertionError
-        The extracted application directory permits writes.
 
     """
     cwd = parent / "Other working directory Ω"
@@ -201,17 +202,7 @@ def exercise(root: Path, parent: Path, output: Path) -> dict[str, object]:
     provider = Provider()
     try:
         with readonly_installation(root):
-            require(
-                bool((root / "raychat").read_bytes()),
-                "Read-only launcher is unreadable.",
-            )
-            try:
-                (root / "write-probe").write_bytes(b"should fail")
-            except PermissionError:
-                pass
-            else:
-                message = "The release must be read-only for this acceptance test."
-                raise AssertionError(message)
+            _assert_readonly(root)
             _first_run(_Launch(root, cwd, arguments), settings, provider, output)
             chat = _terminal(root, cwd, arguments)
             try:
