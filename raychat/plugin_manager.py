@@ -693,24 +693,20 @@ class PackageManager:
 
     def _acquire_scope(self, scope: str, *, timeout: float = 0) -> FileLock:
         lock = FileLock(self.state_roots[scope] / "plugins.mutex", timeout=timeout)
-        lock.acquire()
-        try:
+        with ExitStack() as held:
+            held.enter_context(lock)
             PackageTransaction.recover(
                 self.roots[scope] / "plugins",
                 self.state_file(scope),
             )
-        except BaseException:
-            lock.close()
-            raise
+            held.pop_all()
         return lock
 
     @contextmanager
     def _locked_scope(self, scope: str, *, timeout: float = 1.0) -> Iterator[None]:
-        lock = self._acquire_scope(scope, timeout=timeout)
-        try:
+        with ExitStack() as held:
+            held.push(self._acquire_scope(scope, timeout=timeout))
             yield
-        finally:
-            lock.close()
 
     def state_file(self, scope: str) -> Path:
         """Locate a scope receipt outside the untrusted workspace.
