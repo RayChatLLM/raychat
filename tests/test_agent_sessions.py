@@ -378,14 +378,17 @@ class AgentSessionTests(PackageTestCase):
                 coordinator,
                 "FIRST",
             )
-            equal(future.result(3), "reply FIRST")
+            # Each isolated request starts a fresh interpreter and loads the
+            # captured plugins. Keep that startup budget separate from the
+            # two-second cancellation contract below, including under Defender.
+            equal(future.result(15), "reply FIRST")
             collect_until(entry.worker, "completed", 2)
             job = entry.worker.submit("WAIT")
             require(waiting.wait(3))
             require(entry.worker.cancel_current(job))
             collect_until(entry.worker, "cancelled", 2)
             entry.worker.submit("AFTER")
-            final, _ = collect_until(entry.worker, "completed", 3)
+            final, _ = collect_until(entry.worker, "completed", 15)
             equal(final.payload["result"], "reply AFTER")
             history = [
                 m["content"]
