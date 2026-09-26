@@ -171,7 +171,7 @@ def _quality_diagnostics(root: Path, output: BinaryIO) -> None:
     for name in ("mypy", "mypy-launcher", "ruff", "format"):
         details = root / "build" / "quality" / (name + ".txt")
         if details.is_file():
-            output.write(details.read_bytes()[-65536:])
+            output.write(read_regular(details, 65536, from_end=True))
     output.flush()
 
 
@@ -443,7 +443,7 @@ class Releases:
                         await run_filesystem_task(
                             partial(_quality_diagnostics, root, output),
                         )
-                    except OSError:
+                    except (OSError, ValueError):
                         logging.getLogger(__name__).exception(
                             "Validation diagnostics failed after checker status=%d",
                             status,

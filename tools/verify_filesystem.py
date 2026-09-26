@@ -6,6 +6,11 @@ import unittest
 
 SUITES = (
     "tests.test_checker_process",
+    "tests.test_process_creation",
+    (
+        "tests.test_orchestration.TransportBoundaryTests."
+        "test_parent_sigkill_cancels_isolated_command_process_tree"
+    ),
     "tests.test_filesystem",
     "tests.test_filesystem_process",
     "tests.test_app_config",
