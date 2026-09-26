@@ -20,7 +20,9 @@ concurrency:
 
 jobs:
   platform:
-    name: Release / ${{ matrix.name }}
+    name: >-
+      ${{ github.event_name == 'workflow_dispatch' && 'Manual validation' || 'Release' }} /
+      ${{ matrix.name }}${{ inputs.defender && matrix.artifact == 'windows' && ' + Defender' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
