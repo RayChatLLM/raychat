@@ -9,10 +9,11 @@ import math
 import os
 import signal
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from raychat.configuration import SETTINGS
@@ -23,6 +24,7 @@ from .lifecycle import FailureCapture, raise_saved_exception
 from .windows import CREATE_NEW_PROCESS_GROUP, WindowsJob
 
 if TYPE_CHECKING:
+    from concurrent.futures import Future
     from pathlib import Path
 
     from raychat.sdk import CancelCheck
@@ -478,6 +480,54 @@ async def _collect_readers(
     return failure or cleanup.failure
 
 
+async def _retire_started(
+    creation: asyncio.Task[tuple[ManagedProcess, WindowsJob | None]],
+) -> FailureInfo | None:
+    cleanup = FailureCapture()
+    process: ManagedProcess | None = None
+    job: WindowsJob | None = None
+    shutdown: FailureInfo | None = None
+    input_failure: FailureInfo | None = None
+    with cleanup:
+        process, job = await creation
+    if process is not None:
+        with cleanup:
+            shutdown = await _terminate_owned(process, job)
+        with cleanup:
+            input_failure = await _close_process_input(process)
+    return shutdown or cleanup.failure or input_failure
+
+
+async def _start_owned(
+    command: _Command,
+) -> tuple[ManagedProcess, WindowsJob | None]:
+    # Native creation can already have started descendants before asyncio has
+    # connected its pipes. Cancelling that creation kills only the direct child
+    # and can leave those descendants holding the pipes and workspace open.
+    creation = asyncio.create_task(
+        spawn_command(
+            command.argv,
+            command.cwd,
+            _command_environment(),
+            command.cancel_check,
+        ),
+    )
+    primary = FailureCapture()
+    with primary:
+        return await asyncio.shield(creation)
+    retirement = asyncio.create_task(_retire_started(creation))
+    while not retirement.done():
+        with suppress(asyncio.CancelledError):
+            await asyncio.shield(retirement)
+    if primary.failure is not None:
+        secondary = retirement.result()
+        if secondary is not None and secondary[1] is primary.failure[1]:
+            secondary = None
+        raise_saved_exception(primary.failure, secondary)
+    message = "Command creation completed without a result or failure."
+    raise RuntimeError(message)
+
+
 async def _run_command(command: _Command) -> CommandResult:
     process: ManagedProcess | None = None
     job: WindowsJob | None = None
@@ -489,12 +539,7 @@ async def _run_command(command: _Command) -> CommandResult:
     primary, cleanup = FailureCapture(), FailureCapture()
     timed_out = False
     with primary:
-        process, job = await spawn_command(
-            command.argv,
-            command.cwd,
-            _command_environment(),
-            command.cancel_check,
-        )
+        process, job = await _start_owned(command)
         if process.stdout is None or process.stderr is None:
             message = "Command output pipes were not created."
             raise RuntimeError(message)
@@ -606,12 +651,58 @@ def _run_isolated(command: _Command) -> CommandResult:
     return asyncio.run(_run_command(command))
 
 
-def _running_loop() -> bool:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return False
-    return True
+def _join_command(future: Future[CommandResult]) -> CommandResult:
+    # A signal raised by another Python thread may only run its main-thread
+    # handler after this wait wakes. Keep parent-liveness cancellation responsive.
+    while not future.done():
+        wait((future,), timeout=COMMAND_POLL_SECONDS)
+    return future.result()
+
+
+def _run_in_thread(command: _Command) -> CommandResult:
+    # Signal handlers run on the main thread. Keep them outside the event loop
+    # that owns native creation, pipes and process-tree retirement.
+    stopped = threading.Event()
+    context = contextvars.copy_context()
+
+    def check_cancelled() -> None:
+        if command.cancel_check is not None:
+            command.cancel_check()
+        if stopped.is_set():
+            raise asyncio.CancelledError
+
+    def invoke() -> CommandResult:
+        return context.run(
+            _run_isolated,
+            replace(command, cancel_check=check_cancelled),
+        )
+
+    with ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="command-loop",
+    ) as executor:
+        future: Future[CommandResult] | None = None
+        primary, cleanup = FailureCapture(), FailureCapture()
+        with primary:
+            future = executor.submit(invoke)
+            return _join_command(future)
+        stopped.set()
+        if future is not None:
+            while not future.done():
+                with cleanup:
+                    _join_command(future)
+            with cleanup:
+                future.result()
+        if primary.failure is not None:
+            secondary = cleanup.failure
+            if secondary is not None and (
+                secondary[1] is primary.failure[1]
+                or isinstance(secondary[1], asyncio.CancelledError)
+            ):
+                secondary = None
+            raise_saved_exception(primary.failure, secondary)
+    message = "Command owner completed without a result or failure."
+    raise RuntimeError(message)
 
 
 def run_command(
@@ -642,15 +733,4 @@ def run_command(
         cancel_check,
         output_limit,
     )
-    if not _running_loop():
-        return _run_isolated(command)
-    context = contextvars.copy_context()
-
-    def invoke() -> CommandResult:
-        return context.run(_run_isolated, command)
-
-    with ThreadPoolExecutor(
-        max_workers=1,
-        thread_name_prefix="command-loop",
-    ) as executor:
-        return executor.submit(invoke).result()
+    return _run_in_thread(command)
