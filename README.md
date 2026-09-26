@@ -14,7 +14,10 @@ python raychat.py --workspace ./workspace
 ```
 
 On first launch, a setup window asks for your API token, model ID, and API base
-URL. Paste each value, then choose **Save and continue**. RayChat saves them in
+URL. Paste each value, then choose **Save and continue**. RayChat checks the token
+and API base URL by querying `GET /models`. If authentication or the request fails,
+the setup window shows an error and keeps your entries so you can correct them
+and retry. Settings are saved only after the check succeeds. RayChat saves them in
 `~/.raychat/environment/.env` in your user storage and loads them automatically
 on later runs. The installation directory can be read-only.
 

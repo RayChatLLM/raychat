@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from raychat.provider_environment import NAMES, load
+from raychat.type_support import override
 from raychat.validation import json_object, object_field
 from raychat_bootstrap.releases import Releases
 from tests.assertions import TypedTestCase
@@ -40,12 +43,21 @@ def register(api: PluginAPI) -> None:
 """
 
 
-def _installation(root: Path, *, home: Path | None = None) -> list[str]:
+def _installation(
+    root: Path,
+    *,
+    home: Path | None = None,
+    url: str = _URL,
+) -> list[str]:
     for name, data in build_portable.source_data(_ROOT).items():
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    plugin = package(root / "setup_probe", _PROVIDER, name="setup_probe")
+    plugin = package(
+        root / "setup_probe",
+        _PROVIDER.replace(_URL, url),
+        name="setup_probe",
+    )
     config = object_field(
         json_object((root / "raychat.json").read_bytes()),
         "configuration",
@@ -78,8 +90,67 @@ def _readonly_installation(root: Path) -> Iterator[None]:
             path.chmod(mode)
 
 
+class _CatalogHandler(BaseHTTPRequestHandler):
+    @override
+    def log_message(self, _format: str, *args: object) -> None:
+        pass
+
+    def do_GET(self) -> None:
+        authenticated = self.headers.get("Authorization") == "Bearer " + _KEY
+        status = 404 if self.path != "/v1/models" else 200 if authenticated else 401
+        raw = b'{"data":[{"id":"setup-model"}]}'
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
 class ProviderLaunchTests(TypedTestCase):
     """Check native terminal behavior and inherited synthetic settings."""
+
+    @override
+    def setUp(self) -> None:
+        """Use a real local catalog endpoint for setup and credential checks."""
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _CatalogHandler)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        self.url = f"http://127.0.0.1:{server.server_port}/v1"
+
+    def test_rejected_token_stays_in_setup_until_corrected(self) -> None:
+        """Reject a token through real HTTP, then correct it and enter chat."""
+        if os.name != "posix":
+            self.skipTest("Real PTY acceptance runs on POSIX.")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments = [*_installation(root, url=self.url), "--portable"]
+            path = root / "environment" / ".env"
+            chat = TerminalChat(
+                root,
+                arguments,
+                options=TerminalOptions(columns=80, rows=12),
+                environ=dict.fromkeys(NAMES, ""),
+            )
+            try:
+                chat.wait("Esc: cancel")
+                chat.send("wrong-token\t" + _MODEL + "\t" + self.url + "\t\r")
+                chat.wait("API token rejected")
+                self.require("Save and continue" in chat.screen())
+                self.require("Esc: cancel" in chat.screen())
+                self.require(not path.exists())
+                self.require(b"RAY/CHAT" not in chat.output)
+                chat.send("\t\x1b[H\x0b" + _KEY + "\t\t\t\r")
+                chat.wait("RAY/CHAT", seconds=30)
+                self.require(path.is_file())
+                chat.resize(110, 30)
+                chat.wait("MESSAGE", seconds=30)
+                chat.send("hello\r")
+                chat.wait("SETUP_CHAT_OK", seconds=30)
+            finally:
+                chat.close(root / "rejected-token.ansi")
 
     def test_terminal_setup_cancel_save_and_relaunch(self) -> None:
         """Paste settings, validate, save, chat, and restart without shell exports."""
@@ -87,7 +158,7 @@ class ProviderLaunchTests(TypedTestCase):
             self.skipTest("Real PTY acceptance runs on POSIX.")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            arguments = [*_installation(root), "--portable"]
+            arguments = [*_installation(root, url=self.url), "--portable"]
             environment = dict.fromkeys(NAMES, "")
             path = root / "environment" / ".env"
             for key, code in ((b"\x1b", 0), (b"\x03", 130)):
@@ -110,7 +181,7 @@ class ProviderLaunchTests(TypedTestCase):
                 chat.wait("RAYCHAT_BASE_URL must")
                 self.require(_KEY not in chat.screen())
                 # Shift+Tab, Home, Ctrl+K replace the invalid URL.
-                chat.send("\x1b[Z\x1b[H\x0b" + _URL + "\t\r")
+                chat.send("\x1b[Z\x1b[H\x0b" + self.url + "\t\r")
                 chat.wait("MESSAGE", seconds=30)
                 chat.send("hello\r")
                 chat.wait("SETUP_CHAT_OK", seconds=30)
@@ -118,7 +189,7 @@ class ProviderLaunchTests(TypedTestCase):
                 chat.close(root / "setup.log")
             self.equal(
                 load({}, path),
-                dict(zip(NAMES, (_KEY, _MODEL, _URL), strict=True)),
+                dict(zip(NAMES, (_KEY, _MODEL, self.url), strict=True)),
             )
             self.require(_KEY.encode() not in (root / "setup.log").read_bytes())
             chat = TerminalChat(root, arguments, environ=environment)
@@ -143,7 +214,7 @@ class ProviderLaunchTests(TypedTestCase):
                 with self.subTest(location=name):
                     installation = root / name / "installation"
                     storage = root / name / "user-data"
-                    arguments = _installation(installation, home=storage)
+                    arguments = _installation(installation, home=storage, url=self.url)
                     arguments.extend(["--workspace", str(storage / "workspace")])
                     path = storage / "environment" / ".env"
                     if name == "explicit":
@@ -173,7 +244,7 @@ class ProviderLaunchTests(TypedTestCase):
         chat = TerminalChat(root, arguments, environ=dict.fromkeys(NAMES, ""))
         try:
             chat.wait("Esc: cancel")
-            chat.send(_KEY + "\t" + _MODEL + "\t" + _URL + "\t\r")
+            chat.send(_KEY + "\t" + _MODEL + "\t" + self.url + "\t\r")
             chat.wait("MESSAGE", seconds=30)
             chat.send("hello\r")
             chat.wait("SETUP_CHAT_OK", seconds=30)
@@ -197,7 +268,7 @@ class ProviderLaunchTests(TypedTestCase):
             self.skipTest("Real PTY acceptance runs on POSIX.")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            arguments = [*_installation(root), "--portable"]
+            arguments = [*_installation(root, url=self.url), "--portable"]
             for rows in (14, 12):
                 with self.subTest(rows=rows):
                     path = root / "environment" / ".env"
@@ -228,7 +299,7 @@ class ProviderLaunchTests(TypedTestCase):
             chat.wait(_MODEL)
             chat.wait("RAYCHAT_BASE_URL must")
             chat.wait("Esc: cancel")
-            chat.send("\x1b[Z\x1b[H\x0b" + _URL)
+            chat.send("\x1b[Z\x1b[H\x0b" + self.url)
             # The compact save button is at zero-based row 6, column 3.
             chat.send("\x1b[<0;5;7M\x1b[<0;5;7m")
             chat.wait("RAY/CHAT", seconds=30)
@@ -253,7 +324,7 @@ class ProviderLaunchTests(TypedTestCase):
                 with self.subTest(mode=mode):
                     root = Path(directory) / mode / "installation"
                     storage = root.parent / "user-data"
-                    arguments = _installation(root, home=storage)
+                    arguments = _installation(root, home=storage, url=self.url)
                     path = storage / "environment" / ".env"
                     if mode == "portable":
                         arguments.append("--portable")
@@ -271,7 +342,7 @@ class ProviderLaunchTests(TypedTestCase):
                             f"{name}={value}\n"
                             for name, value in zip(
                                 NAMES,
-                                (_KEY, _MODEL, _URL),
+                                (_KEY, _MODEL, self.url),
                                 strict=True,
                             )
                         ),
