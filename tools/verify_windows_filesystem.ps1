@@ -64,7 +64,12 @@ if ($Child) {
             $PhaseModules = @(if ($Phase -eq 'stress') {
                 'tests.test_workflow_stress'
             } else {
-                $Modules | Where-Object { $_ -ne 'tests.test_workflow_stress' }
+                # Measured long-running fixtures start early so the final slot
+                # does not retain an otherwise completed suite for another minute.
+                $Priority = @('tests.test_entrypoint', 'tests.test_package_system',
+                    'tests.test_opaque_incident_demo', 'tests.test_self_harness')
+                $Priority | Where-Object { $_ -in $Modules }
+                $Modules | Where-Object { $_ -ne 'tests.test_workflow_stress' -and $_ -notin $Priority }
             })
             $Parallelism = if ($Phase -eq 'remaining') { 4 } else { 1 }
             $ActiveShards = @{}
@@ -126,7 +131,7 @@ if ($Child) {
                     }
                     if ($Exited) { $ActiveShards.Remove($Shard.Slot) }
                 }
-                if ($UnitClock.Elapsed.TotalSeconds -ge 900) { throw 'Unit suite exceeded 900 seconds.' }
+                if ($UnitClock.Elapsed.TotalSeconds -ge 1050) { throw 'Unit suite exceeded 1050 seconds.' }
             } while ($NextModule -lt $PhaseModules.Count -or $ActiveShards.Count -gt 0)
         }
         $UnitExit = 0

@@ -520,8 +520,10 @@ from `release-version.txt`; change it deliberately for a new public release.
 Routine CI runs Python 3.12 on Linux, macOS, and Windows. Each job runs the full
 unit suite once and tests the extracted public launcher. Windows uses a standard
 user with the hosted runner’s normal security settings and a CI-only ConPTY
-driver. Windows runs the stress module first, then runs each remaining module
-in a fresh standard-library test process, with at most four running concurrently. Every discovered test runs once.
+driver. Windows runs the stress module first, then starts the measured slow
+modules early to reduce waiting at the end. Each remaining module uses a fresh
+standard-library test process, with at most four running concurrently. Every
+discovered test runs once.
 A separate nightly/manual Windows job runs the same suite with Defender enabled.
 For an on-demand check, enable the Defender option when dispatching Release CI.
 That job verifies the hosted provisioning daemon’s identity before
