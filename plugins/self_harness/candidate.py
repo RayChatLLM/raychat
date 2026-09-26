@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 
 from raychat.core_bridge import CoreBridge
 from raychat.sdk import API_VERSION, workspace_path
-from raychat.service_contracts import ATOMIC_WRITE
 from raychat.validation import json_object, object_field
 
 from .evidence import signature
+from .promotion import Promotion
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -206,33 +206,14 @@ def promote(
     service = ctx.optional_service("core_updates")
     if isinstance(service, CoreBridge):
         return _submit_core(service, changes, config, record)
-    write = ctx.require_service(ATOMIC_WRITE).write
-    applied: list[str] = []
-
-    def prepare() -> None:
-        ctx.check_cancelled()
-        for name, original in originals.items():
-            path = workspace_path(ctx.workspace, name)
-            if (path.read_bytes() if path.exists() else None) != original:
-                raise ValueError(
-                    "Candidate promotion conflicts with an intervening edit: " + name,
-                )
-        for name, data in changes.items():
-            path = workspace_path(ctx.workspace, name)
-            write(path, data)
-            applied.append(name)
+    promotion = Promotion(dict(changes), dict(originals), ctx)
 
     def rollback(error: BaseException) -> None:
-        for name in reversed(applied):
-            path = workspace_path(ctx.workspace, name)
-            original = originals[name]
-            if original is None:
-                path.unlink(missing_ok=True)
-            else:
-                write(path, original)
+        promotion.rollback()
         record("rejected", str(error))
 
     def commit() -> None:
+        promotion.commit()
         record(
             "accepted",
             "Validation passed and the live plugin generation was activated.",
@@ -243,7 +224,7 @@ def promote(
 
     return ctx.update_plugins(
         add=_added_plugins(changes, config, ctx),
-        prepare=prepare,
+        prepare=promotion.prepare,
         commit=commit,
         rollback=rollback,
     )
@@ -263,7 +244,9 @@ def _added_plugins(
             if path.is_relative_to(directory):
                 relative = path.relative_to(directory)
                 plugin = directory / relative.parts[0]
-                manifest_name = str((plugin / "plugin.json").relative_to(ctx.workspace))
+                manifest_name = (
+                    (plugin / "plugin.json").relative_to(ctx.workspace).as_posix()
+                )
                 if str(plugin) not in known and manifest_name in changes:
                     added.append(str(plugin))
     return added

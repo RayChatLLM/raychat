@@ -270,9 +270,9 @@ def run(case: Case) -> dict[str, object]:
     listing = case.work / "listing"
     listing.mkdir()
     for name in ("c.txt", "a.txt", "b.txt"):
-        (listing / name).write_text(name)
+        (listing / name).write_text(name, encoding="utf-8")
     outside = case.output / "outside-private.txt"
-    outside.write_text("OUTSIDE_WORKSPACE_SENTINEL")
+    outside.write_text("OUTSIDE_WORKSPACE_SENTINEL", encoding="utf-8")
     (case.work / "outside-link.txt").symlink_to(outside)
     skill = case.work / "skills/feature-guidance/SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -280,6 +280,7 @@ def run(case: Case) -> dict[str, object]:
         "---\nname: feature-guidance\n"
         "description: Check exact file edits with the project guidance.\n---\n"
         "FEATURE_SKILL_BODY_92ad: verify byte offsets and read back edited files.\n",
+        encoding="utf-8",
     )
     chat = _chat(case)
     try:
@@ -302,7 +303,10 @@ def run(case: Case) -> dict[str, object]:
         durable_entries=2,
         provider="offline scripted provider; actual TUI and feature execution",
     )
-    (case.output / "result.json").write_text(json_text(report, indent=2))
+    (case.output / "result.json").write_text(
+        json_text(report, indent=2),
+        encoding="utf-8",
+    )
     return report
 
 
@@ -321,6 +325,7 @@ def main() -> None:
                 {"passed": False, "checks": case.checks, "error": str(exc)},
                 indent=2,
             ),
+            encoding="utf-8",
         )
         raise
     write_report(report, indent=2)

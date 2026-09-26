@@ -20,6 +20,7 @@ from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler
 
+from raychat.filesystem import append_owned
 from raychat.http_debug import (
     DEBUG_DIRECTORY_ENV,
     HTTPConnection,
@@ -458,6 +459,30 @@ class HTTPDebugTests(TypedTestCase):
         trace = self._trace()
         self._require_error(trace, type(caught))
         self.equal((trace / "received.http").read_bytes(), b"")
+
+    def test_failed_error_logging_preserves_the_original_transport_error(self) -> None:
+        """A secondary disk error must not replace the failed connection's cause."""
+        primary = ConnectionRefusedError("injected connection failure")
+
+        def append(path: Path, data: bytes) -> None:
+            if path.name == "events.jsonl" and b'"event": "error"' in data:
+                message = "injected diagnostic disk failure"
+                raise OSError(message)
+            append_owned(path, data)
+
+        with (
+            mock.patch("http.client.HTTPConnection.connect", side_effect=primary),
+            mock.patch("raychat.http_debug.append_owned", append),
+            self.assertLogs("raychat.http_debug", level="ERROR") as logs,
+            closing(HTTPConnection("127.0.0.1", 1, timeout=1)) as connection,
+        ):
+            try:
+                connection.request("GET", "/refused")
+            except OSError as error:
+                self.require(error is primary)
+            else:
+                self.fail("The original connection failure must propagate.")
+        self.require(any("diagnostic disk failure" in line for line in logs.output))
 
     def test_concurrent_connections_have_distinct_complete_traces(self) -> None:
         """Keep four real concurrent requests in separate byte streams."""

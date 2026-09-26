@@ -25,7 +25,7 @@ import json
 import logging
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -175,6 +175,11 @@ def _cleanup(
             _LOGGER.debug("Plugin cleanup failed", exc_info=True)
             failures.append(exc)
     return failures
+
+
+def _retain_sources(trees: Iterable[SourceTree]) -> None:
+    for tree in trees:
+        tree.retain(reason="plugin resource shutdown could not be verified")
 
 
 def _rollback(
@@ -1023,12 +1028,14 @@ class Runtime(_RuntimeRegistry):
         self._fingerprints: dict[str, str] = {}
         self.on_configure: Callable[[], None] | None = None
         self.on_checkpoint: Callable[[str], None] | None = None
+        self.source_read: Callable[[], AbstractContextManager[None]] = nullcontext
         self.workspace = Path(workspace).resolve()
         self.session: SessionLifecycle | None = None
         self.closed = False
         self._closing = False
         self.disabled: set[str] = set()
         self._rejected: dict[str, str] | None = None
+        self._deferred_source_trees: list[SourceTree] = []
 
     def status_items(self) -> tuple[StatusRecord, ...]:
         """Read pushed status without waiting for plugin compilation.
@@ -1162,6 +1169,27 @@ class Runtime(_RuntimeRegistry):
         self._apply_registrations(api.pending)
         self.plugins[tree.manifest.id] = str(tree.path)
 
+    def _defer_sources(self, trees: Iterable[SourceTree]) -> None:
+        self._deferred_source_trees.extend(
+            tree for tree in trees if tree not in self._deferred_source_trees
+        )
+
+    def _cleanup_registrations(
+        self,
+        callbacks: Iterable[Cleanup],
+    ) -> list[BaseException]:
+        selected: list[Cleanup] = []
+        for callback in callbacks:
+            if (
+                self._local.stage is not None
+                and callback.owner in self._current.plugins
+                and not callback.on_reload
+            ):
+                self._defer_sources(self.source_trees)
+            else:
+                selected.append(callback)
+        return _cleanup(selected)
+
     def _load_module(self, module: ModuleType) -> None:
         api = PluginAPI(self, _manifest(module).id)
         cleanup_start = len(self.cleanup)
@@ -1169,7 +1197,11 @@ class Runtime(_RuntimeRegistry):
         try:
             self._stage_module(module, api, tree)
         except BaseException as exc:
-            _cleanup(item.cleanup for item in api.pending if item.cleanup is not None)
+            failures = self._cleanup_registrations(
+                item.cleanup for item in api.pending if item.cleanup is not None
+            )
+            if failures:
+                _retain_sources(self.source_trees)
             del self.cleanup[cleanup_start:]
             if isinstance(exc, Exception):
                 operation = "register"
@@ -1198,10 +1230,11 @@ class Runtime(_RuntimeRegistry):
             for module in ordered:
                 self._load_module(module)
         except BaseException:
-            _cleanup(self.cleanup[cleanup_start:])
+            if self._cleanup_registrations(self.cleanup[cleanup_start:]):
+                _retain_sources(self.source_trees)
             del self.cleanup[cleanup_start:]
             for tree in self.source_trees:
-                if tree not in old_trees:
+                if tree not in old_trees and tree not in self._deferred_source_trees:
                     tree.retire()
             self.status_store.restore(original.status_store.snapshot())
             original.status_store = self.status_store
@@ -1487,7 +1520,11 @@ class Runtime(_RuntimeRegistry):
         )
         failures += _cleanup([partial(self.emit, SESSION_CLOSE, Lifecycle())])
         failures += _cleanup(self.cleanup)
-        failures += _cleanup(tree.retire for tree in self.source_trees)
+        trees = (*self.source_trees, *self._deferred_source_trees)
+        if failures:
+            _retain_sources(trees)
+        else:
+            failures += _cleanup(tree.retire for tree in trees)
         if failures:
             raise PluginError(
                 "Plugin cleanup failed: "
@@ -1495,7 +1532,10 @@ class Runtime(_RuntimeRegistry):
             )
 
     def _watched(self) -> dict[str, str]:
+        with self.source_read():
+            return self._watch_sources()
 
+    def _watch_sources(self) -> dict[str, str]:
         paths = {str(_captured_tree(module).path) for module in self.modules.values()}
         for directory in self.watch_directories:
             for path in discover(directory):
@@ -1776,25 +1816,28 @@ class Runtime(_RuntimeRegistry):
             finally:
                 self._applying = False
 
-    def _replacement_modules(self, update: _GenerationUpdate) -> list[ModuleType]:
+    def _replacement_trees(self, update: _GenerationUpdate) -> list[SourceTree]:
         trees: dict[Path, SourceTree] = {}
 
-        def fresh(source_path: str | Path) -> ModuleType:
+        def fresh(source_path: str | Path) -> SourceTree:
             path = Path(source_path).expanduser().resolve()
             if path not in trees:
                 name = read_manifest(path).id
                 trees[path] = SourceTree(path, settings=self._plugin_overrides(name))
                 update.staged.source_trees.append(trees[path])
-            return trees[path].entrypoint()
+            return trees[path]
 
-        modules = [
+        captured = [
             fresh(_captured_tree(module).path)
             for name, module in update.previous.modules.items()
             if name not in update.remove
         ]
         unique_paths: dict[str | Path, None] = dict.fromkeys(update.add, None)
-        modules.extend(fresh(path) for path in unique_paths)
-        return modules
+        replacements = [fresh(path) for path in unique_paths]
+        update.retired = set(update.remove) - {
+            tree.manifest.id for tree in replacements
+        }
+        return [*captured, *replacements]
 
     def _restore_generation(
         self,
@@ -1818,12 +1861,14 @@ class Runtime(_RuntimeRegistry):
             self.emit(SESSION_RESTORE, Lifecycle(), strict=True)
 
     def _validate_generation(self, update: _GenerationUpdate) -> None:
-        update.fingerprints = self._watched()
-        if any(
-            fingerprint(tree.path) != tree.digest for tree in update.staged.source_trees
-        ):
-            message = "Plugin source changed during loading; retry the update."
-            raise PluginError(message)
+        with self.source_read():
+            update.fingerprints = self._watch_sources()
+            if any(
+                fingerprint(tree.path) != tree.digest
+                for tree in update.staged.source_trees
+            ):
+                message = "Plugin source changed during loading; retry the update."
+                raise PluginError(message)
         json.dumps(update.staged.state, allow_nan=False)
         if self.session is not None and self.session.store is not None:
             self.session.store.checkpoint(update.staged.state)
@@ -1832,22 +1877,29 @@ class Runtime(_RuntimeRegistry):
         missing = set(update.remove) - update.previous.plugins.keys()
         if missing:
             raise PluginError("Unknown plugins: " + ", ".join(sorted(missing)))
-        replacement_ids = {read_manifest(path).id for path in update.add}
-        update.retired = set(update.remove) - replacement_ids
+        # Capture and compile every candidate before handoffs or imports can
+        # execute plugin code. Retirement uses the captured manifests as well.
+        with self.source_read():
+            trees = self._replacement_trees(update)
         handoffs = {
             name: export(self.context(name))
             for name, (export, _) in update.previous.reload_handlers.items()
             if name not in update.retired
         }
-        modules = self._replacement_modules(update)
+        modules = [tree.entrypoint() for tree in trees]
         self._local.stage = update.staged
         self.load(modules)
         self._restore_generation(update, handoffs)
         self._validate_generation(update)
 
     def _discard_generation(self, update: _GenerationUpdate) -> None:
+        failures: list[BaseException] = []
+        transferred = any(
+            not item.on_reload and item.owner in update.previous.plugins
+            for item in update.staged.cleanup
+        )
         if self._local.stage is not None:
-            _cleanup(
+            failures += _cleanup(
                 (
                     item
                     for item in update.staged.cleanup
@@ -1855,13 +1907,19 @@ class Runtime(_RuntimeRegistry):
                 ),
                 replacing=True,
             )
-            _cleanup(
+            failures += _cleanup(
                 item
                 for item in update.staged.cleanup
                 if item.owner not in update.previous.plugins
             )
-        for tree in update.staged.source_trees:
-            tree.retire()
+        if failures:
+            _retain_sources(update.staged.source_trees)
+        if transferred and not failures:
+            self._defer_sources(update.staged.source_trees)
+        else:
+            for tree in update.staged.source_trees:
+                if tree not in self._deferred_source_trees:
+                    tree.retire()
 
     def _activate_generation(
         self,
@@ -1885,8 +1943,17 @@ class Runtime(_RuntimeRegistry):
         failures += _cleanup(
             item for item in old.cleanup if item.owner in update.retired
         )
-        for tree in old.source_trees:
-            tree.retire()
+        transferred = any(
+            not item.on_reload and item.owner not in update.retired
+            for item in old.cleanup
+        )
+        if failures:
+            _retain_sources(old.source_trees)
+        if transferred and not failures:
+            self._defer_sources(old.source_trees)
+        else:
+            for tree in old.source_trees:
+                tree.retire()
         self._local.stage = stage
         self.emit(
             PLUGINS_RELOADED,

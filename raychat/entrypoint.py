@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import os
 import sys
@@ -216,19 +217,38 @@ def run_exec(args: argparse.Namespace, resources: AgentResources) -> int:
     int
         Zero on completion, one on failure, or 130 on cancellation.
 
+    Raises
+    ------
+    RuntimeError
+        If worker shutdown fails after an otherwise successful operation.
+
     """
     worker = create_worker(args, resources)
+    status = 0
+    failure: BaseException | None = None
     try:
         with terminal_control.termination_signal_bridge():
             raw: object = vars(args)
             fields = configuration_fields(raw, "exec options")
             job = worker.submit(text_field(fields.get("exec_prompt"), "exec prompt"))
-            return _receive_exec_result(worker, job)
+            status = _receive_exec_result(worker, job)
     except KeyboardInterrupt:
-        return 130
+        status = 130
+    except BaseException as error:
+        failure = error
+        raise
     finally:
-        worker.stop()
-        worker.join()
+        try:
+            worker.stop()
+            worker.join()
+        except RuntimeError:
+            if failure is None and status == 0:
+                raise
+            logging.getLogger(__name__).exception(
+                "Worker cleanup failed after an unsuccessful operation status=%d",
+                status,
+            )
+    return status
 
 
 def _receive_exec_result(worker: AgentWorker, job: int) -> int:
@@ -431,13 +451,22 @@ def _launch(
         args.resume = selected
         if selected is None:
             return 0
-    resources = create_resources(args, environ)
+    status = 0
     try:
-        if options.exec_prompt is not None:
-            return run_exec(args, resources)
-        return controller.run_tui(args, resources, terminal)
-    finally:
-        resources.close()
+        with create_resources(args, environ) as resources:
+            status = (
+                run_exec(args, resources)
+                if options.exec_prompt is not None
+                else controller.run_tui(args, resources, terminal)
+            )
+    except BaseException:
+        if status == 0:
+            raise
+        logging.getLogger(__name__).exception(
+            "Resource cleanup failed after an unsuccessful session status=%d",
+            status,
+        )
+    return status
 
 
 def _provider_preflight(argv: Sequence[str], environ: Mapping[str, str]) -> int | None:

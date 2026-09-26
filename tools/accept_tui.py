@@ -73,7 +73,7 @@ class Case:
         )
         object_field(config["tui"], "tui")["clipboard"] = "terminal"
         self.config = self.output / "config.json"
-        self.config.write_text(json_text(config))
+        self.config.write_text(json_text(config), encoding="utf-8")
         self.probe = self.output / "probe"
         shutil.copytree(
             SOURCE / "tests/fixtures/probe",
@@ -86,7 +86,7 @@ class Case:
         object_field(manifest.setdefault("defaults", {}), "defaults")[
             "cleanup_destination"
         ] = str(self.work)
-        manifest_path.write_text(json_text(manifest))
+        manifest_path.write_text(json_text(manifest), encoding="utf-8")
 
     def chat(
         self,
@@ -134,7 +134,10 @@ class Case:
 
         """
         report = {"passed": True, "checks": self.checks, "terminal_restored": True}
-        (self.output / "result.json").write_text(json_text(report, indent=2))
+        (self.output / "result.json").write_text(
+            json_text(report, indent=2),
+            encoding="utf-8",
+        )
         return report
 
 
@@ -561,7 +564,7 @@ def _install_external(
     )
     package = case.work / "dev/greeting"
     (package / "helpers").mkdir()
-    (package / "helpers/labels.py").write_text("PREFIX = ''\n")
+    (package / "helpers/labels.py").write_text("PREFIX = ''\n", encoding="utf-8")
     entrypoint = package / "__init__.py"
     entrypoint.write_text(
         "from .helpers.labels import PREFIX\n"
@@ -569,6 +572,7 @@ def _install_external(
             "return text_field(execute(",
             "return PREFIX + text_field(execute(",
         ),
+        encoding="utf-8",
     )
     chat.command_complete("/plugins check dev/greeting", "commands")
     chat.command_complete("/plugins pack dev/greeting greeting.zip", "sha256")
@@ -604,9 +608,13 @@ def _update_external(
             "ctx.settings['greeting']",
             "'Edited live'",
         ),
+        encoding="utf-8",
     )
     chat.command_complete("/greet", "Edited live")
-    (installed.parent / "helpers/labels.py").write_text("PREFIX = 'Nested '\n")
+    (installed.parent / "helpers/labels.py").write_text(
+        "PREFIX = 'Nested '\n",
+        encoding="utf-8",
+    )
     chat.command_complete("/greet", "Nested Edited live")
     case.checks.append(
         "namespace helper imports and live helper edits use captured source",
@@ -623,7 +631,7 @@ def _update_external(
     newer = read_object(mpath)
     newer["version"] = "1.1.0"
     object_field(newer["defaults"], "defaults")["greeting"] = "Updated release"
-    mpath.write_text(json_text(newer))
+    mpath.write_text(json_text(newer), encoding="utf-8")
     chat.command_complete("/plugins pack dev/greeting greeting-v2.zip", "sha256")
     catalog("greeting-v2.zip")
     chat.command_complete("/plugins update greeting", "local edits")
@@ -637,7 +645,7 @@ def _update_external(
     object_field(array_field(tampered["plugins"], "plugins")[0], "plugin")[
         "instructions"
     ] = "Tampered catalog metadata"
-    catalog_path.write_text(json_text(tampered))
+    catalog_path.write_text(json_text(tampered), encoding="utf-8")
     chat.command_complete("/plugins update greeting", "does not match the catalog")
     chat.command_complete("/greet", "Updated release")
     case.checks.append("catalog and archive metadata mismatch is rejected")
@@ -694,12 +702,13 @@ def _forge_workspace_lock(case: Case) -> Path:
         "requires": {},
         "instructions": "No trusted installation exists.",
     }
-    (malicious / "plugin.json").write_text(json_text(manifest))
+    (malicious / "plugin.json").write_text(json_text(manifest), encoding="utf-8")
     marker = case.work / "forged-executed"
     (malicious / "__init__.py").write_text(
         "from pathlib import Path\n"
         f"Path({str(marker)!r}).touch()\n"
         "def register(api): pass\n",
+        encoding="utf-8",
     )
     (case.work / ".raychat/plugins.lock.json").write_text(
         json_text(
@@ -718,6 +727,7 @@ def _forge_workspace_lock(case: Case) -> Path:
                 "catalogs": {},
             },
         ),
+        encoding="utf-8",
     )
     return marker
 
@@ -758,6 +768,7 @@ def external(case: Case) -> None:
                     ],
                 },
             ),
+            encoding="utf-8",
         )
 
     chat = case.chat()

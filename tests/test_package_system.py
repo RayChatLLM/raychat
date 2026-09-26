@@ -36,6 +36,7 @@ from unittest import mock
 from raychat.application import add_plugin_arguments
 from raychat.configuration import SETTINGS
 from raychat.distribution import read_distribution
+from raychat.filesystem import FileLock
 from raychat.packages import (
     Manifest,
     digest,
@@ -634,6 +635,11 @@ class PackageTransactionTests(PackageSystemFixture):
             "./bad",
             "CON.txt",
             "a.",
+            "COM¹.py",
+            "a?b",
+            "a\x01b",
+            "é" * 128,
+            "a//",
         ):
             with self.subTest(name=name):
                 stream = io.BytesIO()
@@ -641,6 +647,8 @@ class PackageTransactionTests(PackageSystemFixture):
                     archive.writestr(name, "bad")
                 with self.rejected(PluginError):
                     unpack(stream.getvalue(), self.root / "out")
+                if (self.root / "out").exists():
+                    self.fail("Invalid archive created its destination.")
         if (self.root / "outside").exists():
             self.fail("Package behavior violated the expected condition.")
 
@@ -652,6 +660,10 @@ class PackageTransactionTests(PackageSystemFixture):
         for entries in (
             [("a", "x"), ("A", "y")],
             [("a", "x"), ("a/b", "y")],
+            [("a/one.py", "x"), ("A/two.py", "y")],
+            [("café/one.py", "x"), ("cafe\u0301/two.py", "y")],
+            [("a/", ""), ("a", "y")],
+            [("a/b", "x"), ("a", "y")],
             [("link", "symlink")],
         ):
             stream = io.BytesIO()
@@ -664,6 +676,8 @@ class PackageTransactionTests(PackageSystemFixture):
                     archive.writestr(info, data)
             with self.rejected(PluginError):
                 unpack(stream.getvalue(), self.root / "out")
+            if (self.root / "out").exists():
+                self.fail("Colliding archive created its destination.")
 
     def test_sdk_version_and_dependency_version_validation(self) -> None:
         """Sdk version and dependency version validation."""
@@ -678,6 +692,76 @@ class PackageTransactionTests(PackageSystemFixture):
         (dependency / "plugin.json").write_text(_json(manifest))
         with self.rejected(PluginError, "SDK version"):
             import_plugin(dependency)
+
+
+class PackageRollbackTests(PackageSystemFixture):
+    """Retain useful failures and recoverable originals after failed restoration."""
+
+    def test_failed_publication_restores_original_and_cleans_journal(
+        self,
+    ) -> None:
+        """Failure to publish after a backup move cannot lose the original package."""
+        source = self.external()
+        self.manager.install(str(source))
+        installed = self.manager.paths()["example"]
+        original_code = (installed / "__init__.py").read_bytes()
+        before = self.manager.state_file("workspace").read_bytes()
+        offline = PackageManager(self.workspace, self.root / "home", trusted=True)
+
+        original_replace = Path.replace
+
+        def replace(stage: Path, target: Path) -> Path:
+            if target == installed and stage.name == "incoming":
+                message = "cannot publish incoming tree"
+                raise OSError(message)
+            return original_replace(stage, target)
+
+        with (
+            mock.patch.object(Path, "replace", replace),
+            self.rejected(OSError, "cannot publish incoming"),
+        ):
+            offline.update("example")
+        self.equal((installed / "__init__.py").read_bytes(), original_code)
+        self.equal(offline.state_file("workspace").read_bytes(), before)
+        self.equal(list(installed.parent.glob(".transaction-*")), [])
+        if (
+            offline
+            .state_file("workspace")
+            .with_name("plugins.transaction.json")
+            .exists()
+        ):
+            self.fail("Successful rollback must retire its journal.")
+
+    def test_offline_failed_restore_preserves_primary_error_and_backup(self) -> None:
+        """A failed rollback retains the original package and publication error."""
+        source = self.external()
+        self.manager.install(str(source))
+        installed = self.manager.paths()["example"]
+        original_code = (installed / "__init__.py").read_bytes()
+        before = self.manager.state_file("workspace").read_bytes()
+        offline = PackageManager(self.workspace, self.root / "home", trusted=True)
+        original_replace = Path.replace
+
+        def replace(stage: Path, target: Path) -> Path:
+            if target == installed:
+                message = (
+                    "restore failed" if stage.name == "package" else "publish failed"
+                )
+                raise OSError(message)
+            return original_replace(stage, target)
+
+        with (
+            mock.patch.object(Path, "replace", replace),
+            self.rejected(OSError, "publish failed"),
+        ):
+            offline.update("example")
+        backups = list(installed.parent.glob(".transaction-*"))
+        self.equal(len(backups), 1)
+        self.equal((backups[0] / "package/__init__.py").read_bytes(), original_code)
+        self.equal(offline.state_file("workspace").read_bytes(), before)
+        # The failed transaction must release its persistent scope lock as well.
+        with FileLock(offline.state_file("workspace").with_name("plugins.mutex")):
+            pass
 
 
 class PackageMetadataTests(PackageSystemFixture):

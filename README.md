@@ -111,8 +111,11 @@ Each `request-0001`, `request-0002`, etc. subdirectory contains a `curl.txt`
 command ready to copy into a POSIX shell and a `curl.ps1` command for PowerShell.
 These commands retain the URL, headers, credentials, and payload. Text payloads
 up to 4 KiB appear directly in the POSIX command when possible; larger or binary
-payloads and the PowerShell command use the adjacent `request-body.bin` file by
-absolute path, preserving the entire body.
+payloads and the PowerShell command use an adjacent immutable
+`request-body-<sha256>.bin` file by absolute path. Previously copied commands keep
+their original body when a later capture updates the replay. `request-body.bin`
+is a convenience copy of the latest exported body; commands do not reference it.
+Retain the trace directory while any saved replay command still needs its files.
 Curl recreates HTTP framing itself. Commands for text and byte payloads are also
 available when the connection fails, so you can retry the same request manually.
 Streamed request bodies get a replay command after sending finishes.
@@ -177,6 +180,17 @@ IDs. `/tree` lists completed turns and `/fork ENTRY_ID` selects a conversation
 branch. `/resume` opens the only saved session or shows the same picker inside
 chat when several exist. `/resume ID` opens a specific saved conversation.
 Selecting the current conversation keeps its history and writer open.
+
+The default application data directory is `.raychat` under your user home.
+To use another approved local location, select a complete configuration with
+`--config PATH` and set `storage.home_directory` to its absolute path. This moves
+user plugin state, trust decisions, default saved sessions, and supervised-core
+recovery data. `--session-dir PATH` overrides only the session location. Workspace
+plugin state remains under the selected workspace's configured plugin directory;
+choose a writable workspace separately with `--workspace PATH`. The installation
+directory does not need to hold application data. Directory or security-policy
+denials are reported; the application does not clear permissions or require
+security-software exclusions.
 
 Only completed turns become reusable context. Resuming does not replay tools or
 goal loops. An active writer lock prevents two processes from modifying the
@@ -280,6 +294,14 @@ including the typed standard-library GEPA port in
 `plugins/optimization/gepa/`. Optimization commands run in isolated,
 cancellable Python processes. Relative output paths resolve within the workspace.
 
+Protocol exports and JSON reports each publish a complete file. Concurrent exports
+to the same destination use last-writer-wins behavior; output and report paths
+within one command must be distinct. The two files publish independently. A report
+failure may leave a successfully published protocol alongside an older report;
+compare the report's optimized-protocol SHA-256 with the protocol before relying on
+them together. Export publication failures stop the command without rerunning the
+optimization or deleting an existing destination.
+
 Enter these commands in chat; automation can pass the same strings to `--exec`:
 
 ```text
@@ -332,6 +354,10 @@ python3 -B -S -m tools.build_plugin_catalog
 .venv/bin/python -m ruff format --check .
 python3 -B -S -m unittest discover -s tests -v
 ```
+
+After a catalog rebuild changes artifact names, copy the builder's printed paths
+into the sorted `release.source_files` catalog entries in `raychat.json`. See
+[catalog publication and release preparation](docs/RELEASE.md#prepare-the-distribution).
 
 See [strong plugin contracts](docs/TYPING.md) for typed services, validated
 settings and events, and the distinction between strict mypy and rejecting all

@@ -4,19 +4,250 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+import json
 import os
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
+from raychat.filesystem import read_regular
+from raychat.validation import json_object, object_field
+from tests.assertions import TypedTestCase
+from tests.plugin_support import package
 from tests.test_package_system import PackageTestCase
 from tests.transport_support import captured, require
 from tools import build_portable
+from tools.acceptance_support import fixture_provider_environment
 from tools.smoke_process import SmokeCommand, run_checked
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_LONG_PATH_MINIMUM = 320
+_SYMLINK_PRIVILEGE_MISSING = 1314
+_PATH_PROBE = """
+from contextlib import closing
+from raychat.filesystem import write_bytes
+from raychat.sdk import CommandDefinition
+from raychat.storage import SessionStore
+
+def register(api):
+    def publish(args, context):
+        path = api.context.workspace / 'published.txt'
+        write_bytes(path, b'first snapshot')
+        write_bytes(path, b'complete replacement')
+        marker = api.context.workspace / 'custom-session-id'
+        if not marker.exists():
+            for directory in (None, api.context.workspace.parent / 'selected-sessions'):
+                with closing(SessionStore(api.context.workspace, directory)) as store:
+                    store.checkpoint({})
+                    if directory is not None:
+                        write_bytes(marker, store.session_id.encode('ascii'))
+        return 'PORTABLE_PATH_OK'
+    api.register_command(CommandDefinition('path-probe', publish))
+    api.register_provider('path_probe', lambda args, environment:
+        lambda messages: '{"action":"done","message":"offline"}')
+"""
+
+
+class PortableSourceTests(TypedTestCase):
+    """Reject unsafe builder inputs before opening or traversing them."""
+
+    def test_allowlist_rejects_nonportable_names_and_collisions(self) -> None:
+        """Apply the same portable path contract to the explicit source list."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Code.py").write_bytes(b"pass\n")
+            for names in (("../outside",), ("NUL",), ("Code.py", "code.py")):
+                with (
+                    self.subTest(names=names),
+                    mock.patch.object(build_portable, "SOURCE_FILES", names),
+                    self.rejected(RuntimeError, "Unsafe source allowlist"),
+                ):
+                    build_portable.source_data(root)
+
+    def test_source_read_rejects_growth_and_same_size_replacement(self) -> None:
+        """A changed pathname cannot masquerade as the captured source version."""
+        for replacement in (b"longer content", b"new"):
+            with (
+                self.subTest(replacement=replacement),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory).resolve()
+                source = root / "source.txt"
+                source.write_bytes(b"old")
+                observed: list[tuple[int, bool]] = []
+
+                def changed(
+                    path: Path,
+                    limit: int,
+                    *,
+                    follow_symlinks: bool,
+                    payload: bytes = replacement,
+                    observations: list[tuple[int, bool]] = observed,
+                ) -> bytes:
+                    observations.append((limit, follow_symlinks))
+                    stage = path.with_name("replacement")
+                    stage.write_bytes(payload)
+                    stage.replace(path)
+                    return read_regular(path, limit, follow_symlinks=follow_symlinks)
+
+                with (
+                    mock.patch.object(build_portable, "SOURCE_FILES", ("source.txt",)),
+                    mock.patch.object(
+                        build_portable,
+                        "read_regular",
+                        side_effect=changed,
+                    ),
+                    self.rejected(RuntimeError, "changed while reading"),
+                ):
+                    build_portable.source_data(root)
+                self.equal(observed, [(4, False)])
+                self.equal(source.read_bytes(), replacement)
+
+    def test_release_read_is_bounded_and_extra_files_are_not_opened(self) -> None:
+        """Oversized and unexpected members fail without unbounded reads."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            member = root / "member"
+            member.write_bytes(b"expected" + b"x" * 10000)
+            observed: list[tuple[int, bool]] = []
+
+            def checked(path: Path, limit: int, *, follow_symlinks: bool) -> bytes:
+                observed.append((limit, follow_symlinks))
+                return read_regular(path, limit, follow_symlinks=follow_symlinks)
+
+            with mock.patch.object(build_portable, "read_regular", side_effect=checked):
+                with self.rejected(RuntimeError, "bytes differ"):
+                    build_portable.verify_release_folder(root, {"member": b"expected"})
+                self.equal(observed, [(9, False)])
+                observed.clear()
+                with self.rejected(RuntimeError, "extra file"):
+                    build_portable.verify_release_folder(root, {})
+                self.equal(observed, [])
+            member.replace(root / "closed-member")
+            with self.rejected(RuntimeError, "missing or unsafe"):
+                build_portable.verify_release_folder(root / "missing", {})
+
+    def test_source_rejects_linked_parents_and_endpoints(self) -> None:
+        """Operator-selected roots may resolve links; source descendants may not.
+
+        Raises
+        ------
+        OSError
+            An unexpected fixture creation failure is not a privilege skip.
+
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            (target / "source.txt").write_bytes(b"original")
+            try:
+                (root / "linked").symlink_to(target, target_is_directory=True)
+                (root / "endpoint.txt").symlink_to(target / "source.txt")
+            except OSError as error:
+                code: object = getattr(error, "winerror", None)
+                if code == _SYMLINK_PRIVILEGE_MISSING:
+                    self.skipTest("Windows account lacks symlink privilege")
+                raise
+            for name in ("linked/source.txt", "endpoint.txt"):
+                with (
+                    self.subTest(name=name),
+                    mock.patch.object(build_portable, "SOURCE_FILES", (name,)),
+                    self.rejected(RuntimeError, "unsafe parent|not a regular file"),
+                ):
+                    build_portable.source_data(root)
+            self.equal((target / "source.txt").read_bytes(), b"original")
+
+    def test_fifo_substitution_does_not_block_source_or_release_read(self) -> None:
+        """Replace a checked regular member with a FIFO in a bounded child."""
+        if os.name != "posix":
+            self.skipTest("POSIX FIFO fixture")
+        script = """
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from raychat.filesystem import read_regular
+from tools import build_portable
+root = Path(sys.argv[1]).resolve()
+member = root / 'member'
+def substituted(path, limit, **kwargs):
+    path.unlink()
+    os.mkfifo(path)
+    return read_regular(path, limit, **kwargs)
+for source in (True, False):
+    member.write_bytes(b'original')
+    try:
+        with patch.object(build_portable, 'SOURCE_FILES', ('member',)), \
+                patch.object(build_portable, 'read_regular', side_effect=substituted):
+            if source:
+                build_portable.source_data(root)
+            else:
+                build_portable.verify_release_folder(root, {'member': b'original'})
+    except RuntimeError as error:
+        assert 'unsafe' in str(error), error
+    else:
+        raise AssertionError('FIFO was accepted')
+    member.unlink()
+"""
+        self._child(script)
+
+    def test_windows_junction_is_rejected_before_traversal(self) -> None:
+        """An unprivileged Windows junction never exposes its target to the builder."""
+        if os.name != "nt":
+            self.skipTest("Native Windows junction fixture")
+        script = """
+import _winapi
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from tools import build_portable
+root = Path(sys.argv[1]).resolve()
+source, external = root / 'source', root / 'external'
+source.mkdir()
+external.mkdir()
+(external / 'sentinel').write_bytes(b'untouched')
+junction = source / 'linked'
+_winapi.CreateJunction(str(external), str(junction))
+original_iterdir = Path.iterdir
+def guarded(path):
+    assert path != junction, 'junction was traversed'
+    return original_iterdir(path)
+try:
+    for capture in (True, False):
+        try:
+            with patch.object(Path, 'iterdir', guarded), \
+                    patch.object(build_portable, 'SOURCE_FILES', ('linked/sentinel',)):
+                if capture:
+                    build_portable.source_data(source)
+                else:
+                    build_portable.verify_release_folder(source, {})
+        except RuntimeError as error:
+            assert 'unsafe parent' in str(error) or 'reparse point' in str(error), error
+        else:
+            raise AssertionError('junction was accepted')
+finally:
+    junction.rmdir()
+assert (external / 'sentinel').read_bytes() == b'untouched'
+"""
+        self._child(script)
+
+    @staticmethod
+    def _child(script: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_checked(
+                SmokeCommand(
+                    (sys.executable, "-B", "-S", "-c", script, directory),
+                    PROJECT_ROOT,
+                    dict(os.environ),
+                    15,
+                    4000,
+                ),
+            )
 
 
 class PortableBuildTests(PackageTestCase):
@@ -59,25 +290,132 @@ class PortableBuildTests(PackageTestCase):
         build_portable.verify_archive(first, first_members)
         self.equal(len(hashlib.sha256(first).hexdigest()), 64)
 
+    def test_shipped_launcher_uses_long_configured_data_paths(self) -> None:
+        """Exercise the extracted launcher and snapshot/session IO beyond MAX_PATH."""
+        raw, members = build_portable.build_archive(PROJECT_ROOT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            deep = root
+            while len(str(deep)) <= _LONG_PATH_MINIMUM:
+                deep /= "portable-path-é-0123456789"
+            deep.mkdir(parents=True)
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                archive.extractall(deep)
+            app = deep / build_portable.ARCHIVE_ROOT
+            home = deep / "configured-data"
+            workspace = deep / "workspace"
+            workspace.mkdir()
+            package(deep / "path_probe", _PATH_PROBE, name="path_probe")
+            config = object_field(json_object(members["raychat.json"]), "configuration")
+            object_field(config["storage"], "storage")["home_directory"] = str(home)
+            object_field(config["plugins"], "plugins")["profile"] = str(
+                app / "plugin_catalog/profile.json",
+            )
+            settings = deep / "selected-config.json"
+            settings.write_text(json.dumps(config), encoding="utf-8")
+            for item in sorted(app.rglob("*"), reverse=True):
+                item.chmod(0o500 if item.is_dir() else 0o400)
+            app.chmod(0o500)
+            self._long_path_launch(app, settings, workspace, root)
+            self.equal(
+                (workspace / "published.txt").read_bytes(),
+                b"complete replacement",
+            )
+            self.equal(len(list((home / "sessions").rglob("*.jsonl"))), 1)
+            require((home / "trust.json").is_file())
+            custom_sessions = deep / "selected-sessions"
+            self._long_path_launch(
+                app,
+                settings,
+                workspace,
+                root,
+                session_directory=custom_sessions,
+            )
+            self.equal(len(list(custom_sessions.rglob("*.jsonl"))), 1)
+            self.equal(len(list((home / "sessions").rglob("*.jsonl"))), 1)
+            build_portable.verify_release_folder(app, members)
+
+    @staticmethod
+    def _long_path_launch(
+        app: Path,
+        settings: Path,
+        workspace: Path,
+        launch_directory: Path,
+        *,
+        session_directory: Path | None = None,
+    ) -> None:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("RAYCHAT_")
+        }
+        environment.update(fixture_provider_environment())
+        arguments = (
+            (
+                "--session-dir",
+                str(session_directory),
+                "--resume",
+                (workspace / "custom-session-id").read_text(encoding="ascii"),
+            )
+            if session_directory is not None
+            else ()
+        )
+        run_checked(
+            SmokeCommand(
+                (
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-S",
+                    str(app / "raychat.py"),
+                    "--config",
+                    str(settings),
+                    "--workspace",
+                    str(workspace),
+                    "--plugin",
+                    str(workspace.parent / "path_probe"),
+                    "--provider",
+                    "path_probe",
+                    "--yes",
+                    "--trust-workspace",
+                    "grant",
+                    "--exec",
+                    "/path-probe",
+                    *arguments,
+                ),
+                launch_directory,
+                environment,
+                30,
+                12000,
+            ),
+        )
+
     @staticmethod
     def test_release_folder_replacement_removes_stale_files() -> None:
         """Verify release folder replacement removes stale files."""
         with tempfile.TemporaryDirectory() as temporary:
-            target = Path(temporary) / "release"
+            target = Path(temporary).resolve() / "release"
             target.mkdir()
             (target / "stale.txt").write_text("stale", encoding="utf-8")
             members = {
                 "PORTABLE_MANIFEST.json": b"{}\n",
                 "nested/source.py": b"print('ok')\n",
             }
-            build_portable.replace_release_folder(target, members, set())
+            with mock.patch.object(
+                Path,
+                "rmdir",
+                side_effect=AssertionError("Do not recycle names"),
+            ):
+                build_portable.replace_release_folder(target, members, set())
             build_portable.verify_release_folder(target, members)
             require(not ((target / "stale.txt").exists()))
+            require(list(target.parent.glob(".release.transaction*")) == [])
+            require((target.parent / ".release.lock").is_file())
 
     def test_release_folder_rolls_back_if_final_verification_fails(self) -> None:
         """Verify release folder rolls back if final verification fails."""
         with tempfile.TemporaryDirectory() as temporary:
-            target = Path(temporary) / "release"
+            target = Path(temporary).resolve() / "release"
             target.mkdir()
             original = target / "original.txt"
             original.write_text("keep me", encoding="utf-8")
@@ -104,6 +442,38 @@ class PortableBuildTests(PackageTestCase):
                 )
 
             self.equal(original.read_text(encoding="utf-8"), "keep me")
+
+    def test_failed_rollback_retains_original_backup_and_primary_error(self) -> None:
+        """A second replacement failure must not garbage-collect the old release."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "release"
+            target.mkdir()
+            (target / "original.txt").write_bytes(b"keep me")
+            original_replace = Path.replace
+
+            def replace(source: Path, destination: Path) -> Path:
+                if destination == target:
+                    message = (
+                        "rollback failed"
+                        if source.name == "original"
+                        else "publish failed"
+                    )
+                    raise OSError(message)
+                return original_replace(source, destination)
+
+            with (
+                mock.patch.object(Path, "replace", replace),
+                self.rejected(OSError, "publish failed"),
+            ):
+                build_portable.replace_release_folder(
+                    target,
+                    {"new.txt": b"new"},
+                    set(),
+                )
+            backups = list(root.glob(".raychat-release-*"))
+            self.equal(len(backups), 1)
+            self.equal((backups[0] / "original/original.txt").read_bytes(), b"keep me")
 
 
 class SmokeProcessTests(PackageTestCase):

@@ -77,18 +77,17 @@ def include_child_plugins(case: Case, *plugin_ids: str) -> None:
         ],
         *plugin_ids,
     ]
-    case.config.write_text(json_text(config))
+    case.config.write_text(json_text(config), encoding="utf-8")
 
 
 BACKGROUND_COMMAND_PLUGIN = """import json
 import time
 from pathlib import Path
+from raychat.filesystem import write_bytes
 from raychat.sdk import CommandDefinition, PluginAPI, PluginContext
 
 def publish(path: Path, payload: object) -> None:
-    pending = path.with_name(path.name + '.pending')
-    pending.write_text(json.dumps(payload), encoding='utf-8')
-    pending.replace(path)
+    write_bytes(path, json.dumps(payload).encode('utf-8'))
 
 def register(api: PluginAPI) -> None:
     def marker(arguments: str, ctx: PluginContext):
@@ -132,7 +131,7 @@ def background_commands_plugin(case: Case) -> Path:
     """
     path = case.work / "background_probe"
     path.mkdir()
-    (path / "__init__.py").write_text(BACKGROUND_COMMAND_PLUGIN)
+    (path / "__init__.py").write_text(BACKGROUND_COMMAND_PLUGIN, encoding="utf-8")
     (path / "plugin.json").write_text(
         json_text({
             "id": "background_probe",
@@ -148,6 +147,7 @@ def background_commands_plugin(case: Case) -> Path:
             "requires": {},
             "defaults": {},
         }),
+        encoding="utf-8",
     )
     include_child_plugins(case, "background_probe")
     return path
@@ -168,7 +168,7 @@ def stop_background_command(chat: TerminalChat, case: Case, name: str) -> None:
     finished = case.work / ("bg-" + name + ".finished")
     wait_file(chat, finished, 3)
     require(
-        _decode_object(finished.read_text()) == {"completed": False},
+        _decode_object(finished.read_text(encoding="utf-8")) == {"completed": False},
         (
             "Acceptance failed: _decode_object(finished.read_text())"
             ' == {"completed": False}'
@@ -176,6 +176,7 @@ def stop_background_command(chat: TerminalChat, case: Case, name: str) -> None:
     )
     (case.output / (name + "-cancel.json")).write_text(
         json_text({"cancel_seconds": time.monotonic() - started, "command": name}),
+        encoding="utf-8",
     )
 
 
@@ -192,7 +193,7 @@ def requests(case: Case) -> list[list[dict[str, str]]]:
     if not path.exists():
         return []
     result: list[list[dict[str, str]]] = []
-    for line in path.read_text().splitlines(keepends=True):
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
         if not line.endswith("\n"):
             continue
         result.append(message_history(json_object(line)))
@@ -440,12 +441,13 @@ def repeated_reload(case: Case, _findings: list[str]) -> None:
     # Make a denied nested workflow visible rather than using the base fixture's
     # generic completion text. This edits only this temporary external provider.
     source.write_text(
-        source.read_text().replace(
+        source.read_text(encoding="utf-8").replace(
             '            else:\n                message = "WORKFLOW_FINISHED"',
             '            elif result.get("denied") is True:\n'
             '                message = "CHILD_DELEGATION_DENIED"\n'
             '            else:\n                message = "WORKFLOW_FINISHED"',
         ),
+        encoding="utf-8",
     )
     chat = case.chat()
     try:
@@ -474,10 +476,11 @@ def repeated_reload(case: Case, _findings: list[str]) -> None:
         chat.wait("1 queued")
         chat.command("/parent", "Main chat")
         source.write_text(
-            source.read_text().replace(
+            source.read_text(encoding="utf-8").replace(
                 'message = "ANSWER_" + prompt',
                 'message = "RELOADED_" + prompt',
             ),
+            encoding="utf-8",
         )
         chat.command("/plugins reload", '"applied": false')
         case.checks.append(
@@ -573,7 +576,7 @@ def _reloaded_menu(
     chat.command("/parent", "Main chat")
     chat.command("/agents", "Agent sessions")
     screen = chat.screen()
-    (case.output / "repeated-agent-menu.txt").write_text(screen)
+    (case.output / "repeated-agent-menu.txt").write_text(screen, encoding="utf-8")
     labels = [
         match.group()
         for match in re.finditer(
@@ -624,18 +627,19 @@ def unicode_preview(case: Case, _findings: list[str]) -> None:
     )
     source = case.probe / "provider.py"
     source.write_text(
-        source.read_text().replace(
+        source.read_text(encoding="utf-8").replace(
             '        if prompt == "START_WORKFLOW":',
             '        if prompt == "START_LONG_WORKFLOW":\n'
             f"            return {reply!r}\n"
             '        if prompt == "START_WORKFLOW":',
         ),
+        encoding="utf-8",
     )
     config = read_object(case.config)
     object_field(object_field(config["tui"], "tui")["picker"], "picker")[
         "max_width"
     ] = 160
-    case.config.write_text(json_text(config))
+    case.config.write_text(json_text(config), encoding="utf-8")
     chat = case.chat()
     try:
         chat.resize(170, 30)
@@ -643,7 +647,7 @@ def unicode_preview(case: Case, _findings: list[str]) -> None:
         chat.command("START_LONG_WORKFLOW", "WORKFLOW_FINISHED")
         chat.command("/agents", "Agent sessions")
         screen = chat.screen()
-        (case.output / "unicode-agent-menu.txt").write_text(screen)
+        (case.output / "unicode-agent-menu.txt").write_text(screen, encoding="utf-8")
         row = re.search(r"left  \[done\]  #[\w-]+  \(primary\)  ([^│\n]+)", screen)
         if row is None:
             raise AssertionError(screen)
@@ -711,7 +715,10 @@ def _close_picker_without_cancelling(case: Case, chat: TerminalChat) -> float:
             "Task stopped" not in chat.screen(),
             'Acceptance failed: "Task stopped" not in chat.screen()',
         )
-    (case.output / "after-single-escape.txt").write_text(chat.screen())
+    (case.output / "after-single-escape.txt").write_text(
+        chat.screen(),
+        encoding="utf-8",
+    )
     case.checks.append("one Escape closes the picker without cancelling the child")
     return escape_window
 
@@ -734,7 +741,10 @@ def picker_cancel(case: Case, _findings: list[str], *, prearmed: bool = False) -
             chat.wait("< Back to parent chat")
         else:
             chat.command("/agents", "< Back to parent chat")
-        (case.output / "before-double-escape.txt").write_text(chat.screen())
+        (case.output / "before-double-escape.txt").write_text(
+            chat.screen(),
+            encoding="utf-8",
+        )
         chat.send(b"\x1b\x1b")
         if armed_at is not None:
             elapsed = time.monotonic() - armed_at
@@ -743,10 +753,11 @@ def picker_cancel(case: Case, _findings: list[str], *, prearmed: bool = False) -
                     "elapsed": elapsed,
                     "double_escape_seconds": escape_window,
                 }),
+                encoding="utf-8",
             )
             require(elapsed < escape_window, "Prior Escape expired before menu gesture")
         chat.wait("Task stopped", 3)
-        (case.output / "stopped-child.txt").write_text(chat.screen())
+        (case.output / "stopped-child.txt").write_text(chat.screen(), encoding="utf-8")
         chat.command("PICKER_CANCEL_REPLACEMENT", "ANSWER_PICKER_CANCEL_REPLACEMENT")
         require(
             users(sent(case, "PICKER_CANCEL_REPLACEMENT")[-1])
@@ -802,7 +813,10 @@ def picker_cancel(case: Case, _findings: list[str], *, prearmed: bool = False) -
                 ),
             )
     finally:
-        (case.output / "after-double-escape.txt").write_text(chat.screen())
+        (case.output / "after-double-escape.txt").write_text(
+            chat.screen(),
+            encoding="utf-8",
+        )
         release(case)
         chat.close(case.output / "picker-cancel.ansi")
 
@@ -824,7 +838,7 @@ def concurrent_session_command(case: Case, _findings: list[str]) -> None:
         chat.send("/bg-session root-session\r")
         started = case.work / "bg-root-session.started"
         wait_file(chat, started)
-        context = message_history(json_object(started.read_text()))
+        context = message_history(json_object(started.read_text(encoding="utf-8")))
         require(
             "COMMAND_ROOT_ANCHOR" in users(context),
             'Acceptance failed: "COMMAND_ROOT_ANCHOR" in users(context)',
@@ -961,7 +975,9 @@ def workflow_child_session_command(case: Case, _findings: list[str]) -> None:
         chat.send("/bg-session selected-child\r")
         started = case.work / "bg-selected-child.started"
         wait_file(chat, started)
-        context = users(message_history(json_object(started.read_text())))
+        context = users(
+            message_history(json_object(started.read_text(encoding="utf-8"))),
+        )
         require(
             context in ([], ["BLOCK_LEFT"]),
             "The child command must see its own history, never the parent history",
@@ -1075,7 +1091,10 @@ def main() -> None:
                 "findings": findings,
                 "error": str(exc),
             }
-        (case.output / "result.json").write_text(json_text(report, indent=2))
+        (case.output / "result.json").write_text(
+            json_text(report, indent=2),
+            encoding="utf-8",
+        )
         sys.stdout.write(json_text({"scenario": name, **report}, indent=2) + "\n")
         sys.stdout.flush()
     if failed:

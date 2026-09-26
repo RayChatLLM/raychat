@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
@@ -11,8 +12,6 @@ from raychat.configuration import SETTINGS
 from .composition import PluginSelection, create_runtime, package_manager
 from .packages import read_manifest
 from .plugin_arguments import add_plugin_arguments
-from .plugin_manager import atomic_json as _write_json
-from .plugin_manager import read_json as _read_json
 from .plugins import Runtime
 from .sdk import Action, CancelCheck, EventCallback, PluginError, SessionLifecycle
 from .session import AgentSession
@@ -21,9 +20,9 @@ from .storage import SessionStore
 from .validation import (
     boolean_field,
     configuration_fields,
-    string_list_field,
     text_field,
 )
+from .workspace_trust import workspace_trust as _workspace_trust
 
 if TYPE_CHECKING:
     import argparse
@@ -130,23 +129,6 @@ def _runtime_options(options: Mapping[str, object]) -> _RuntimeOptions:
     )
 
 
-def _workspace_trust(workspace: str | Path, choice: str | None) -> bool:
-    home = Path.home() / SETTINGS.storage.home_directory
-    trust_path = home / SETTINGS.storage.trust_filename
-    trusted = string_list_field(
-        _read_json(trust_path, []),
-        "trusted workspaces",
-        allow_empty=True,
-    )
-    identity = str(Path(workspace).resolve())
-    if choice:
-        trusted = [path for path in trusted if path != identity]
-        if choice == "grant":
-            trusted.append(identity)
-        _write_json(trust_path, sorted(trusted))
-    return identity in trusted
-
-
 def build_runtime(
     workspace: str | Path,
     options: Mapping[str, object],
@@ -174,31 +156,32 @@ def build_runtime(
         trusted=trusted_workspace,
         install_profile=not selected_options.no_plugins,
     )
-    requested_disabled = set(selected_options.disabled)
-    available = manager.paths(include_disabled=True)
-    explicitly_enabled = set()
-    for value in [*SETTINGS.plugins.paths, *selected_options.paths]:
-        path = Path(value).expanduser().resolve()
-        name = read_manifest(path).id
-        if name in available and path != available[name]:
-            raise PluginError("Ambiguous plugin ID: " + name)
-        available[name] = path
-        explicitly_enabled.add(name)
-    if requested_disabled - available.keys():
-        raise ValueError(
-            "Unknown plugin to disable: "
-            + ", ".join(sorted(requested_disabled - available.keys())),
+    with manager.source_read():
+        requested_disabled = set(selected_options.disabled)
+        available = manager.paths(include_disabled=True)
+        explicitly_enabled = set()
+        for value in [*SETTINGS.plugins.paths, *selected_options.paths]:
+            path = Path(value).expanduser().resolve()
+            name = read_manifest(path).id
+            if name in available and path != available[name]:
+                raise PluginError("Ambiguous plugin ID: " + name)
+            available[name] = path
+            explicitly_enabled.add(name)
+        if requested_disabled - available.keys():
+            raise ValueError(
+                "Unknown plugin to disable: "
+                + ", ".join(sorted(requested_disabled - available.keys())),
+            )
+        disabled = (
+            requested_disabled
+            | (set(SETTINGS.plugins.disabled) & available.keys())
+            | (manager.disabled - explicitly_enabled)
         )
-    disabled = (
-        requested_disabled
-        | (set(SETTINGS.plugins.disabled) & available.keys())
-        | (manager.disabled - explicitly_enabled)
-    )
-    selected = (
-        []
-        if selected_options.no_plugins
-        else [p for n, p in available.items() if n not in disabled]
-    )
+        selected = (
+            []
+            if selected_options.no_plugins
+            else [p for n, p in available.items() if n not in disabled]
+        )
     remaining = dict(resources)
     raw_source = remaining.pop("source", None)
     source = None if raw_source is None else configuration_fields(raw_source, "source")
@@ -211,10 +194,19 @@ def build_runtime(
         **remaining,
     )
     directories = [manager.roots["workspace"] / "plugins"] if trusted_workspace else []
-    runtime.watch(
-        directories,
-        enabled=SETTINGS.plugins.auto_reload and not selected_options.no_plugins,
-    )
+    try:
+        runtime.watch(
+            directories,
+            enabled=SETTINGS.plugins.auto_reload and not selected_options.no_plugins,
+        )
+    except BaseException:
+        try:
+            runtime.close()
+        except BaseException:
+            logging.getLogger(__name__).exception(
+                "Runtime cleanup failed after watch initialization failure",
+            )
+        raise
     return runtime
 
 

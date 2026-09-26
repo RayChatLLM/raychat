@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from raychat.core_bridge import CoreBridge
+from raychat.filesystem import OwnedTemporaryDirectory
+from raychat.plugin_manager import PLUGIN_MANAGER
 from raychat.sdk import workspace_path
 from raychat.service_contracts import ATOMIC_WRITE, CHAT, PROCESS_RUNNER
+from raychat.workspace_files import workspace_access
 
 from .candidate import promote
 from .evaluation import (
@@ -147,7 +150,7 @@ def _editable(pristine: Path, config: SelfHarnessSettings) -> dict[str, str]:
         for path in sorted(workspace_path(pristine, configured_root).rglob("*.py")):
             data = path.read_bytes()
             if len(data) <= remaining:
-                editable[str(path.relative_to(pristine))] = data.decode("utf-8")
+                editable[path.relative_to(pristine).as_posix()] = data.decode("utf-8")
                 remaining -= len(data)
     return editable
 
@@ -187,30 +190,40 @@ class _HarnessRun:
             "Self-harness: evaluating the baseline in a temporary workspace.",
         )
         try:
-            with tempfile.TemporaryDirectory(
+            with OwnedTemporaryDirectory(
                 prefix="raychat-self-harness-",
             ) as temporary:
                 return self.evaluate(Path(temporary).resolve())
         except BaseException as exc:
-            append(
-                self.log,
-                {
-                    "attempt": self.attempt,
-                    "decision": "rejected",
-                    "reason": type(exc).__name__ + ": " + str(exc),
-                },
-            )
+            try:
+                append(
+                    self.log,
+                    {
+                        "attempt": self.attempt,
+                        "decision": "rejected",
+                        "reason": type(exc).__name__ + ": " + str(exc),
+                    },
+                )
+            except (OSError, RuntimeError, ValueError):
+                logging.getLogger(__name__).exception(
+                    "Failed to record the rejected harness attempt path=%r",
+                    str(self.log),
+                )
             raise
 
     def evaluate(self, root: Path) -> HarnessResult:
         config = self.installation.config
         pristine = root / "source"
-        copy_workspace(
-            self.installation.workspace,
-            pristine,
-            config,
-            self.ctx.check_cancelled,
-        )
+        with (
+            self.ctx.require_service(PLUGIN_MANAGER).source_read(),
+            workspace_access(self.installation.workspace),
+        ):
+            copy_workspace(
+                self.installation.workspace,
+                pristine,
+                config,
+                self.ctx.check_cancelled,
+            )
         service = self.ctx.optional_service("core_updates")
         if isinstance(service, CoreBridge):
             for name in ("raychat", "plugins"):

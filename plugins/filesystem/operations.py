@@ -11,21 +11,23 @@ import re
 import secrets
 import stat
 from codecs import IncrementalDecoder
-from contextlib import contextmanager
 from dataclasses import dataclass
 from heapq import nsmallest
 from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 from raychat.configuration import SETTINGS
+from raychat.filesystem import replace_completed, staged_file, write_bytes
 from raychat.protocol import describe_fields, validate_fields
 from raychat.sdk import ToolDefinition, workspace_path
 from raychat.service_contracts import ATOMIC_WRITE, AtomicWriteService
+from raychat.workspace_files import workspace_access
+from raychat.workspace_transactions import JOURNAL_NAME
 
 from .configuration import load as load_settings
 from .configuration import validate
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     from raychat.sdk import CancelCheck, PluginAPI, PluginContext
@@ -204,35 +206,6 @@ def _read_file_page(path: Path, offset: int, limit: int) -> dict[str, object]:
         return result
 
 
-def _optional_open_flag(name: str) -> int:
-    value: object = getattr(os, name, 0)
-    if type(value) is not int:
-        message = f"os.{name} must be an integer open flag."
-        raise TypeError(message)
-    return value
-
-
-def _open_atomic_temporary(path: Path) -> tuple[int, Path]:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= _optional_open_flag("O_BINARY")
-    flags |= _optional_open_flag("O_CLOEXEC")
-    flags |= _optional_open_flag("O_NOINHERIT")
-    for _attempt in range(SETTINGS.storage.atomic_attempts):
-        temporary = path.parent / (
-            f".{path.name}.chat-agent-{secrets.token_hex(SETTINGS.storage.atomic_random_bytes)}.tmp"
-        )
-        try:
-            return os.open(
-                temporary,
-                flags,
-                SETTINGS.storage.workspace_file_mode,
-            ), temporary
-        except FileExistsError:
-            continue
-    error_message = "Could not allocate a unique atomic-write temporary file."
-    raise FileExistsError(error_message)
-
-
 def _existing_regular_mode(path: Path, operation: str) -> int | None:
     try:
         info = path.stat()
@@ -268,23 +241,11 @@ def _sync_and_preserve_mode(stream: BinaryIO, mode: int | None) -> bool:
 def _atomic_write(path: Path, data: bytes) -> tuple[int, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = _existing_regular_mode(path, "write")
-    descriptor, temporary = _open_atomic_temporary(path)
-    descriptor_open = True
-    mode_applied = False
-    try:
-        stream = os.fdopen(descriptor, "wb")
-        descriptor_open = False
-        with stream:
-            _write_all(stream, data)
-            mode_applied = _sync_and_preserve_mode(stream, mode)
-        if mode is not None and not mode_applied:
-            temporary.chmod(mode)
-        temporary.replace(path)
-    finally:
-        if descriptor_open:
-            os.close(descriptor)
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
+    write_bytes(
+        path,
+        data,
+        mode=mode if mode is not None else SETTINGS.storage.workspace_file_mode,
+    )
     return len(data), hashlib.sha256(data).hexdigest()
 
 
@@ -405,22 +366,6 @@ def _check_edit_source(source: BinaryIO, change: _EditBytes) -> os.stat_result:
     return before
 
 
-@contextmanager
-def _temporary_output(path: Path) -> Iterator[tuple[BinaryIO, Path]]:
-    descriptor, temporary = _open_atomic_temporary(path)
-    descriptor_open = True
-    try:
-        stream = os.fdopen(descriptor, "wb")
-        descriptor_open = False
-        with stream:
-            yield stream, temporary
-    finally:
-        if descriptor_open:
-            os.close(descriptor)
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
-
-
 def _replace_edit(path: Path, temporary: Path, before: os.stat_result) -> None:
     try:
         current = path.stat()
@@ -430,7 +375,7 @@ def _replace_edit(path: Path, temporary: Path, before: os.stat_result) -> None:
     if _cross_api_state(current) != _cross_api_state(before):
         message = "edit target changed before it could be replaced."
         raise OSError(message)
-    temporary.replace(path)
+    replace_completed(temporary, path)
 
 
 def _atomic_edit(
@@ -446,7 +391,7 @@ def _atomic_edit(
     change = _EditBytes(start, end, replacement, expected_sha256)
     with path.open("rb") as source:
         before = _check_edit_source(source, change)
-        with _temporary_output(path) as (destination, temporary):
+        with staged_file(path) as (destination, temporary):
             streams = _EditStreams(
                 source,
                 destination,
@@ -691,20 +636,53 @@ def execute_filesystem(
     dict[str, object]
         Read, listing or atomic mutation evidence for the requested operation.
 
+    Raises
+    ------
+    ValueError
+        If the operation targets its own coordination lock.
+
     """
     _check_cancel_callback(cancel_check)
     request = _request(action)
     path = workspace_path(root, request.path)
     if isinstance(request, _ListRequest):
-        return _list_directory(request, path)
+        with workspace_access(root, existing_only=True):
+            return _list_directory(request, path)
+    if isinstance(request, _WriteRequest):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    lock = workspace_path(root, ".raychat/filesystem.lock")
+    with workspace_access(root):
+        if path == workspace_path(root, JOURNAL_NAME):
+            message = "The workspace transaction record cannot be modified."
+            raise ValueError(message)
+        with contextlib.suppress(FileNotFoundError):
+            if path.samefile(lock):
+                message = "The workspace coordination lock cannot be modified."
+                raise ValueError(message)
+        if cancel_check is not None:
+            cancel_check()
+        return _execute_file(request, path)
+
+
+def _execute_file(
+    request: _ReadRequest | _WriteRequest | _EditRequest | _AnchorEditRequest,
+    path: Path,
+) -> dict[str, object]:
+    """Execute under the workspace sidecar, retaining it through publication.
+
+    Returns
+    -------
+    dict[str, object]
+        The completed operation's result.
+
+    """
     if isinstance(request, _ReadRequest):
         return _read_file_page(path, request.offset, request.limit)
     if isinstance(request, _WriteRequest):
         data = request.content.encode("utf-8")
-        if request.append and path.is_file():
-            # Appends reuse the atomic replace, so a crash never leaves a
-            # partially extended file.
-            data = path.read_bytes() + data
+        if request.append:
+            with contextlib.suppress(FileNotFoundError):
+                data = path.read_bytes() + data
         count, digest = _atomic_write(path, data)
         return {
             "ok": True,

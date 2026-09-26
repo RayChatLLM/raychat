@@ -9,6 +9,8 @@ from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, TypeAlias, cast
 
+from raychat.filesystem import write_bytes
+
 from . import serialization
 from .image import Image
 
@@ -134,9 +136,7 @@ def key(value: object) -> str:
 def write(path: Path, value: object) -> None:
     """Atomically replace a checkpoint after fully validating its data values."""
     encoded = key(value)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(encoded, encoding="utf-8")
-    temporary.replace(path)
+    write_bytes(path, encoded.encode("utf-8"))
 
 
 def _reject_constant(value: str) -> None:

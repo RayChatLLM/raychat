@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from raychat.type_support import override
@@ -15,6 +17,7 @@ from tests.assertions import TypedTestCase
 from tools.terminal_screen import TerminalScreen
 
 if os.name == "posix":
+    from tools.drive_tui import TerminalChat, TerminalOptions
     from tools.ui_stress_tui import paste
 
 
@@ -74,6 +77,77 @@ class PasteObservationTests(TypedTestCase):
             terminal.received,
             b"\x1b[200~" + text.encode() + b"\x1b[201~",
         )
+
+
+class TerminalCleanupTests(TypedTestCase):
+    """Retire real acceptance children and descriptors when reporting fails."""
+
+    @override
+    def setUp(self) -> None:
+        """Require the native POSIX pseudo-terminal driver."""
+        if os.name != "posix":
+            self.skipTest("The acceptance driver uses a POSIX PTY.")
+
+    def _closed_descriptors(self, chat: TerminalChat) -> None:
+        for descriptor in (chat.master, chat.slave):
+            with self.rejected(OSError):
+                os.fstat(descriptor)
+        self.require(chat.process.poll() is not None)
+
+    def test_transcript_failure_closes_both_terminal_descriptors(self) -> None:
+        """A missing report parent cannot retain the reaped child's PTY handles."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            launcher = root / "launcher.py"
+            launcher.write_text("pass\n", encoding="utf-8")
+            chat = TerminalChat(root, [], options=TerminalOptions(launcher=launcher))
+            self.equal(chat.process.wait(timeout=5), 0)
+            with self.rejected(FileNotFoundError):
+                chat.close(root / "missing" / "transcript.ansi")
+            self._closed_descriptors(chat)
+
+    def test_failed_shutdown_input_still_retires_child_and_terminal(self) -> None:
+        """An input error still kills and reaps a child holding the PTY open."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            launcher = root / "launcher.py"
+            launcher.write_text("import time; time.sleep(60)\n", encoding="utf-8")
+            chat = TerminalChat(root, [], options=TerminalOptions(launcher=launcher))
+            failure = OSError("Injected shutdown input failure")
+            with (
+                mock.patch.object(chat, "send", side_effect=failure),
+                self.rejected(OSError, "Injected shutdown input failure"),
+            ):
+                chat.close(root / "transcript.ansi")
+            self._closed_descriptors(chat)
+
+    def test_retirement_failure_preserves_shutdown_error(self) -> None:
+        """Keep the initiating failure visible when direct-child retirement fails."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            launcher = root / "launcher.py"
+            launcher.write_text("import time; time.sleep(60)\n", encoding="utf-8")
+            chat = TerminalChat(root, [], options=TerminalOptions(launcher=launcher))
+            try:
+                with (
+                    mock.patch.object(chat, "send", side_effect=ValueError("primary")),
+                    mock.patch.object(
+                        chat.process,
+                        "kill",
+                        side_effect=OSError("secondary"),
+                    ),
+                    self.assertLogs("tools.drive_tui", level="ERROR") as recorded,
+                    self.rejected(ValueError, "primary"),
+                ):
+                    chat.close(root / "transcript.ansi")
+                self.require("retire child" in "\n".join(recorded.output))
+                self.require("secondary" in "\n".join(recorded.output))
+                for descriptor in (chat.master, chat.slave):
+                    with self.rejected(OSError):
+                        os.fstat(descriptor)
+            finally:
+                chat.process.kill()
+                chat.process.wait(timeout=5)
 
 
 class IncrementalRenderingTests(unittest.TestCase):

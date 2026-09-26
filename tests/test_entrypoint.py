@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat import composition, entrypoint
+from raychat import resources as resource_module
 from raychat.plugins import Runtime
 from raychat.resources import AgentResources, create_resources
 from raychat.service_contracts import DELEGATION
@@ -24,6 +25,7 @@ from raychat.storage import SessionStore
 from raychat.type_support import override
 from raychat.ui.terminal import InteractiveTerminal, TerminalSession
 from raychat.validation import array_field, json_object, object_field
+from raychat.workers import AgentWorker
 from tests.assertions import TypedTestCase
 from tests.environment_support import provider_environment
 from tests.plugin_support import (
@@ -34,10 +36,11 @@ from tests.plugin_support import (
 )
 from tests.transport_support import captured
 from tests.tui_support import provider_fixture
+from tools.smoke_process import SmokeCommand, run_checked
 
 if TYPE_CHECKING:
     from argparse import Namespace
-    from collections.abc import Awaitable, Iterable, Sequence
+    from collections.abc import Awaitable, Iterable, Mapping, Sequence
 
     from raychat.sdk import Chat, Messages
     from raychat.ui.picker import Choice
@@ -496,3 +499,265 @@ class ResumeTests(_EntrypointFixture):
         self.require(("Traceback") not in (self.err.getvalue()))
         reopened = SessionStore(self.root, self.directory, identifier)
         reopened.close()
+
+
+class ResourceCleanupTests(_EntrypointFixture):
+    """Keep run/startup failures and release owned files after shutdown errors."""
+
+    def test_returned_failure_and_cancellation_survive_resource_cleanup(self) -> None:
+        """Nonzero status is a completed outcome even without a raised exception."""
+        for status in (1, 130):
+            runtime = _FailingRuntime(self.root)
+            log = _ObservedLog()
+            resources = AgentResources(runtime, None, log)
+            with (
+                self.subTest(status=status),
+                mock.patch.object(
+                    entrypoint,
+                    "create_resources",
+                    return_value=resources,
+                ),
+                mock.patch.object(entrypoint, "run_exec", return_value=status),
+                self.assertLogs("raychat.entrypoint", level="ERROR") as logs,
+            ):
+                self.equal(self.main(["--exec", "/plugins"]), status)
+            self.equal(runtime.close_calls, 1)
+            self.require(log.closed)
+            self.require("plugin close failed" in "\n".join(logs.output))
+
+    def test_worker_cleanup_preserves_failure_interrupt_and_success_policy(
+        self,
+    ) -> None:
+        """Join the real worker before injecting its reported shutdown failure."""
+        for result in (
+            0,
+            1,
+            130,
+            KeyboardInterrupt(),
+            ValueError("primary exec failure"),
+        ):
+            with self.subTest(result=result):
+                self._worker_cleanup_failure(result)
+
+    def _worker_cleanup_failure(self, result: int | BaseException) -> None:
+        join = AgentWorker.join
+        joined: list[AgentWorker] = []
+
+        def failed_join(worker: AgentWorker, timeout: float | None = None) -> bool:
+            join(worker, timeout)
+            joined.append(worker)
+            message = "secondary worker cleanup"
+            raise RuntimeError(message)
+
+        def receive(_worker: AgentWorker, _job: int) -> int:
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        self.err.seek(0)
+        self.err.truncate()
+        with (
+            mock.patch.object(AgentWorker, "join", failed_join),
+            mock.patch.object(entrypoint, "_receive_exec_result", receive),
+            mock.patch("raychat.entrypoint.logging.getLogger") as logger,
+        ):
+            observed = self.main(["--exec", "/plugins"])
+        self.equal(len(joined), 1)
+        self.require(not joined[0].is_alive)
+        expected = 130 if isinstance(result, KeyboardInterrupt) else result
+        self.equal(observed, expected if isinstance(expected, int) and expected else 1)
+        if isinstance(result, ValueError):
+            self.equal(self.err.getvalue(), "Error: primary exec failure\n")
+        elif result == 0:
+            self.require("secondary worker cleanup" in self.err.getvalue())
+        else:
+            self.equal(self.err.getvalue(), "")
+        self.equal(logger.call_count, 0 if result == 0 else 1)
+
+    def test_close_preserves_first_error_after_store_and_log_failures(self) -> None:
+        """Attempt every owner and report secondary failures without masking."""
+        runtime = _FailingRuntime(self.root)
+        store = _ObservedStore(self.root, self.directory)
+        log = _ObservedLog()
+        resources = AgentResources(runtime, None, log, store)
+        close_store = store.close
+        close_log = log.close
+
+        def store_failure() -> None:
+            close_store()
+            message = "secondary store close"
+            raise OSError(message)
+
+        def log_failure() -> None:
+            close_log()
+            message = "tertiary log close"
+            raise OSError(message)
+
+        with (
+            mock.patch.object(store, "close", store_failure),
+            mock.patch.object(log, "close", log_failure),
+            self.assertLogs("raychat.resources", level="ERROR") as logs,
+        ):
+            error = captured(RuntimeError, resources.close)
+        self.equal(str(error), "plugin close failed")
+        self.equal(runtime.close_calls, 1)
+        self.equal(store.closes, 1)
+        self.equal(log.closes, 1)
+        self.require(log.closed)
+        self.equal(len(logs.records), 2)
+        self.require("secondary store close" in "\n".join(logs.output))
+        self.require("tertiary log close" in "\n".join(logs.output))
+        reopened = SessionStore(self.root, self.directory, store.session_id)
+        reopened.close()
+
+    def test_context_preserves_operation_and_cancellation_errors(self) -> None:
+        """Closing a failed host cannot replace the consumer's exception object."""
+        errors = (
+            ValueError("operation failed"),
+            KeyboardInterrupt(),
+            asyncio.CancelledError(),
+        )
+        for primary in errors:
+            with self.subTest(error=type(primary).__name__):
+                self._assert_primary_context_error(primary)
+
+    def _assert_primary_context_error(self, primary: BaseException) -> None:
+        runtime = _FailingRuntime(self.root)
+        store = _ObservedStore(self.root, self.directory)
+        log = _ObservedLog()
+        resources = AgentResources(runtime, None, log, store)
+
+        def operation() -> None:
+            with resources as owned:
+                self.require(owned is resources)
+                raise primary
+
+        with self.assertLogs("raychat.resources", level="ERROR") as logs:
+            observed = captured(BaseException, operation)
+        self.require(observed is primary)
+        self.equal(runtime.close_calls, 1)
+        self.equal(store.closes, 1)
+        self.equal(log.closes, 1)
+        self.require(log.closed)
+        self.require("plugin close failed" in "\n".join(logs.output))
+        reopened = SessionStore(self.root, self.directory, store.session_id)
+        reopened.close()
+
+    def test_partial_startup_preserves_error_and_logs_failed_cleanup(self) -> None:
+        """Retain a setup failure after the store/log have been assigned."""
+        runtime = _FailingRuntime(self.root)
+        store = _ObservedStore(self.root, self.directory)
+        log = _ObservedLog()
+        primary = OSError("store initialization failed")
+        args = entrypoint.build_parser(provider_environment()).parse_args(self.flags)
+
+        def prepare(
+            _args: Namespace,
+            _environ: Mapping[str, str],
+            _options: object,
+            owner: AgentResources,
+        ) -> None:
+            owner.store = store
+            owner.log = log
+            raise primary
+
+        environ: dict[str, str] = {}
+        with (
+            mock.patch.object(resource_module, "build_runtime", return_value=runtime),
+            mock.patch.object(resource_module, "_prepare_resources", prepare),
+            self.assertLogs("raychat.resources", level="ERROR") as logs,
+        ):
+            observed = captured(OSError, partial(create_resources, args, environ))
+        self.require(observed is primary)
+        self.equal(runtime.close_calls, 1)
+        self.equal(store.closes, 1)
+        self.equal(log.closes, 1)
+        self.require(log.closed)
+        self.require("plugin close failed" in "\n".join(logs.output))
+        reopened = SessionStore(self.root, self.directory, store.session_id)
+        reopened.close()
+
+    def test_entrypoint_reports_run_error_after_cleanup_failure(self) -> None:
+        """A CLI diagnostic names the failed operation rather than its cleanup."""
+        runtime = _FailingRuntime(self.root)
+        store = _ObservedStore(self.root, self.directory)
+        log = _ObservedLog()
+        resources = AgentResources(runtime, None, log, store)
+        with (
+            mock.patch.object(entrypoint, "create_resources", return_value=resources),
+            mock.patch.object(
+                entrypoint,
+                "run_exec",
+                side_effect=ValueError("primary run failure"),
+            ),
+            self.assertLogs("raychat.resources", level="ERROR") as logs,
+        ):
+            self.equal(self.main(["--exec", "/plugins"]), 1)
+        self.equal(self.err.getvalue(), "Error: primary run failure\n")
+        self.require("plugin close failed" in "\n".join(logs.output))
+        self.equal(runtime.close_calls, 1)
+        self.equal(store.closes, 1)
+        self.equal(log.closes, 1)
+        self.require(log.closed)
+        reopened = SessionStore(self.root, self.directory, store.session_id)
+        reopened.close()
+
+    def test_cleanup_failure_after_success_still_propagates(self) -> None:
+        """Successful consumer work does not hide a later failed shutdown."""
+        runtime = _FailingRuntime(self.root)
+        log = _ObservedLog()
+        with (
+            self.rejected(RuntimeError, "plugin close failed"),
+            AgentResources(runtime, None, log),
+        ):
+            log.write("complete\n")
+        self.equal(runtime.close_calls, 1)
+        self.require(log.closed)
+
+    def test_supervised_core_preserves_failure_and_releases_files(self) -> None:
+        """Exercise the actual supervised entry in an isolated bounded child."""
+        script = """
+import io
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from raychat import core_entry
+from raychat.core_bridge import CoreBridge
+from raychat.plugins import Runtime
+from raychat.resources import AgentResources
+from raychat.storage import SessionStore
+root = Path(sys.argv[1])
+store = SessionStore(root, root / 'sessions')
+log_path = root / 'agent.log'
+log = log_path.open('w', encoding='utf-8')
+runtime = Runtime(root)
+resources = AgentResources(runtime, None, log, store)
+bridge = CoreBridge(io.BytesIO(), io.BytesIO())
+primary = ValueError('primary supervised failure')
+launch = {'argv': ['--workspace', str(root)], 'probe': True, 'workspace': str(root)}
+with (
+    patch.object(core_entry, 'create_resources', return_value=resources),
+    patch.object(core_entry, 'run_tui', side_effect=primary),
+    patch.object(runtime, 'close', side_effect=OSError('secondary shutdown failure')),
+):
+    try:
+        core_entry._run(bridge, launch)
+    except ValueError as error:
+        assert error is primary
+    else:
+        raise AssertionError('Lost supervised failure')
+assert log.closed
+log_path.replace(root / 'retired.log')
+reopened = SessionStore(root, root / 'sessions', store.session_id)
+reopened.close()
+runtime.close()
+"""
+        run_checked(
+            SmokeCommand(
+                (sys.executable, "-B", "-S", "-c", script, str(self.root)),
+                Path(__file__).resolve().parents[1],
+                dict(os.environ),
+                10,
+                4000,
+            ),
+        )
