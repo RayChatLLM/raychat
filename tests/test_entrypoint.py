@@ -412,7 +412,7 @@ class ResumeTests(_EntrypointFixture):
             ),
         )
         self.equal(result.returncode, 0, result.stderr)
-        self.equal(result.stdout, "7\n")
+        self.equal(result.stdout, "7" + os.linesep)
 
     def test_locked_session_is_not_stolen(self) -> None:
         """Check locked session is not stolen."""
