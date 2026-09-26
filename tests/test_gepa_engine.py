@@ -241,7 +241,14 @@ with mock.patch.object(optimizer, '_build_adapter', hold):
         try:
             if child.stdout is None:
                 self.fail("Missing child protocol pipe")
-            self.equal(await asyncio.wait_for(child.stdout.readline(), 10), b"ready\n")
+            # The ownership probe imports cold plugins under Defender on Windows.
+            self.equal(
+                await asyncio.wait_for(
+                    child.stdout.readline(),
+                    30 if sys.platform == "win32" else 10,
+                ),
+                b"ready\n",
+            )
             with (
                 mock.patch.object(
                     optimizer,
