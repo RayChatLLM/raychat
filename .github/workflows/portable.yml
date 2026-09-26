@@ -115,6 +115,8 @@ jobs:
         run: |
           set -o pipefail
           python -B -S -m unittest \
+            tests.test_provider_environment \
+            tests.test_provider_setup_launch \
             tests.test_provider_settings \
             tests.test_supervisor_startup \
             tests.test_http_debug \
