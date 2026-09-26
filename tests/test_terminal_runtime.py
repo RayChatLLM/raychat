@@ -180,14 +180,15 @@ class KeyDecoderTests(TypedTestCase):
             ["text", "enter", "tab", "backspace", "interrupt", "eof", "refresh"],
         )
 
-    def test_ctrl_a_and_ctrl_k_decode_to_portable_editing_events(self) -> None:
-        """Check ctrl a and ctrl k decode to portable editing events."""
-        events = runtime.KeyDecoder().feed(b"abc\x01\x0b")
+    def test_ctrl_a_e_k_decode_to_portable_editing_events(self) -> None:
+        """Check ctrl a, e and k decode to portable editing events."""
+        events = runtime.KeyDecoder().feed(b"abc\x01\x05\x0b")
         self.equal(
             events,
             [
                 runtime.KeyEvent("text", "abc"),
                 runtime.KeyEvent("home"),
+                runtime.KeyEvent("text_end"),
                 runtime.KeyEvent("kill_to_end"),
             ],
         )
@@ -806,15 +807,19 @@ class TerminalSessionTests(TypedTestCase):
         second = reader.read(0, 10)
         self.equal((first + second).decode("utf-8"), "🙂\x1b[A")
 
-    def test_windows_reader_forwards_ctrl_a_and_ctrl_k_to_decoder(self) -> None:
-        """Check windows reader forwards ctrl a and ctrl k to decoder."""
+    def test_windows_reader_forwards_ctrl_a_e_k_to_decoder(self) -> None:
+        """Check windows reader forwards ctrl a, e and k to decoder."""
         reader = backend.WindowsBackend(
             _WindowsFixture(),
-            _KeyboardFixture(["\x01", "\x0b"]),
+            _KeyboardFixture(["\x01", "\x05", "\x0b"]),
         )
         self.equal(
             runtime.KeyDecoder().feed(reader.read(0, 10)),
-            [runtime.KeyEvent("home"), runtime.KeyEvent("kill_to_end")],
+            [
+                runtime.KeyEvent("home"),
+                runtime.KeyEvent("text_end"),
+                runtime.KeyEvent("kill_to_end"),
+            ],
         )
 
     def test_windows_reader_forwards_vt_mouse_reports_to_decoder(self) -> None:

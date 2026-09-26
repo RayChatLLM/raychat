@@ -107,6 +107,19 @@ def _failure_tests(
     return checks
 
 
+def _restored_history(chat: TerminalChat, checks: list[str]) -> None:
+    chat.wait("BEFORE_UPDATE")
+    require("BEFORE_UPDATE" in chat.screen().partition("─ MESSAGE ")[2])
+    chat.send("\x1b[B\x1b[B!")
+    chat.wait("d!raft 雪🙂")
+    chat.send("\x05_END")
+    chat.wait("d!raft 雪🙂_END")
+    checks.append(
+        "input history, browsing position and suspended draft cursor survive "
+        "live replacement; Ctrl+E reaches the restored text end",
+    )
+
+
 def run(root: Path, output: Path) -> dict[str, object]:
     """Validate an actual changed core, reject invalid code, and recover twice.
 
@@ -135,12 +148,13 @@ def run(root: Path, output: Path) -> dict[str, object]:
         launcher_pid = chat.process.pid
         manifest = next((output / "home/live").glob("*/recovery.json"))
         initial = read_object(manifest)
+        chat.command("BEFORE_UPDATE", "ANSWER_BEFORE_UPDATE")
         chat.send("/update " + str(candidate) + "\r")
         chat.wait("validating", seconds=30)
-        chat.send("draft 雪🙂")
+        chat.send("draft 雪🙂\x01\x1b[C\x1b[A\x1b[A")
         chat.wait("Core updated", seconds=600)
         chat.wait(_MARKER)
-        chat.wait("draft 雪🙂")
+        _restored_history(chat, checks)
         updated = read_object(manifest)
         require(
             initial["active"] != updated["active"],
@@ -152,10 +166,10 @@ def run(root: Path, output: Path) -> dict[str, object]:
             "without closing the terminal",
         )
         chat.send("\r")
-        chat.wait("ANSWER_draft 雪🙂")
+        chat.wait("ANSWER_d!raft 雪🙂_END")
         rows = chat.screen().splitlines()
         answer_row = (
-            next(index for index, row in enumerate(rows) if "ANSWER_draft" in row) + 1
+            next(index for index, row in enumerate(rows) if "ANSWER_d!raft" in row) + 1
         )
         chat.drag(4, answer_row, 14, answer_row)
         chat.send("\x1b[<64;12;8M\x1b[<65;12;8M")
