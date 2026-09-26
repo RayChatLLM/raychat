@@ -37,6 +37,8 @@ _FIXED_FILES = (
     "raychat.py",
     "pyproject.toml",
     "requirements-dev.txt",
+    "requirements-windows-test.txt",
+    "release-version.txt",
     "README.md",
     "LICENSE",
     ".gitattributes",

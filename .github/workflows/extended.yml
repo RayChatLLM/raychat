@@ -1,0 +1,35 @@
+name: Extended terminal acceptance
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extended-terminal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  extended:
+    name: Extended terminal scenarios / Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: All fourteen exhaustive terminal scenarios
+        run: >-
+          python -B -S -m tools.build_portable
+          --output ci-output/source.zip --folder ci-output/source
+          --smoke --smoke-output ci-output/acceptance
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extended-terminal-evidence
+          path: ci-output/acceptance/
+          if-no-files-found: error

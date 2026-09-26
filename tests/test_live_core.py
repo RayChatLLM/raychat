@@ -448,21 +448,28 @@ class ReleaseTests(TypedTestCase):
             (source / "tests").mkdir()
             evaluator = source / "tests" / "test_fixed.py"
             evaluator.write_text("FIXED = True\n")
+            (source / "release-version.txt").write_text("0.1.0\n")
             (source / "raychat.json").write_bytes(
-                encode({"release": {"source_files": ["tests/test_fixed.py"]}}),
+                encode({
+                    "release": {
+                        "source_files": ["release-version.txt", "tests/test_fixed.py"],
+                    },
+                }),
             )
             releases = Releases(source, root / "releases")
             evaluator.write_text("FIXED = False\n")
+            (source / "release-version.txt").write_text("9.9.9\n")
             candidate = releases.capture(source, {"raychat/example.py": b"VALUE = 2\n"})
             self.equal(
                 (candidate / "tests/test_fixed.py").read_text(),
                 "FIXED = True\n",
             )
+            self.equal((candidate / "release-version.txt").read_text(), "0.1.0\n")
             configuration = decode((candidate / "raychat.json").read_bytes())
             metadata = decode(encode(configuration["release"]))
             self.equal(
                 metadata["source_files"],
-                ["raychat/example.py", "tests/test_fixed.py"],
+                ["raychat/example.py", "release-version.txt", "tests/test_fixed.py"],
             )
             with self.rejected(ValueError, "raychat/"):
                 releases.capture(source, {"raychat_bootstrap/supervisor.py": b""})

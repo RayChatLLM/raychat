@@ -1,4 +1,4 @@
-name: Portable standard-library build
+name: Release CI
 
 on:
   push:
@@ -9,209 +9,66 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  static:
-    name: Complete unit suite, strict typing and lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out sources
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install development-only checkers
-        run: python -m pip install -r requirements-dev.txt
-
-      - name: Verify development dependency compatibility
-        run: python -m pip check
-
-      - name: Check all sources with the approved lint policy
-        run: python tools/verify_quality.py build/quality
-
-      - name: Check every source with strict mypy
-        run: python tools/check_types.py
-
-      - name: Check Ruff
-        run: python -m ruff check .
-
-      - name: Check formatting
-        run: python -m ruff format --check .
-
-      - name: Run the complete standard-library test suite
-        shell: bash
-        run: |
-          set -o pipefail
-          python -B -S -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/raychat-tests.log"
-
-      - name: Publish static failure diagnostics
-        if: failure()
-        shell: python
-        run: |
-          import os
-          from pathlib import Path
-          paths = [*Path("build/quality").glob("*.txt"), Path(os.environ["RUNNER_TEMP"]) / "raychat-tests.log"]
-          for path in paths:
-              if path.is_file():
-                  detail = path.read_text(encoding="utf-8", errors="replace")[-16000:]
-                  for offset in range(0, len(detail), 3000):
-                      chunk = detail[offset:offset + 3000]
-                      chunk = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-                      print(f"::error title={path.name} part {offset // 3000 + 1}::{chunk}")
-
-      - name: Retain complete quality diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: static-quality
-          path: build/quality
-          if-no-files-found: warn
-
-  portable:
-    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+  platform:
+    name: Release / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-        python:
-          - "3.10"
-          - "3.12"
-          - "3.14"
-
-    env:
-      PYTHONDONTWRITEBYTECODE: "1"
-      PYTHONIOENCODING: utf-8
-      PYTHONUTF8: "1"
-
-    steps:
-      - name: Check out sources
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Check local profiles and portable release paths
-        shell: bash
-        run: |
-          set -o pipefail
-          mkdir -p ci-output
-          python -B -S -m unittest \
-            tests.test_distribution \
-            tests.test_package_system.PackageLocationTests \
-            tests.test_live_core.ReleaseTests.test_candidate_inventory_uses_portable_paths_on_windows \
-            -v 2>&1 | tee ci-output/profile-paths.log
-
-      - name: Verify provider configuration, HTTP capture and curl replay
-        shell: bash
-        run: |
-          set -o pipefail
-          python -B -S -m unittest \
-            tests.test_provider_environment \
-            tests.test_provider_setup_launch \
-            tests.test_provider_settings \
-            tests.test_supervisor_startup \
-            tests.test_http_debug \
-            tests.test_http_debug_integration \
-            tests.test_http_debug_options \
-            tests.test_http_replay \
-            -v 2>&1 | tee ci-output/http-debug-tests.log
-
-      - name: Verify filesystem publication and process coordination
-        shell: bash
-        run: |
-          set -o pipefail
-          python -B -S -m tools.verify_filesystem 2>&1 | tee ci-output/filesystem.log
-
-      - name: Verify supervisor recovery persistence
-        shell: bash
-        run: |
-          set -o pipefail
-          python -B -S -m unittest \
-            tests.test_supervisor_persistence \
-            tests.test_bootstrap_filesystem \
-            tests.test_live_recovery_qa \
-            -v 2>&1 | tee ci-output/supervisor-recovery.log
-
-      - name: Build and verify the exact release
-        shell: bash
-        run: |
-          set -o pipefail
-          mkdir -p ci-output
-          python -B -S -m tools.build_portable \
-            --output ci-output/raychat.zip \
-            --folder ci-output/raychat \
-            --smoke \
-            --smoke-output ci-output/acceptance 2>&1 | tee ci-output/build.log
-        # POSIX: actual TUI navigation/cancellation/plugin lifecycle, feature
-        # documented external plugins, startup/upgrade recovery, hostile paste/Unicode, independent
-        # child queues, 50-child workflow/context stress, and offline optimization.
-        # Windows: archive/package integrity and compilation only. No TUI claim.
-
-      - name: Independently rebuild and compare every release byte
-        shell: bash
-        run: |
-          set -o pipefail
-          python -B -S -m tools.build_portable \
-            --output ci-output/raychat.zip \
-            --folder ci-output/raychat \
-            --check --no-smoke 2>&1 | tee ci-output/rebuild.log
-
-      - name: Publish release failure diagnostics
-        if: failure()
-        shell: python
-        run: |
-          from pathlib import Path
-          for path in Path("ci-output").glob("*.log"):
-              detail = path.read_text(encoding="utf-8", errors="replace")[-16000:]
-              for offset in range(0, len(detail), 3000):
-                  chunk = detail[offset:offset + 3000]
-                  chunk = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-                  print(f"::error title={path.name} part {offset // 3000 + 1}::{chunk}")
-
-      - name: Retain acceptance reports and terminal transcripts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: acceptance-${{ matrix.os }}-python-${{ matrix.python }}
-          path: |
-            ci-output/acceptance
-            ci-output/*.log
-          if-no-files-found: warn
-
-  windows-standard-user:
-    name: Windows standard user and Defender / Python ${{ matrix.python }}
-    runs-on: windows-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.14"]
+        include:
+          - os: ubuntu-latest
+            name: Linux
+            artifact: linux
+          - os: macos-latest
+            name: macOS
+            artifact: macos
+          - os: windows-latest
+            name: Windows + Defender
+            artifact: windows
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
     steps:
-      - name: Check out sources
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
-
-      - name: Verify filesystem behavior with ordinary privileges and antivirus
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-windows-test.txt
+      - name: Install development checkers
+        if: runner.os == 'Linux'
+        run: python -m pip install -r requirements-dev.txt
+      - name: Static quality and negative type contracts, once
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip check
+          python tools/verify_quality.py ci-output/quality
+          python tools/check_types.py --contracts-only
+      - name: Install CI-only console driver
+        if: runner.os == 'Windows'
+        run: python -m pip install -r requirements-windows-test.txt
+      - name: Unit suite and extracted user release
+        if: runner.os != 'Windows'
+        run: python -B -m tools.ci_release --output ci-output
+      - name: Unit suite and real release console as a standard user with Defender
+        if: runner.os == 'Windows'
         shell: pwsh
         run: ./tools/verify_windows_filesystem.ps1 -Python (Get-Command python).Source
-
-      - name: Retain identity, antivirus state and test results
+      - name: Retain tested archive, checksums, timings and terminal evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-standard-user-python-${{ matrix.python }}
-          path: ci-output/windows-standard-user
+          name: release-${{ matrix.artifact }}
+          path: ci-output/
           if-no-files-found: error

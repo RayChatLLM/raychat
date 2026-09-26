@@ -5,6 +5,13 @@ library. A small session kernel owns conversation history, approvals, and cancel
 Independent installed plugins provide tools, providers, skills, memory,
 subagents, workflows, goals, and optimization.
 
+Download a release from [GitHub Releases](https://github.com/RayChatLLM/raychat/releases),
+extract the entire ZIP, and run `python raychat` in the extracted folder.
+Python 3.10+ is required; no installer or pip packages are needed for ordinary use.
+See the [release quick start](docs/RELEASE_README.md).
+
+The instructions below apply to a source checkout.
+
 Run it with Python 3.10 or newer. No third-party runtime packages are required.
 `raychat.py` is the application entrypoint; the configured profile installs its
 feature archives on first launch.
@@ -503,3 +510,24 @@ Live core updates: `/update SOURCE` validates and activates a new application pr
 when active work finishes. `/recover previous`, `/recover known-good`, and the
 supervisor’s **Ctrl+R** recovery screen retain access to saved releases. Self-Harness
 can propose actual core source changes. See [live updates and recovery](docs/LIVE_CORE.md).
+
+## Release builds and CI
+
+`python -m tools.build_user_release` writes the user ZIP and `SHA256SUMS` to `dist/`.
+Use `--check` to compare them with a fresh deterministic build. The version comes
+from `release-version.txt`; change it deliberately for a new public release.
+
+Routine CI runs Python 3.12 on Linux, macOS, and Windows. Each job runs the full
+unit suite once and tests the extracted public launcher. Windows uses a standard
+user with Defender enabled and a CI-only ConPTY driver. Strict typing, lint,
+formatting, and negative type contracts run once on Linux. The 14 extended
+terminal scenarios run nightly or through the manual extended workflow.
+
+After a version change merges into `main`, successful platform jobs publish their
+already-tested, matching ZIP as a GitHub Release. Pull requests never publish.
+Existing release tags and public assets are never overwritten. CI retains
+archive hashes, per-stage timings, console transcripts, and Defender evidence.
+
+The previous 12-job run took about 16 minutes elapsed (run `36213496580`).
+The consolidated run's measured timings are recorded in the release PR and
+its CI artifacts; Python versions other than 3.12 are not exercised by routine CI.

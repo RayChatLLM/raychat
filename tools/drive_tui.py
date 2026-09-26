@@ -67,6 +67,7 @@ class TerminalOptions:
     fps: float | None = 12
     read_bytes_per_second: int | None = None
     launcher: Path | None = None
+    python_flags: tuple[str, ...] = ("-B", "-S")
 
 
 _DEFAULT_OPTIONS = TerminalOptions()
@@ -132,8 +133,7 @@ class TerminalChat:
             self.process = TerminalProcess(
                 [
                     sys.executable,
-                    "-B",
-                    "-S",
+                    *options.python_flags,
                     str(
                         root / "raychat.py"
                         if options.launcher is None

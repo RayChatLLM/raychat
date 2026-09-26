@@ -3,7 +3,8 @@
 param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
-    [string] $ExpectedSid
+    [string] $ExpectedSid,
+    [string] $OutputDirectory = "ci-output"
 )
 
 Set-StrictMode -Version Latest
@@ -37,7 +38,7 @@ if ($Child) {
     } catch [UnauthorizedAccessException] {
         Write-Output 'Confirmed: the installation denies standard-user writes.'
     }
-    & $Python -B -S -m tools.verify_filesystem
+    & $Python -B -m tools.ci_release --output $OutputDirectory
     exit $LASTEXITCODE
 }
 
@@ -49,6 +50,7 @@ $Account = $null
 $Process = $null
 $Failure = $null
 $Retired = $true
+$ChildOutput = $null
 $Password = ConvertTo-SecureString ('Rc!9' + [guid]::NewGuid().ToString('N')) -AsPlainText -Force
 
 function Save-DefenderState([string] $Name) {
@@ -112,6 +114,7 @@ try {
     $DataAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
         $Account.SID, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     Set-Acl -LiteralPath $Data.FullName -AclObject $DataAcl
+    $ChildOutput = (New-Item -ItemType Directory (Join-Path $Data.FullName 'ci-output')).FullName
     $TestHome = (New-Item -ItemType Directory (Join-Path $Data.FullName 'profile')).FullName
     $TestTemp = (New-Item -ItemType Directory (Join-Path $Data.FullName 'temp')).FullName
     $Denied = (New-Item -ItemType Directory (Join-Path $TestRoot 'denied')).FullName
@@ -128,10 +131,11 @@ try {
         USERPROFILE = $TestHome; TEMP = $TestTemp; TMP = $TestTemp
         APPDATA = $TestHome; LOCALAPPDATA = $TestHome
         PYTHONUTF8 = '1'; PYTHONIOENCODING = 'utf-8'; PYTHONDONTWRITEBYTECODE = '1'
+        RAYCHAT_TEST_SID = $Account.SID.Value
         RAYCHAT_TEST_DENIED_DIRECTORY = $Denied; RAYCHAT_TEST_OTHER_VOLUME = $OtherRoot
     }
     $null = Save-DefenderState 'inherited'
-    foreach ($Phase in @('ordinary', 'defender')) {
+    foreach ($Phase in @('defender')) {
         if ($Phase -eq 'defender') {
             # Strengthen this disposable VM's protection; never add exclusions.
             $Preferences = Get-MpPreference
@@ -166,7 +170,8 @@ try {
             FilePath = (Get-Process -Id $PID).Path
             ArgumentList = '-NoLogo -NoProfile -NonInteractive -File "' +
                 (Join-Path $Source 'tools/verify_windows_filesystem.ps1') +
-                '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value
+                '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value +
+                ' -OutputDirectory "' + $ChildOutput + '"'
             Credential = $Credential
             LoadUserProfile = $true
             Environment = $ChildEnvironment
@@ -177,7 +182,7 @@ try {
         }
         $Process = Start-Process @Launch
         $Retired = $false
-        if (-not $Process.WaitForExit(600000)) { throw "$Phase tests exceeded ten minutes." }
+        if (-not $Process.WaitForExit(900000)) { throw "$Phase tests exceeded fifteen minutes." }
         $Retired = $true
         Get-Content -LiteralPath (Join-Path $Reports "$Phase.stdout.log")
         Get-Content -LiteralPath (Join-Path $Reports "$Phase.stderr.log")
@@ -197,6 +202,9 @@ try {
                 if (-not $Retired) { throw 'Test process did not retire after termination.' }
             }
             $Process.Dispose()
+        }
+        if ($Retired -and $null -ne $ChildOutput -and (Test-Path -LiteralPath $ChildOutput)) {
+            Copy-Item -Path (Join-Path $ChildOutput "*") -Destination (Split-Path $Reports) -Recurse -Force
         }
         if ($null -ne $Account -and $Retired) { Remove-LocalUser -SID $Account.SID }
     } catch {
