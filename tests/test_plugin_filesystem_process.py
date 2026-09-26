@@ -924,6 +924,24 @@ class ProcessExecutionTests(_WorkspaceFixture):
         time.sleep(0.55)
         self.check(condition=not (marker.exists()))
 
+    def test_windows_command_does_not_allocate_a_console(self) -> None:
+        """Captured commands stay console-less through the gated helper."""
+        if os.name != "nt":
+            self.skipTest("Windows console allocation is required")
+        script = (
+            "import ctypes; "
+            "kernel = ctypes.WinDLL('kernel32', use_last_error=True); "
+            "kernel.GetConsoleWindow.restype = ctypes.c_void_p; "
+            "print(bool(kernel.GetConsoleWindow()))"
+        )
+        result = _rc_process.run_command(
+            [sys.executable, "-I", "-S", "-c", script],
+            self.root,
+            30,
+        )
+        self.check(condition=bool(result["ok"]))
+        self.equal(result["stdout"].strip(), "False")
+
     def test_windows_job_kills_descendants_after_timeout_and_normal_exit(self) -> None:
         """Windows job kills descendants after timeout and normal exit."""
         if os.name != "nt":
@@ -1311,7 +1329,10 @@ class WindowsJobTests(_Assertions):
         command = string_list_field(command, "helper argv")
         options = object_field(options, "helper options")
         self.equal(command[:4], [sys.executable, "-I", "-S", "-c"])
-        self.equal(options["creationflags"], _windows.CREATE_NEW_PROCESS_GROUP)
+        self.equal(
+            options["creationflags"],
+            _windows.CREATE_NEW_PROCESS_GROUP | _windows.CREATE_NO_WINDOW,
+        )
         self.check(condition=bool(options["close_fds"]))
 
     def test_windows_assignment_failure_is_fail_closed_before_gate_release(

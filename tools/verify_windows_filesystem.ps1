@@ -61,20 +61,33 @@ if ($Child) {
             if ($Selection.Count -eq 0) { continue }
             $UnitOut = Join-Path $OutputDirectory "unit-$Index.stdout.log"
             $UnitErr = Join-Path $OutputDirectory "unit-$Index.stderr.log"
+            # Independent test processes must not contend for the application's
+            # default package store. Descendants within each shard still share
+            # its profile, preserving the real cross-process ownership tests.
+            $UnitProfile = (New-Item -ItemType Directory -Force (
+                Join-Path $env:USERPROFILE "unit-$Index")).FullName
+            $UnitTemp = (New-Item -ItemType Directory -Force (
+                Join-Path $env:TEMP "unit-$Index")).FullName
             $UnitLaunch = @{
                 FilePath = $Python
                 ArgumentList = @('-B', '-S', '-X', 'faulthandler', '-m', 'unittest', '-v', '--durations', '20') + $Selection
                 WorkingDirectory = (Get-Location).Path
                 RedirectStandardOutput = $UnitOut
                 RedirectStandardError = $UnitErr
+                Environment = @{
+                    HOME = $UnitProfile; USERPROFILE = $UnitProfile
+                    APPDATA = $UnitProfile; LOCALAPPDATA = $UnitProfile
+                    TEMP = $UnitTemp; TMP = $UnitTemp
+                }
                 PassThru = $true
             }
             $Shards += [pscustomobject]@{
                 Process = (Start-Process @UnitLaunch)
                 Stdout = $UnitOut; Stderr = $UnitErr; Modules = $Selection
+                Profile = $UnitProfile; Temporary = $UnitTemp
             }
         }
-        $Shards | Select-Object Modules | ConvertTo-Json -Depth 4 |
+        $Shards | Select-Object Modules, Profile, Temporary | ConvertTo-Json -Depth 4 |
             Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-modules.json')
         Write-Output "Running $($Modules.Count) modules once across $($Shards.Count) native unittest processes."
         do {
