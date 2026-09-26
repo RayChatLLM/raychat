@@ -609,6 +609,7 @@
       "tests/test_tui_support.py",
       "tests/test_user_release.py",
       "tests/test_validation.py",
+      "tests/test_windows_ci_supervisor.py",
       "tests/test_workflow_stress.py",
       "tests/test_workspace_transactions.py",
       "tests/test_workspace_trust.py",
@@ -672,6 +673,7 @@
       "tools/verify_quality.py",
       "tools/verify_user_release.py",
       "tools/verify_windows_filesystem.ps1",
+      "tools/windows_ci_supervisor.py",
       "tools/windows_terminal.py"
     ],
     "smoke_timeout_seconds": 180,

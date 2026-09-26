@@ -61,11 +61,92 @@ jobs:
       - name: Unit suite and extracted user release
         if: runner.os != 'Windows'
         run: python -B -m tools.ci_release --output ci-output
-      - name: Unit suite and real release console as a standard user with Defender
+      - name: Start supervised Windows acceptance
         if: runner.os == 'Windows'
-        timeout-minutes: 18
-        shell: pwsh
-        run: ./tools/verify_windows_filesystem.ps1 -Python (Get-Command python).Source
+        timeout-minutes: 2
+        run: python -B -S -m tools.windows_ci_supervisor start
+      - name: Wait for Windows checkpoint 1
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
+      - name: Retain Windows checkpoint 1 before further testing
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-checkpoint-1-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for Windows checkpoint 2
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 180
+      - name: Retain Windows checkpoint 2 before further testing
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-checkpoint-2-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for Windows checkpoint 3
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 180
+      - name: Retain Windows checkpoint 3 before further testing
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-checkpoint-3-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for Windows checkpoint 4
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 180
+      - name: Retain Windows checkpoint 4 before further testing
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-checkpoint-4-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for Windows checkpoint 5
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 180
+      - name: Retain Windows checkpoint 5 before further testing
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-checkpoint-5-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Wait for Windows checkpoint 6
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 180
+      - name: Retain Windows checkpoint 6 before further testing
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-checkpoint-6-${{ github.run_attempt }}
+          path: |
+            ci-output/windows-standard-user/
+            ci-output/windows-supervisor.*
+          if-no-files-found: error
+      - name: Require completed Windows acceptance
+        if: runner.os == 'Windows'
+        timeout-minutes: 7
+        run: python -B -S -m tools.windows_ci_supervisor finish
       - name: Retain tested archive, checksums, timings and terminal evidence
         if: always()
         uses: actions/upload-artifact@v4

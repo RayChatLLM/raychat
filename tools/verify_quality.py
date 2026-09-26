@@ -59,6 +59,9 @@ _RUFF_FILE_RULE_EXCEPTIONS = {
     # toggle pushed the facade one past the default budget (mirrors pyproject).
     "raychat/ui/state.py": "PLR0904",
     "tests/test_tui_state.py": "PLR0904",
+    # Fixed CI-owned argv, no shell: explicit Popen handle isolation prevents
+    # detached test supervisors from retaining the Actions step's output pipes.
+    "tools/windows_ci_supervisor.py": "S404,S603",
 }
 _RUFF_SEEDED_SAMPLING_REASON = (
     "Preserve reproducible optimization sampling; these calls do not generate secrets."
@@ -248,7 +251,8 @@ async def _run_checks(root: Path, report: Path, paths: tuple[Path, ...]) -> list
                     "--ignore-noqa",
                     *[
                         argument
-                        for path, rule in _RUFF_FILE_RULE_EXCEPTIONS.items()
+                        for path, rules in _RUFF_FILE_RULE_EXCEPTIONS.items()
+                        for rule in rules.split(",")
                         for argument in ("--per-file-ignores", f"{path}:{rule}")
                     ],
                     "--target-version",
