@@ -34,7 +34,6 @@ async def _run(root: Path, output: Path) -> int:
             "2",
             "--level=module",
             "-v",
-            "-f",
         )
         if os.name == "nt"
         else (
