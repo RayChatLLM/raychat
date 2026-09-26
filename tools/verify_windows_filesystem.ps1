@@ -39,13 +39,9 @@ if ($Child) {
     } catch [UnauthorizedAccessException] {
         Write-Output 'Confirmed: the installation denies standard-user writes.'
     }
-    if ($Diagnostic) {
-        if ($env:RAYCHAT_DIAGNOSTIC_TESTS) {
-            $Tests = $env:RAYCHAT_DIAGNOSTIC_TESTS.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
-            & $Python -B -S -X faulthandler -m unittest -v -f @Tests
-        } else {
-            & $Python -B -S -X faulthandler -m unittest discover -s tests -v -f
-        }
+    if ($Diagnostic -and $env:RAYCHAT_DIAGNOSTIC_TESTS) {
+        $Tests = $env:RAYCHAT_DIAGNOSTIC_TESTS.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+        & $Python -B -S -X faulthandler -m unittest -v -f @Tests
     } else {
         & $Python -B -m tools.ci_release --output $OutputDirectory
     }
@@ -199,7 +195,7 @@ try {
         # Short waits keep cancellation responsive and expose each Python stage.
         $Waiting = [Diagnostics.Stopwatch]::StartNew()
         $PrintedLines = @{}
-        $BudgetMinutes = if ($Diagnostic) { 8 } else { 20 }
+        $BudgetMinutes = if ($Diagnostic -and $env:RAYCHAT_DIAGNOSTIC_TESTS) { 8 } else { 20 }
         do {
             $Exited = $Process.WaitForExit(1000)
             foreach ($LogPath in @($Launch.RedirectStandardOutput, $Launch.RedirectStandardError)) {

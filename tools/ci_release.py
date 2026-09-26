@@ -1,4 +1,4 @@
-"""Run each platform's unit suite once, then test the exact user release."""
+"""Test the exact user release, then run each platform's unit suite once."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ async def _run(root: Path, output: Path) -> int:
                 str(output / "acceptance"),
             ),
         ),
-        ("unit", ("-B", "-S", "-m", "unittest", "discover", "-s", "tests", "-v")),
+        ("unit", ("-B", "-S", "-m", "unittest", "discover", "-s", "tests", "-v", "-f")),
     )
     timings: dict[str, float] = {}
     async with CheckerWorkspace(prefix="raychat-ci-") as workspace:
