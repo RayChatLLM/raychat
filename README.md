@@ -522,6 +522,11 @@ unit suite once and tests the extracted public launcher. Windows uses a standard
 user with Defender enabled and a CI-only ConPTY driver. Windows runs the stress
 module first, then runs each remaining module in a fresh standard-library test
 process, with at most three running concurrently. Every discovered test runs once.
+On hosted Windows runners, CI verifies the provisioning daemon’s identity before
+exempting that single infrastructure executable from Defender scanning. This
+works around a reproduced detection that disconnects the runner even while idle;
+RayChat, Python, plugins, and test storage remain scanned. Broader exclusions fail
+the acceptance gate, and before/after protection reports are retained.
 Strict typing, lint, formatting, and negative type contracts run once on Linux.
 The 14 extended terminal scenarios run nightly or through the manual extended
 workflow.

@@ -3,8 +3,6 @@
 param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
-    [switch] $IdleDiagnostic,
-    [switch] $InspectHost,
     [string] $ExpectedSid,
     [string] $OutputDirectory = "ci-output"
 )
@@ -49,27 +47,8 @@ if ($Child) {
         ForEach-Object {
             ([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName) -replace '\.py$', '') -replace '[\\/]', '.'
         })
-    if ($IdleDiagnostic) { $Modules = @('diagnostic_idle') }
     if ($Modules.Count -eq 0) { throw 'No unit-test modules were discovered.' }
-    if ($IdleDiagnostic) {
-        $ExpectedTests = 1
-        $IdleScript = Join-Path $OutputDirectory 'diagnostic_idle.py'
-        @'
-import time
-import unittest
-
-class IdleLifetime(unittest.TestCase):
-    def test_standard_user_remains_alive_for_twelve_minutes(self):
-        for second in range(720):
-            if second % 30 == 0:
-                print(f"Idle diagnostic heartbeat: {second} seconds", flush=True)
-            time.sleep(1)
-
-unittest.main(verbosity=2)
-'@ | Set-Content -Encoding utf8 $IdleScript
-    } else {
-        $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
-    }
+    $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
     if ($LASTEXITCODE -ne 0) { throw 'Unit discovery failed.' }
     $ExpectedTests = [int]$ExpectedTests
     $Shards = @()
@@ -79,7 +58,7 @@ unittest.main(verbosity=2)
     try {
         # Run the concurrency benchmark in a fresh process before other suites.
         # All discovered tests still run exactly once under the same deadline.
-        $Phases = if ($IdleDiagnostic) { @('remaining') } else { @('stress', 'remaining') }
+        $Phases = @('stress', 'remaining')
         foreach ($Phase in $Phases) {
             $PhaseModules = @(if ($Phase -eq 'stress') {
                 'tests.test_workflow_stress'
@@ -121,7 +100,6 @@ unittest.main(verbosity=2)
                         }
                         PassThru = $true
                     }
-                    if ($IdleDiagnostic) { $UnitLaunch.ArgumentList = @('-B', '-S', $IdleScript) }
                     $Shard = [pscustomobject]@{
                         Slot = $GroupIndex; Process = (Start-Process @UnitLaunch)
                         Stdout = $UnitOut; Stderr = $UnitErr; Modules = $Selection
@@ -162,7 +140,6 @@ unittest.main(verbosity=2)
         if ($ActualTests -ne $ExpectedTests) { $UnitExit = 1 }
         [ordered]@{
             expected = $ExpectedTests; completed = $ActualTests; passed = ($UnitExit -eq 0)
-            diagnostic = [bool]$IdleDiagnostic
         } |
             ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-report.json')
     } finally {
@@ -195,7 +172,8 @@ $Process = $null
 $Failure = $null
 $Retired = $true
 $ChildOutput = $null
-$AcceptanceStarted = [DateTime]::Now
+$AcceptanceStarted = [DateTime]::UtcNow
+$HostedException = $null
 $Password = ConvertTo-SecureString ('Rc!9' + [guid]::NewGuid().ToString('N')) -AsPlainText -Force
 
 function Save-Progress([string] $Stage) {
@@ -310,6 +288,47 @@ function Save-RunnerProvenance {
         Set-Content -Encoding utf8 (Join-Path $Reports 'runner-provenance.json')
 }
 
+function Get-HostedDefenderException {
+    # Current Defender intelligence flags GitHub's provisioner daemon. Trust only
+    # this already-running, pinned platform binary and its verified parent chain;
+    # never exclude RayChat, Python, test data, a directory, or a process wildcard.
+    Save-RunnerProvenance
+    $Provenance = Get-Content -Raw (Join-Path $Reports 'runner-provenance.json') | ConvertFrom-Json
+    $Candidates = @($Provenance.processes)
+    if ($Candidates.Count -ne 1) { throw 'Expected one existing hosted provisioner; inspect runner-provenance.json.' }
+    $Chain = @($Candidates[0].chain)
+    if ($Chain.Count -lt 3) { throw 'Hosted provisioner ancestry is incomplete.' }
+    $Daemon, $Agent, $Scheduler = $Chain[0], $Chain[1], $Chain[2]
+    $Owner = "$env:COMPUTERNAME\runneradmin"
+    $DaemonHash = '6DE531403BD14940AE52264803DB7EA8A4F3AD68C5CF95B106F8E6B271880086'
+    $AgentHash = '9DD862527186698D54CDF61E34FFF3FF67D6A0B089331F3CA073C8D78EA3E03C'
+    $AgentPath = 'C:\ProgramData\GitHub\HostedComputeAgent\hosted-compute-agent'
+    $MicrosoftSigner = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    if ($Daemon.binary.path -notmatch '^C:\\Users\\(?:RUNNER~1|runneradmin)\\AppData\\Local\\Temp\\provjobd\.exe[0-9]+$' -or
+        $Daemon.binary.sha256 -cne $DaemonHash -or $Daemon.owner -ine $Owner -or
+        [DateTimeOffset]$Daemon.created -ge [DateTimeOffset]$AcceptanceStarted -or
+        $Daemon.parent_pid -ne $Agent.pid -or $Agent.parent_pid -ne $Scheduler.pid -or
+        $Agent.binary.path -ine $AgentPath -or $Agent.binary.sha256 -cne $AgentHash -or
+        $Agent.owner -ine $Owner -or [DateTimeOffset]$Agent.created -ge [DateTimeOffset]$AcceptanceStarted -or
+        $Scheduler.binary.path -ine 'C:\Windows\system32\svchost.exe' -or
+        $Scheduler.binary.signature_status -cne 'Valid' -or
+        $Scheduler.binary.signer -cne $MicrosoftSigner -or $Scheduler.owner -ine 'NT AUTHORITY\SYSTEM' -or
+        @($Scheduler.services | Where-Object { $_.Name -eq 'Schedule' -and $_.StartName -eq 'LocalSystem' -and $_.State -eq 'Running' }).Count -ne 1) {
+        throw 'Hosted runner identity changed; review runner-provenance.json before updating the exact infrastructure exception.'
+    }
+    return [ordered]@{
+        path = $Daemon.binary.path; sha256 = $DaemonHash
+        parent_path = $AgentPath; parent_sha256 = $AgentHash
+        owner = $Owner; computer = $env:COMPUTERNAME
+        created_utc = ([DateTimeOffset]$Daemon.created).ToString('o')
+        parent_created_utc = ([DateTimeOffset]$Agent.created).ToString('o')
+        harness_started_utc = ([DateTimeOffset]$AcceptanceStarted).ToString('o')
+        scheduler_path = 'C:\Windows\system32\svchost.exe'; scheduler_signature_status = 'Valid'
+        scheduler_signer = $MicrosoftSigner; scheduler_service = 'Schedule'
+        scheduler_owner = 'NT AUTHORITY\SYSTEM'
+    }
+}
+
 function Save-DefenderState([string] $Name) {
     $Status = Get-MpComputerStatus | Select-Object AMRunningMode, AMServiceEnabled,
         AMProductVersion, AMEngineVersion, AntivirusEnabled, AntivirusSignatureVersion,
@@ -324,11 +343,13 @@ function Save-DefenderState([string] $Name) {
         imageVersion = $env:ImageVersion
         status = $Status
         preferences = $Preferences
+        infrastructure_exception = $HostedException
     } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $Reports "$Name.json")
     return @{ Status = $Status; Preferences = $Preferences }
 }
 
 function Assert-DefenderEnabled([string] $Name) {
+    $script:HostedException = Get-HostedDefenderException
     $State = Save-DefenderState $Name
     $Status = $State.Status
     $Preferences = $State.Preferences
@@ -339,18 +360,12 @@ function Assert-DefenderEnabled([string] $Name) {
         $Preferences.DisableIOAVProtection -or $Preferences.DisableScriptScanning -or
         $Preferences.DisableArchiveScanning -or -not $Preferences.DisableAutoExclusions -or
         $Preferences.RealTimeScanDirection -ne 0 -or
-        @($Preferences.ExclusionPath).Where({ $_ }).Count -ne 0 -or
+        @($Preferences.ExclusionPath).Where({ $_ }).Count -ne 1 -or
+        @($Preferences.ExclusionPath).Where({ $_ })[0] -ine $HostedException.path -or
         @($Preferences.ExclusionProcess).Where({ $_ }).Count -ne 0 -or
         @($Preferences.ExclusionExtension).Where({ $_ }).Count -ne 0) {
         throw "Defender coverage is not enabled; inspect $Name.json."
     }
-}
-
-if ($InspectHost) {
-    Save-RunnerProvenance
-    $null = Save-DefenderState 'inherited'
-    $Password.Dispose()
-    exit 0
 }
 
 try {
@@ -401,7 +416,7 @@ try {
         RAYCHAT_TEST_SID = $Account.SID.Value
         RAYCHAT_TEST_DENIED_DIRECTORY = $Denied; RAYCHAT_TEST_OTHER_VOLUME = $OtherRoot
     }
-    Save-RunnerProvenance
+    $HostedException = Get-HostedDefenderException
     $null = Save-DefenderState 'inherited'
     Write-Output "Updating Defender security intelligence at $([DateTime]::UtcNow.ToString('o'))."
     Start-Service WinDefend
@@ -411,10 +426,12 @@ try {
     foreach ($Phase in @('defender')) {
         if ($Phase -eq 'defender') {
             Write-Output "Enabling Defender at $([DateTime]::UtcNow.ToString('o'))."
-            # Strengthen this disposable VM's protection; never add exclusions.
+            # Retain only the verified platform daemon file while every tested
+            # application/interpreter/data file remains subject to scanning.
+            Add-MpPreference -ExclusionPath $HostedException.path
             $Preferences = Get-MpPreference
             foreach ($Kind in @('ExclusionPath', 'ExclusionProcess', 'ExclusionExtension')) {
-                $Values = @($Preferences.$Kind).Where({ $_ })
+                $Values = @($Preferences.$Kind).Where({ $_ -and ($Kind -ne 'ExclusionPath' -or $_ -ine $HostedException.path) })
                 if ($Values.Count) {
                     $Removal = @{}
                     $Removal[$Kind] = $Values
@@ -445,8 +462,7 @@ try {
             ArgumentList = '-NoLogo -NoProfile -NonInteractive -File "' +
                 (Join-Path $Source 'tools/verify_windows_filesystem.ps1') +
                 '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value +
-                ' -OutputDirectory "' + $ChildOutput + '"' +
-                $(if ($IdleDiagnostic) { ' -IdleDiagnostic' } else { '' })
+                ' -OutputDirectory "' + $ChildOutput + '"'
             Credential = $Credential
             LoadUserProfile = $true
             Environment = $ChildEnvironment

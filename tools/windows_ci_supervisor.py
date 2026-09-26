@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from raychat.validation import integer_field, json_object, number_field, object_field
+from raychat.validation import (
+    integer_field,
+    json_object,
+    number_field,
+    object_field,
+    text_field,
+)
 from tools.acceptance_support import json_text
 
 if TYPE_CHECKING:
@@ -51,6 +59,61 @@ def _report(path: Path) -> dict[str, object]:
     return object_field(json_object(data), str(path))
 
 
+def _infrastructure_path(report: dict[str, object]) -> str | None:
+    value = report.get("infrastructure_exception")
+    if value is None:
+        return None
+    identity = object_field(value, "hosted infrastructure exception")
+    path = text_field(identity.get("path"), "provisioner path")
+    computer = text_field(identity.get("computer"), "hosted computer")
+    expected = {
+        "sha256": "6DE531403BD14940AE52264803DB7EA8A4F3AD68C5CF95B106F8E6B271880086",
+        "parent_sha256": (
+            "9DD862527186698D54CDF61E34FFF3FF67D6A0B089331F3CA073C8D78EA3E03C"
+        ),
+        "parent_path": r"C:\ProgramData\GitHub\HostedComputeAgent\hosted-compute-agent",
+        "scheduler_path": r"C:\Windows\system32\svchost.exe",
+        "scheduler_signature_status": "Valid",
+        "scheduler_signer": (
+            "CN=Microsoft Windows, O=Microsoft Corporation, "
+            "L=Redmond, S=Washington, C=US"
+        ),
+        "scheduler_service": "Schedule",
+        "scheduler_owner": r"NT AUTHORITY\SYSTEM",
+        "owner": computer + r"\runneradmin",
+    }
+    matched = (
+        re.fullmatch(r"[A-Za-z0-9._-]+", computer) is not None
+        and re.fullmatch(
+            r"C:\\Users\\(?:RUNNER~1|runneradmin)\\AppData\\Local\\Temp\\provjobd\.exe[0-9]+",
+            path,
+            re.IGNORECASE,
+        )
+        is not None
+        and all(
+            identity.get(key) == expected_value
+            for key, expected_value in expected.items()
+        )
+    )
+    times = [
+        datetime.fromisoformat(
+            text_field(identity.get(key), key).replace("Z", "+00:00"),
+        )
+        for key in ("created_utc", "parent_created_utc", "harness_started_utc")
+    ]
+    if (
+        not matched
+        or any(value.tzinfo is None for value in times)
+        or times[0] >= times[2]
+        or times[1] >= times[2]
+    ):
+        message = (
+            "Defender exception does not identify the pinned preexisting host daemon."
+        )
+        raise RuntimeError(message)
+    return path
+
+
 def _defender_evidence(path: Path) -> None:
     report = _report(path)
     status = object_field(report.get("status"), "Defender status")
@@ -70,12 +133,27 @@ def _defender_evidence(path: Path) -> None:
         "DisableScriptScanning",
         "DisableArchiveScanning",
     )
-    exclusions = ("ExclusionPath", "ExclusionProcess", "ExclusionExtension")
+    exclusions = ("ExclusionProcess", "ExclusionExtension")
+    infrastructure = _infrastructure_path(report)
+    excluded_paths = preferences.get("ExclusionPath")
+    paths_match = (
+        excluded_paths in (None, [])
+        if infrastructure is None
+        else excluded_paths == [infrastructure]
+    )
+    exclusions_valid = (
+        "ExclusionPath" in preferences
+        and paths_match
+        and all(
+            key in preferences and preferences[key] in (None, []) for key in exclusions
+        )
+    )
     protection_active = status.get("AMRunningMode") == "Normal" and all(
         status.get(key) is True for key in active
     )
     if (
         not protection_active
+        or not exclusions_valid
         or any(preferences.get(key) is not False for key in disabled)
         or preferences.get("DisableAutoExclusions") is not True
         or integer_field(
@@ -84,18 +162,14 @@ def _defender_evidence(path: Path) -> None:
             minimum=0,
         )
         != 0
-        or any(
-            key not in preferences or preferences[key] not in (None, [])
-            for key in exclusions
-        )
     ):
         message = f"Windows acceptance lacks active Defender evidence: {path}"
         raise RuntimeError(message)
 
 
-def _completed_evidence(output: Path, *, diagnostic: bool = False) -> None:
+def _completed_evidence(output: Path) -> None:
     unit = _report(output / "unit-report.json")
-    if bool(unit.get("diagnostic")) != diagnostic:
+    if unit.get("diagnostic"):
         message = "Diagnostic selections cannot certify the full release suite."
         raise RuntimeError(message)
     expected = integer_field(unit.get("expected"), "expected unit tests")
@@ -205,12 +279,7 @@ def run_harness(command: Sequence[str], output: Path, deadline: float) -> int:
     return result
 
 
-def wait_harness(
-    output: Path,
-    seconds: float | None,
-    *,
-    diagnostic: bool = False,
-) -> int:
+def wait_harness(output: Path, seconds: float | None) -> int:
     """Wait briefly for a checkpoint or require the harness's final exit status.
 
     Returns
@@ -230,7 +299,7 @@ def wait_harness(
         status = _status(output)
         if status is not None:
             if seconds is None and status == 0:
-                _completed_evidence(output, diagnostic=diagnostic)
+                _completed_evidence(output)
             return status if seconds is None else 0
         remaining = limit - time.time()
         if remaining <= 0:
@@ -263,10 +332,7 @@ def main() -> int:
         message = "This supervisor requires an ephemeral GitHub-hosted Windows VM."
         raise RuntimeError(message)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "operation",
-        choices=("start", "run", "checkpoint", "finish", "finish-diagnostic"),
-    )
+    parser.add_argument("operation", choices=("start", "run", "checkpoint", "finish"))
     parser.add_argument("--output", type=Path, default=Path("ci-output"))
     parser.add_argument("--seconds", type=float, default=180)
     parser.add_argument("--deadline", type=float, default=0)
@@ -280,11 +346,6 @@ def main() -> int:
         if powershell is None:
             message = "PowerShell is required for Windows acceptance."
             raise RuntimeError(message)
-        diagnostic_arguments = (
-            ("-IdleDiagnostic",)
-            if os.environ.get("RAYCHAT_WINDOWS_IDLE_DIAGNOSTIC") == "1"
-            else ()
-        )
         return run_harness(
             (
                 powershell,
@@ -295,16 +356,11 @@ def main() -> int:
                 str(_ROOT / "tools/verify_windows_filesystem.ps1"),
                 "-Python",
                 sys.executable,
-                *diagnostic_arguments,
             ),
             output,
             args.deadline,
         )
-    return wait_harness(
-        output,
-        None if args.operation in {"finish", "finish-diagnostic"} else args.seconds,
-        diagnostic=args.operation == "finish-diagnostic",
-    )
+    return wait_harness(output, None if args.operation == "finish" else args.seconds)
 
 
 if __name__ == "__main__":
