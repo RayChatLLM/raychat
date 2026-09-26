@@ -519,10 +519,10 @@ from `release-version.txt`; change it deliberately for a new public release.
 
 Routine CI runs Python 3.12 on Linux, macOS, and Windows. Each job runs the full
 unit suite once and tests the extracted public launcher. Windows uses a standard
-user with Defender enabled and a CI-only ConPTY driver. Windows discovers the
-full suite once and runs modules in three separate standard-library test
-processes to reduce elapsed time while keeping each module's fixtures together. Strict typing, lint,
-formatting, and negative type contracts run once on Linux. The 14 extended
+user with Defender enabled and a CI-only ConPTY driver. Windows runs the stress
+module in a fresh process, then the remaining modules across three isolated
+standard-library test processes. Every discovered test runs once. Strict typing,
+lint, formatting, and negative type contracts run once on Linux. The 14 extended
 terminal scenarios run nightly or through the manual extended workflow.
 
 After a version change merges into `main`, successful platform jobs publish their
