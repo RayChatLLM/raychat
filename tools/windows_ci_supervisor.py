@@ -11,14 +11,14 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from raychat.validation import json_object, number_field, object_field
+from raychat.validation import integer_field, json_object, number_field, object_field
 from tools.acceptance_support import json_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _ROOT = Path(__file__).resolve().parents[1]
-_DETACHED_PROCESS = 0x00000008 if os.name == "nt" else 0
+_CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _BUDGET_SECONDS = 1200
 
 
@@ -40,6 +40,76 @@ def _deadline(output: Path) -> float:
         "Windows supervisor",
     )
     return number_field(fields["deadline"], "supervisor deadline")
+
+
+def _report(path: Path) -> dict[str, object]:
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        message = f"Windows acceptance evidence is missing: {path}"
+        raise RuntimeError(message) from error
+    return object_field(json_object(data), str(path))
+
+
+def _defender_evidence(path: Path) -> None:
+    report = _report(path)
+    status = object_field(report.get("status"), "Defender status")
+    preferences = object_field(report.get("preferences"), "Defender preferences")
+    active = (
+        "AMServiceEnabled",
+        "AntivirusEnabled",
+        "RealTimeProtectionEnabled",
+        "BehaviorMonitorEnabled",
+        "IoavProtectionEnabled",
+        "OnAccessProtectionEnabled",
+    )
+    disabled = (
+        "DisableRealtimeMonitoring",
+        "DisableBehaviorMonitoring",
+        "DisableIOAVProtection",
+        "DisableScriptScanning",
+        "DisableArchiveScanning",
+    )
+    exclusions = ("ExclusionPath", "ExclusionProcess", "ExclusionExtension")
+    protection_active = status.get("AMRunningMode") == "Normal" and all(
+        status.get(key) is True for key in active
+    )
+    if (
+        not protection_active
+        or any(preferences.get(key) is not False for key in disabled)
+        or preferences.get("DisableAutoExclusions") is not True
+        or integer_field(
+            preferences.get("RealTimeScanDirection"),
+            "scan direction",
+            minimum=0,
+        )
+        != 0
+        or any(
+            key not in preferences or preferences[key] not in (None, [])
+            for key in exclusions
+        )
+    ):
+        message = f"Windows acceptance lacks active Defender evidence: {path}"
+        raise RuntimeError(message)
+
+
+def _completed_evidence(output: Path) -> None:
+    unit = _report(output / "unit-report.json")
+    expected = integer_field(unit.get("expected"), "expected unit tests")
+    completed = integer_field(unit.get("completed"), "completed unit tests")
+    if expected <= 0 or completed != expected or unit.get("passed") is not True:
+        message = "Windows acceptance did not complete the full passing unit suite."
+        raise RuntimeError(message)
+    release = _report(output / "acceptance/report.json")
+    if (
+        release.get("passed") is not True
+        or release.get("platform") != "win32"
+        or release.get("terminal") != "Windows ConPTY"
+    ):
+        message = "Windows acceptance lacks a successful native release launch."
+        raise RuntimeError(message)
+    for phase in ("before", "after"):
+        _defender_evidence(output / f"windows-standard-user/enabled-{phase}.json")
 
 
 def _start(output: Path) -> None:
@@ -78,7 +148,7 @@ def _start(output: Path) -> None:
             stderr=stderr,
             close_fds=True,
             shell=False,
-            creationflags=_DETACHED_PROCESS,
+            creationflags=_CREATE_NO_WINDOW,
         )
     try:
         state.write_text(
@@ -115,7 +185,7 @@ def run_harness(command: Sequence[str], output: Path, deadline: float) -> int:
         stdin=subprocess.DEVNULL,
         close_fds=True,
         shell=False,
-        creationflags=_DETACHED_PROCESS,
+        creationflags=_CREATE_NO_WINDOW,
     )
     try:
         result = process.wait(timeout=max(0.01, deadline - time.time()))
@@ -151,6 +221,8 @@ def wait_harness(output: Path, seconds: float | None) -> int:
     while True:
         status = _status(output)
         if status is not None:
+            if seconds is None and status == 0:
+                _completed_evidence(output)
             return status if seconds is None else 0
         remaining = limit - time.time()
         if remaining <= 0:
