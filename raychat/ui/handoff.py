@@ -59,6 +59,7 @@ def capture_view(owner: ChatView) -> dict[str, object]:
         "state": owner.state.handoff,
         "editor": editor_state(owner.editor.text, owner.editor.cursor),
         "queue": owner.message_queue.export_handoff(),
+        "input_history": owner.input_history.export_handoff(),
         "scroll": owner.scroll_offset,
         "completion": {
             "selected": owner.completion.selected,
@@ -222,6 +223,7 @@ def restore(controller: _TuiController, value: object) -> None:
         owner.state.handoff = saved["state"]
         owner.editor.set_text(*editor_parts(saved["editor"]))
         owner.message_queue.restore_handoff(saved["queue"])
+        owner.input_history.restore_handoff(saved.get("input_history"))
         owner.scroll_offset = integer_field(saved["scroll"], "scroll", minimum=0)
         completion = configuration_fields(saved["completion"], "completion")
         owner.completion.selected = integer_field(

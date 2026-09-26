@@ -33,6 +33,7 @@ from raychat.ui import handoff
 from raychat.ui.caching import CacheControls, cache_function
 from raychat.ui.commands import CommandCompletion, command_catalog
 from raychat.ui.feedback import ComposerPanel, PanelStyle, footer_text
+from raychat.ui.input_history import InputHistory
 from raychat.ui.message_queue import MessageQueue
 from raychat.ui.options import TuiOptions
 from raychat.ui.picker import Choice, Picker
@@ -1716,6 +1717,7 @@ class ChatView:
     approval_input_drained: bool = False
     approval_ready_rendered: bool = False
     scroll_offset: int = 0
+    input_history: InputHistory = field(default_factory=InputHistory)
     message_queue: MessageQueue = field(default_factory=MessageQueue)
     completion: CommandCompletion = field(default_factory=CommandCompletion)
     panel: ComposerPanel = field(default_factory=ComposerPanel)
@@ -2393,6 +2395,7 @@ class _TuiController:
             return
         if kind == "session_restored":
             self.view.state.restore(_history_records(payload["history"]))
+            self.view.input_history = InputHistory()
             self.view.scroll_offset = 0
             return
         if kind == "status":
@@ -2525,7 +2528,21 @@ class _TuiController:
                 elif selected < len(self.view.message_queue.items):
                     self.view.message_queue.open(self.view.editor, selected)
                 return True
-        return self._process_completion_key(event)
+        return self._process_completion_key(event) or self._process_history_key(event)
+
+    def _process_history_key(self, event: KeyEvent) -> bool:
+        if event.kind in {"up", "down"}:
+            if not self.view.message_queue.editing:
+                try:
+                    self.view.input_history.navigate(
+                        self.view.editor,
+                        -1 if event.kind == "up" else 1,
+                    )
+                except ValueError as exc:
+                    self._feedback(str(exc))
+                self.view.completion.dismiss(self.view.editor.text)
+            return True
+        return False
 
     def _process_completion_key(self, event: KeyEvent) -> bool:
         if not self.view.completion.choices:
@@ -2561,7 +2578,7 @@ class _TuiController:
         name = text[1:].partition(" ")[0]
         definition = self.resources.runtime.commands.get(name)
         if definition is not None and definition.scope == "application":
-            self.view.editor.clear()
+            self._take_input()
             if definition.background:
                 self._start_background_command(text)
                 return True
@@ -2758,25 +2775,16 @@ class _TuiController:
             )
             self._scroll_transcript(-distance)
             return True
-        if event.kind == "up" and self.view.state.phase in {
-            Phase.RUNNING,
-            Phase.STOPPING,
-        }:
-            self._scroll_transcript(1)
-            return True
-        if event.kind == "down" and self.view.scroll_offset:
-            self._scroll_transcript(-1)
-            return True
         return False
 
     def _process_busy_key(self, event: KeyEvent) -> None:
         if event.kind == "enter":
             command = self.view.editor.text.strip()
             if command == "/system":
-                self.view.editor.clear()
+                self._take_input()
                 self.show_system = not self.show_system
             elif command == "/clear":
-                self.view.editor.clear()
+                self._take_input()
                 self.view.state.notice(
                     "Command error",
                     "/clear requires an idle session",
@@ -2787,13 +2795,13 @@ class _TuiController:
                 and command.startswith("/")
                 and command not in {"/quit", "/exit"}
             ):
-                self.view.editor.clear()
+                self._take_input()
                 self._start_background_command(command)
             elif command in {"/quit", "/exit"}:
-                self.view.editor.clear()
+                self._take_input()
                 self._request_quit()
             elif command:
-                self.view.message_queue.append(self.view.editor.submit())
+                self.view.message_queue.append(self._take_input())
                 self._feedback(f"{len(self.view.message_queue.items)} queued")
             return
         self._edit_input(event)
@@ -2827,23 +2835,23 @@ class _TuiController:
         command = self.view.editor.text.strip()
         name, _, argument = command.partition(" ")
         if name == "/update":
-            self.view.editor.clear()
+            self._take_input()
             live.request(argument.strip())
         elif name == "/recover":
-            self.view.editor.clear()
+            self._take_input()
             live.send("recover", target=argument.strip() or "previous")
         elif name == "/resume-queue":
-            self.view.editor.clear()
+            self._take_input()
             live.send("resume_queue")
         elif name == "/update-log":
-            self.view.editor.clear()
+            self._take_input()
             live.send("diagnostics")
         elif (
             live.paused
             and command
             and name not in {"/quit", "/exit", "/agents", "/parent", "/system"}
         ):
-            self.view.message_queue.append(self.view.editor.submit())
+            self.view.message_queue.append(self._take_input())
         else:
             return False
         return True
@@ -2953,7 +2961,14 @@ class _TuiController:
             else:
                 self._process_idle_key(event)
 
+    def _take_input(self) -> str:
+        text = self.view.editor.submit()
+        self.view.input_history.record(text)
+        return text
+
     def _edit_input(self, event: KeyEvent) -> str | None:
+        if event.kind == "enter":
+            return self._take_input()
         try:
             return self.view.editor.handle(event)
         except ValueError as exc:
