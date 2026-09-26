@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-triage-${{ github.ref }}
+  group: windows-provenance-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
