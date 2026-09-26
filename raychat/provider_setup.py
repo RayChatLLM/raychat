@@ -31,9 +31,11 @@ def settings_file(root: Path) -> Path:
     options, _ = parser.parse_known_args(namespace=_Options())
     if options.env_file is not None:
         return options.env_file.expanduser().resolve()
-    directory = (
-        root if options.portable else Path.home() / SETTINGS.storage.home_directory
-    )
+    if options.portable:
+        return (root / "environment" / ".env").resolve()
+    directory = Path(SETTINGS.storage.home_directory)
+    if not directory.is_absolute():
+        directory = Path.home() / directory
     return (directory / "environment" / ".env").resolve()
 
 

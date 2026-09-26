@@ -197,6 +197,7 @@ class ProviderLocationTests(TypedTestCase):
             )
             with (
                 mock.patch("raychat.provider_setup.SETTINGS", settings),
+                mock.patch.object(Path, "home", side_effect=RuntimeError("No home")),
                 mock.patch("sys.argv", ["raychat.py"]),
                 mock.patch.dict(os.environ, dict[str, str](), clear=True),
                 mock.patch("raychat.provider_setup.configure") as configure,
