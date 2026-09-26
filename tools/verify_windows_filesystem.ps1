@@ -45,7 +45,7 @@ if ($Child) {
     # directly: a crashed interpreter must fail, not strand a process-pool task.
     $Modules = @(Get-ChildItem tests -Recurse -File -Filter 'test*.py' | Sort-Object FullName |
         ForEach-Object {
-            [IO.Path]::ChangeExtension([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName), $null) -replace '[\\/]', '.'
+            ([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName) -replace '\.py$', '') -replace '[\\/]', '.'
         })
     if ($Modules.Count -eq 0) { throw 'No unit-test modules were discovered.' }
     $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
