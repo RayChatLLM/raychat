@@ -59,6 +59,7 @@ source = json.loads(sys.stdin.readline())
 with patch('pathlib.Path.home', return_value=Path(sys.argv[2])):
     runtime = create_runtime(sys.argv[1], source=source)
 try:
+    runtime.watch(enabled=False)
     print('captured', flush=True)
     manager = runtime.context('example').require_service(PLUGIN_MANAGER)
     try:
@@ -69,7 +70,17 @@ try:
         print('blocked', flush=True)
     else:
         raise AssertionError('Inventory bypassed the package writer')
+    try:
+        runtime.watch(enabled=True)
+    except RuntimeError as error:
+        if 'active writer' not in str(error):
+            raise
+        print('watch blocked', flush=True)
+    else:
+        raise AssertionError('Enabled watching bypassed the package writer')
+    runtime.watch(enabled=False)
     sys.stdin.readline()
+    runtime.watch(enabled=True)
     print(json.dumps([item['id'] for item in manager.inventory()]), flush=True)
 finally:
     runtime.close()
@@ -211,7 +222,7 @@ class PackageRecoveryTests(TypedTestCase):
             self.equal(consumed, ["example"])
 
     def test_snapshot_worker_starts_without_reading_locked_receipts(self) -> None:
-        """Captured code runs before the child needs any installed-state access."""
+        """Captured children skip disabled watching but enforce live source locks."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             account = root / "account"
@@ -261,6 +272,10 @@ class PackageRecoveryTests(TypedTestCase):
                 self.equal(
                     await asyncio.wait_for(child.stdout.readline(), 5),
                     b"blocked\n",
+                )
+                self.equal(
+                    await asyncio.wait_for(child.stdout.readline(), 5),
+                    b"watch blocked\n",
                 )
             communication: Awaitable[tuple[bytes, bytes]] = child.communicate(b"go\n")
             completion: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(

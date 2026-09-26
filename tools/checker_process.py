@@ -72,7 +72,7 @@ class CheckerWorkspace:
     """Own private checker inputs, outputs and direct children on Python 3.10+.
 
     Only intended standard handles are inherited. Checkers must not leave their
-    own descendants running. A command has a 900-second execution deadline;
+    own descendants running. Commands default to a 900-second execution deadline;
     direct-child shutdown has a separate ten-second budget. Process creation is
     joined before retirement, including repeated cancellation. OS calls already
     in progress cannot be interrupted by these asyncio deadlines.
@@ -137,6 +137,7 @@ class CheckerWorkspace:
         cwd: Path,
         *,
         log: Path | None = None,
+        timeout: float = 900,
     ) -> CheckerOutput:
         """Run once, retaining ownership if the awaiting caller is cancelled.
 
@@ -154,7 +155,7 @@ class CheckerWorkspace:
         if self._closed:
             message = "Checker workspace has already exited."
             raise RuntimeError(message)
-        operation = asyncio.create_task(self._run(tuple(argv), cwd, log))
+        operation = asyncio.create_task(self._run(tuple(argv), cwd, log, timeout))
         self._operations.append(operation)
         return await asyncio.shield(operation)
 
@@ -163,11 +164,12 @@ class CheckerWorkspace:
         argv: tuple[str, ...],
         cwd: Path,
         log: Path | None,
+        timeout: float,
     ) -> CheckerOutput:
         directory = create_scratch_directory(prefix="checker-", parent=self.path)
         stdout, stderr = directory / "stdout", directory / "stderr"
         try:
-            status = await self._execute(argv, cwd, stdout, stderr)
+            status = await self._execute(argv, cwd, stdout, stderr, timeout=timeout)
         except BaseException:
             if log is not None:
                 try:
@@ -201,6 +203,8 @@ class CheckerWorkspace:
         cwd: Path,
         stdout: Path,
         stderr: Path,
+        *,
+        timeout: float,
     ) -> int:
         with (
             owned_stream(stdout.open("xb")) as out,
@@ -209,7 +213,7 @@ class CheckerWorkspace:
             creation = asyncio.create_task(_spawn(argv, cwd, out, err))
             try:
                 process = await asyncio.shield(creation)
-                status = await asyncio.wait_for(process.wait(), 900)
+                status = await asyncio.wait_for(process.wait(), timeout)
             except BaseException:
                 retirement = asyncio.create_task(self._retire(creation))
                 try:

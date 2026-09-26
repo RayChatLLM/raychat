@@ -17,7 +17,7 @@ from unittest import mock
 
 import raychat.ui.terminal as runtime
 from raychat import workers
-from raychat.composition import create_session
+from raychat.composition import create_session, package_manager
 from raychat.configuration import SETTINGS
 from raychat.plugins import Runtime, import_plugin
 from raychat.type_support import override
@@ -1303,6 +1303,8 @@ class AgentWorkerTests(TypedTestCase):
             current = prompts[-1]
             return '{"action":"done","message":' + repr(current).replace("'", '"') + "}"
 
+        # Provision the real profile before timing history and reset events.
+        package_manager(self.root / "workspace")
         worker = workers.AgentWorker(
             chat,
             self.root / "workspace",
@@ -1310,7 +1312,12 @@ class AgentWorkerTests(TypedTestCase):
         )
         try:
             first_id = worker.submit("first prompt")
-            first, _ = collect_until(worker, "completed")
+            # The first job lazily loads real plugins under Defender on Windows.
+            first, _ = collect_until(
+                worker,
+                "completed",
+                timeout=30 if os.name == "nt" else 2,
+            )
             self.equal(first.payload["job_id"], first_id)
 
             second_id = worker.submit("second prompt")

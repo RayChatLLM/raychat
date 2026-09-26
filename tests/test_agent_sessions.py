@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import time
@@ -227,8 +228,10 @@ class AgentSessionTests(PackageTestCase):
                 action,
             )
             try:
-                require(left.started.wait(2))
-                require(right.started.wait(2))
+                # Construct both real child runtimes before measuring cancellation.
+                startup_timeout = 30 if os.name == "nt" else 2
+                require(left.started.wait(startup_timeout))
+                require(right.started.wait(startup_timeout))
                 chats = {e.name: e for e in self.sessions.entries()}
                 selected = chats["left"]
                 require(selected.worker.cancel_current(selected.job_id))
@@ -378,14 +381,17 @@ class AgentSessionTests(PackageTestCase):
                 coordinator,
                 "FIRST",
             )
-            equal(future.result(3), "reply FIRST")
+            # Each isolated request starts a fresh interpreter and loads the
+            # captured plugins. Keep that startup budget separate from the
+            # two-second cancellation contract below, including under Defender.
+            equal(future.result(15), "reply FIRST")
             collect_until(entry.worker, "completed", 2)
             job = entry.worker.submit("WAIT")
-            require(waiting.wait(3))
+            require(waiting.wait(15))
             require(entry.worker.cancel_current(job))
             collect_until(entry.worker, "cancelled", 2)
             entry.worker.submit("AFTER")
-            final, _ = collect_until(entry.worker, "completed", 3)
+            final, _ = collect_until(entry.worker, "completed", 15)
             equal(final.payload["result"], "reply AFTER")
             history = [
                 m["content"]

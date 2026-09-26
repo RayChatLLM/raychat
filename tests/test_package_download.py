@@ -28,6 +28,7 @@ from raychat.transport import ChildProcessHandle, observe_children
 from raychat.type_support import override
 from tests.plugin_support import package
 from tests.test_package_system import PackageTestCase
+from tests.transport_support import startup_timeout
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -180,7 +181,7 @@ class PackageDownloadTests(PackageTestCase):
             thread = threading.Thread(target=context.run, args=(fetch,))
             thread.start()
             try:
-                if not (endpoint.entered.wait(5)):
+                if not (endpoint.entered.wait(startup_timeout(5))):
                     self.fail("Download lifecycle violated its expected condition.")
                 cancelled.set()
                 if not finished.wait(3):

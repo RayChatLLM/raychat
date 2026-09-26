@@ -201,6 +201,13 @@ class WorkflowStressTests(unittest.TestCase):
         with (
             contextlib.redirect_stdout(io.StringIO()),
             mock.patch.dict(os.environ, environment),
+            # Keep all fifty children and a bounded deadline. Windows scans
+            # each isolated interpreter and its captured plugins under Defender.
+            mock.patch.object(
+                benchmark,
+                "DETERMINISTIC_TIMEOUT",
+                600 if os.name == "nt" else benchmark.DETERMINISTIC_TIMEOUT,
+            ),
         ):
             raw: object = benchmark.run(agents=50)
         report = object_field(raw, "workflow report")
