@@ -252,33 +252,61 @@ function Save-Progress([string] $Stage) {
     Write-Output "Windows acceptance: $Stage; $($Processes.Count) processes at $([DateTime]::UtcNow.ToString('o'))."
 }
 
+function Get-BinaryProvenance([string] $Path) {
+    $Result = [ordered]@{ path = $Path; exists = (Test-Path -LiteralPath $Path) }
+    if (-not $Result.exists) { return $Result }
+    try {
+        $Result['sha256'] = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+        $Signature = Get-AuthenticodeSignature -LiteralPath $Path
+        $Result['signature_status'] = $Signature.Status.ToString()
+        $Result['signer'] = if ($Signature.SignerCertificate) { $Signature.SignerCertificate.Subject } else { $null }
+        $Result['signer_thumbprint'] = if ($Signature.SignerCertificate) { $Signature.SignerCertificate.Thumbprint } else { $null }
+        $Version = (Get-Item -LiteralPath $Path).VersionInfo
+        $Result['version'] = [ordered]@{
+            company = $Version.CompanyName; product = $Version.ProductName
+            description = $Version.FileDescription; version = $Version.FileVersion
+            original_filename = $Version.OriginalFilename
+        }
+    } catch {
+        $Result['evidence_error'] = $_.Exception.Message
+    }
+    return $Result
+}
+
 function Save-RunnerProvenance {
+    $Services = @(Get-CimInstance Win32_Service)
     $Evidence = @(foreach ($NativeProcess in @(Get-CimInstance Win32_Process |
             Where-Object { $_.Name -like 'provjobd*' -or $_.Name -eq 'provisioner.exe' })) {
-        $Item = [ordered]@{
-            pid = $NativeProcess.ProcessId
-            parent_pid = $NativeProcess.ParentProcessId
-            name = $NativeProcess.Name
-            path = $NativeProcess.ExecutablePath
-            created = $NativeProcess.CreationDate
-        }
-        try {
-            $Owner = Invoke-CimMethod -InputObject $NativeProcess -MethodName GetOwner
-            $Item['owner'] = "$($Owner.Domain)\$($Owner.User)"
-            if ($NativeProcess.ExecutablePath) {
-                $Item['sha256'] = (Get-FileHash -LiteralPath $NativeProcess.ExecutablePath -Algorithm SHA256).Hash
-                $Signature = Get-AuthenticodeSignature -LiteralPath $NativeProcess.ExecutablePath
-                $Item['signature_status'] = $Signature.Status.ToString()
-                $Item['signer'] = if ($Signature.SignerCertificate) { $Signature.SignerCertificate.Subject } else { $null }
-                $Item['signer_thumbprint'] = if ($Signature.SignerCertificate) { $Signature.SignerCertificate.Thumbprint } else { $null }
+        $Chain = @()
+        $Current = $NativeProcess
+        for ($Depth = 0; $Depth -lt 4 -and $null -ne $Current; $Depth++) {
+            $Item = [ordered]@{
+                pid = $Current.ProcessId; parent_pid = $Current.ParentProcessId
+                name = $Current.Name; created = $Current.CreationDate
+                services = @($Services | Where-Object { $_.ProcessId -eq $Current.ProcessId } |
+                    Select-Object Name, DisplayName, StartName, State)
             }
-        } catch {
-            $Item['evidence_error'] = $_.Exception.Message
+            try {
+                $Owner = Invoke-CimMethod -InputObject $Current -MethodName GetOwner
+                $Item['owner'] = "$($Owner.Domain)\$($Owner.User)"
+                if ($Current.ExecutablePath) {
+                    $Item['binary'] = Get-BinaryProvenance $Current.ExecutablePath
+                }
+            } catch {
+                $Item['evidence_error'] = $_.Exception.Message
+            }
+            $Chain += $Item
+            $ParentId = $Current.ParentProcessId
+            if ($ParentId -eq 0 -or $ParentId -eq $Current.ProcessId) { break }
+            $Current = Get-CimInstance Win32_Process -Filter "ProcessId = $ParentId"
         }
-        $Item
+        [ordered]@{ chain = $Chain }
     })
-    [ordered]@{ captured_utc = [DateTime]::UtcNow.ToString('o'); processes = $Evidence } |
-        ConvertTo-Json -Depth 5 |
+    [ordered]@{
+        captured_utc = [DateTime]::UtcNow.ToString('o')
+        processes = $Evidence
+        installed_provisioner = Get-BinaryProvenance 'C:\actions\runner-provisioner-Windows\etc\provjobd.exe'
+    } | ConvertTo-Json -Depth 9 |
         Set-Content -Encoding utf8 (Join-Path $Reports 'runner-provenance.json')
 }
 
