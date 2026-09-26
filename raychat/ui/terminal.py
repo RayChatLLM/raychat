@@ -70,7 +70,7 @@ class KeyEvent:
     ``text`` carries Unicode for ``text`` and ``paste`` events.  Known ``kind``
     values are ``text``, ``paste``, navigation-key names, ``mouse_up``,
     ``mouse_down``, ``mouse``, ``enter``,
-    ``backspace``, ``kill_to_end``, ``tab``, ``escape``, ``interrupt``,
+    ``backspace``, ``kill_to_end``, ``text_end``, ``tab``, ``escape``, ``interrupt``,
     ``eof``, ``refresh``, ``control``, and ``unknown``.
     """
 
@@ -113,6 +113,7 @@ class KeyDecoder:
         1: "home",
         3: "interrupt",
         4: "eof",
+        5: "text_end",
         8: "backspace",
         9: "tab",
         10: "enter",
@@ -631,7 +632,7 @@ class LineEditor:
             position = min(len(self.text), position + 1)
         elif kind == "home":
             position = 0
-        elif kind == "end":
+        elif kind in {"end", "text_end"}:
             position = len(self.text)
         if position != self.cursor:
             self.cursor = position
@@ -657,7 +658,7 @@ class LineEditor:
         kind = event.kind
         if kind in {"text", "paste"}:
             self.insert(event.text)
-        elif kind in {"left", "right", "home", "end"}:
+        elif kind in {"left", "right", "home", "end", "text_end"}:
             self._move_cursor(kind)
         elif kind == "backspace" and self.cursor:
             self.text = self.text[: self.cursor - 1] + self.text[self.cursor :]
