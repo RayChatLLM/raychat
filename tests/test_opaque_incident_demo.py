@@ -64,9 +64,11 @@ async def _run_child(argv: Sequence[str], directory: Path) -> ChildResult:
         stderr=asyncio.subprocess.PIPE,
     )
     communication: Awaitable[tuple[bytes, bytes]] = process.communicate()
+    # These probes run a complete offline demo after cold plugin imports.
+    # Allow ordinary-user Defender scanning without changing their assertions.
     completion: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(
         communication,
-        timeout=20,
+        timeout=90 if os.name == "nt" else 20,
     )
     try:
         stdout, stderr = await completion

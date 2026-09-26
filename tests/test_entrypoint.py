@@ -64,7 +64,11 @@ async def _launch(arguments: list[str], cwd: Path) -> _LaunchResult:
     )
     try:
         completion: Awaitable[tuple[bytes, bytes]] = process.communicate()
-        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(completion, 5)
+        # Cold core/plugin startup is scanned under Defender in ordinary-user CI.
+        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(
+            completion,
+            30 if os.name == "nt" else 5,
+        )
         stdout, stderr = await bounded
         status = process.returncode
         if status is None:
