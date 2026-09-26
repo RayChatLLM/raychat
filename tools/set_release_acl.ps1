@@ -30,4 +30,6 @@ foreach ($Sid in @('S-1-5-18', 'S-1-5-32-544', $ExpectedSid)) {
         [Security.Principal.SecurityIdentifier]::new($Sid), $Rights,
         'ContainerInherit,ObjectInherit', 'None', 'Allow'))
 }
-Set-Acl -LiteralPath $Root -AclObject $Acl
+# Persist only the modified access rules. Set-Acl also attempts to persist
+# auditing metadata, which requires a privilege ordinary users do not have.
+[IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($Root), $Acl)

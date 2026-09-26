@@ -202,10 +202,10 @@ try {
         } while (-not $Exited)
         $Retired = $true
         Get-Content -LiteralPath (Join-Path $Reports "$Phase.stderr.log")
+        if ($Phase -eq 'defender') { Assert-DefenderEnabled 'enabled-after' }
         if ($Process.ExitCode -ne 0) { throw "$Phase tests exited $($Process.ExitCode)." }
         $Process.Dispose()
         $Process = $null
-        if ($Phase -eq 'defender') { Assert-DefenderEnabled 'enabled-after' }
     }
 } catch {
     $Failure = $_
