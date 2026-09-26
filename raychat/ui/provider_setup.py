@@ -10,7 +10,7 @@ from raychat.configuration import SETTINGS
 from raychat.provider_environment import NAMES, save
 from raychat.provider_settings import provider_settings
 from raychat.ui.renderer import CellStyle, Surface
-from raychat.ui.state import Rect, sanitize_text
+from raychat.ui.state import Rect, sanitize_text, wrap_display
 from raychat.ui.terminal import KeyDecoder, KeyEvent, LineEditor, TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
 
@@ -21,16 +21,26 @@ if TYPE_CHECKING:
 _LABELS = ("API token (hidden)", "Model ID", "API base URL")
 _FIELD_COUNT = len(NAMES)
 _FORM_HEIGHT = 17
+_COMPACT_MIN_HEIGHT = 9
+_SHORT_LABELS = ("Token", "Model", "URL")
 
 
 class SetupForm:
     """Keep editable settings separate from terminal ownership and persistence."""
 
-    def __init__(self, values: Mapping[str, str]) -> None:
+    def __init__(
+        self,
+        values: Mapping[str, str],
+        *,
+        destination: Path | None = None,
+    ) -> None:
         """Prefill the three fields and focus the first missing value."""
         self.editors = [LineEditor(values.get(name, "").strip()) for name in NAMES]
         self.focus = next((i for i, e in enumerate(self.editors) if not e.text), 0)
         self.error = ""
+        self.destination = (
+            str(destination) if destination is not None else "settings file"
+        )
         self.bounds: list[Rect] = []
 
     def values(self) -> dict[str, str]:
@@ -112,92 +122,115 @@ class SetupForm:
         except ValueError as error:
             self.error = str(error)
         except OSError:
-            self.error = "Cannot save environment/.env. Check folder write permissions."
+            self.error = "Cannot save settings. Check folder write permissions."
         else:
             return values
         return None
 
     def paint(self, surface: Surface) -> None:
-        """Render a centered form, masking the token and highlighting focus."""
+        """Reflow fields, errors and controls to fit the current terminal size."""
         colors = SETTINGS.tui.palette
         width = max(1, min(84, surface.width - 2))
         height = min(_FORM_HEIGHT, surface.height)
-        x, y = (
+        box = Rect(
             max(0, (surface.width - width) // 2),
             max(0, (surface.height - height) // 2),
+            width,
+            height,
         )
-        style = CellStyle(foreground=colors.ink, background=colors.panel)
+        compact = height < _FORM_HEIGHT
+        paged = height < _COMPACT_MIN_HEIGHT
         surface.box(
-            Rect(x, y, width, height),
+            box,
             border=colors.cyan,
             background=colors.panel,
             title="Welcome to RayChat",
             ascii_only=True,
         )
-        surface.text(
-            x + 2,
-            y + 1,
-            "Enter your provider settings to get started.",
-            max_width=width - 4,
-            style=style,
+        self.bounds = [Rect(0, -1, 0, 0) for _ in range(_FIELD_COUNT + 1)]
+        self._paint_fields(surface, box, compact=compact, paged=paged)
+        save_row = (
+            max(2, height - 4) if paged else min(6, height - 4) if compact else 12
         )
-        self.bounds = []
-        for index, (label, editor) in enumerate(
-            zip(_LABELS, self.editors, strict=True),
-        ):
-            row = y + 3 + index * 3
-            surface.text(x + 2, row, label, max_width=width - 4, style=style)
-            rect = Rect(x + 2, row + 1, max(1, width - 4), 1)
-            self.bounds.append(rect)
-            selected = self.focus == index
-            background = colors.header if selected else colors.panel
-            surface.fill_rect(rect, background)
-            text = "*" * len(editor.text) if index == 0 else sanitize_text(editor.text)
-            offset = max(0, editor.cursor - max(1, width - 8))
-            visible = text[offset:]
-            if selected:
-                cursor = editor.cursor - offset
-                visible = visible[:cursor] + "|" + visible[cursor:]
-            surface.text(
-                rect.x,
-                rect.y,
-                ("> " if selected else "  ") + visible,
-                max_width=rect.width,
-                style=CellStyle(
-                    foreground=colors.cyan if selected else colors.ink,
-                    background=background,
-                ),
-            )
-        button = Rect(x + 2, y + 12, max(1, width - 4), 1)
-        self.bounds.append(button)
-        surface.text(
-            button.x,
-            button.y,
+        button = Rect(box.x + 2, box.y + save_row, max(1, width - 4), 1)
+        self.bounds[-1] = button
+        _text(
+            surface,
+            box,
+            save_row,
             ("> " if self.focus == _FIELD_COUNT else "  ") + "[ Save and continue ]",
-            max_width=button.width,
-            style=CellStyle(foreground=colors.cyan, background=colors.panel),
         )
+        if not paged:
+            destination = sanitize_text(self.destination)
+            available = max(1, width - 13)
+            if len(destination) > available:
+                destination = "..." + destination[-max(1, available - 3) :]
+            _text(surface, box, 1 if compact else 13, "Save to: " + destination)
+        if not compact:
+            _text(surface, box, 1, "Enter your provider settings to get started.")
+        error_row = save_row + 1 if compact else 14
+        for row, line in enumerate(wrap_display(self.error, max(1, width - 4))):
+            if error_row + row >= height - 2:
+                break
+            _text(surface, box, error_row + row, line)
+        _text(surface, box, height - 2, "Tab: move  Enter: next/save  Esc: cancel")
+
+    def _paint_fields(
+        self,
+        surface: Surface,
+        box: Rect,
+        *,
+        compact: bool,
+        paged: bool,
+    ) -> None:
+        for index in range(_FIELD_COUNT):
+            if paged and index != min(self.focus, _FIELD_COUNT - 1):
+                continue
+            if compact:
+                row = 1 if paged else 2 + index
+                label = _SHORT_LABELS[index] + ":"
+                _text(surface, box, row, label)
+                rect = Rect(box.x + 9, box.y + row, max(1, box.width - 11), 1)
+            else:
+                row = 3 + index * 3
+                _text(surface, box, row, _LABELS[index])
+                rect = Rect(box.x + 2, box.y + row + 1, max(1, box.width - 4), 1)
+            self.bounds[index] = rect
+            self._paint_editor(surface, rect, index)
+
+    def _paint_editor(self, surface: Surface, rect: Rect, index: int) -> None:
+        colors = SETTINGS.tui.palette
+        editor = self.editors[index]
+        selected = self.focus == index
+        background = colors.header if selected else colors.panel
+        surface.fill_rect(rect, background)
+        text = "*" * len(editor.text) if index == 0 else sanitize_text(editor.text)
+        offset = max(0, editor.cursor - max(1, rect.width - 4))
+        visible = text[offset:]
+        if selected:
+            cursor = editor.cursor - offset
+            visible = visible[:cursor] + "|" + visible[cursor:]
         surface.text(
-            x + 2,
-            y + 13,
-            "Saved locally in environment/.env",
-            max_width=width - 4,
-            style=style,
+            rect.x,
+            rect.y,
+            ("> " if selected else "  ") + visible,
+            max_width=rect.width,
+            style=CellStyle(
+                foreground=colors.cyan if selected else colors.ink,
+                background=background,
+            ),
         )
-        surface.text(
-            x + 2,
-            y + 14,
-            sanitize_text(self.error),
-            max_width=width - 4,
-            style=style,
-        )
-        surface.text(
-            x + 2,
-            y + 15,
-            "Tab/Shift+Tab: move  Enter: next/save  Esc: cancel",
-            max_width=width - 4,
-            style=style,
-        )
+
+
+def _text(surface: Surface, box: Rect, row: int, text: str) -> None:
+    colors = SETTINGS.tui.palette
+    surface.text(
+        box.x + 2,
+        box.y + row,
+        text,
+        max_width=max(1, box.width - 4),
+        style=CellStyle(foreground=colors.ink, background=colors.panel),
+    )
 
 
 def configure(path: Path, values: Mapping[str, str]) -> dict[str, str] | None:
@@ -209,7 +242,7 @@ def configure(path: Path, values: Mapping[str, str]) -> dict[str, str] | None:
         Saved settings or None when the user cancels.
 
     """
-    form, decoder = SetupForm(values), KeyDecoder()
+    form, decoder = SetupForm(values, destination=path), KeyDecoder()
     deadline = None
     previous: Surface | None = None
     with termination_signal_bridge(), TerminalSession() as terminal:

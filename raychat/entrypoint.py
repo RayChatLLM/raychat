@@ -24,6 +24,7 @@ from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
 from .http_debug import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
+from .provider_environment import add_provider_arguments
 from .provider_settings import provider_settings
 from .resources import AgentResources, create_resources, create_worker
 from .storage import SessionStore
@@ -104,10 +105,11 @@ def build_parser(
         epilog=(
             "Provider settings: RAYCHAT_AUTH_TOKEN (API token), "
             "RAYCHAT_MODEL (model ID), RAYCHAT_BASE_URL (HTTP(S) API root). "
-            "Edit environment/.env or use interactive setup; "
+            "Use interactive setup, --env-file PATH, or --portable; "
             "shell variables override the file."
         ),
     )
+    add_provider_arguments(parser)
     parser.set_defaults(initial_prompt=SETTINGS.tui.initial_prompt)
     parser.add_argument(
         "--config",

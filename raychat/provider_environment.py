@@ -1,4 +1,4 @@
-"""Read and save installation-local provider settings without executing shell code."""
+"""Read and save provider settings without executing shell code."""
 
 from __future__ import annotations
 
@@ -9,10 +9,29 @@ from .filesystem import write_bytes
 from .provider_settings import provider_settings
 
 if TYPE_CHECKING:
+    import argparse
     from collections.abc import Mapping
 
 NAMES = ("RAYCHAT_AUTH_TOKEN", "RAYCHAT_MODEL", "RAYCHAT_BASE_URL")
-DEFAULT_FILE = Path(__file__).resolve().parents[1] / "environment" / ".env"
+
+
+def add_provider_arguments(parser: argparse.ArgumentParser) -> None:
+    """Expose explicit credential locations without changing provider identity."""
+    locations = parser.add_mutually_exclusive_group()
+    locations.add_argument(
+        "--env-file",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Load and save provider settings in PATH "
+            "(default: application storage/environment/.env)"
+        ),
+    )
+    locations.add_argument(
+        "--portable",
+        action="store_true",
+        help="Load and save provider settings in environment/.env beside the launcher",
+    )
 
 
 def _parse(text: str) -> dict[str, str]:
@@ -35,7 +54,7 @@ def _parse(text: str) -> dict[str, str]:
     return values
 
 
-def load(environ: Mapping[str, str], path: Path = DEFAULT_FILE) -> dict[str, str]:
+def load(environ: Mapping[str, str], path: Path) -> dict[str, str]:
     """Fill missing or blank settings from a UTF-8 file, preserving shell overrides.
 
     Returns

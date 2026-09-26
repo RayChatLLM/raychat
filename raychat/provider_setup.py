@@ -2,15 +2,39 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
 
-from .provider_environment import NAMES, load
+from .configuration import SETTINGS
+from .provider_environment import NAMES, add_provider_arguments, load
 from .ui.provider_setup import configure
 
-if TYPE_CHECKING:
-    from pathlib import Path
+
+class _Options(argparse.Namespace):
+    env_file: Path | None = None
+    portable: bool = False
+
+
+def settings_file(root: Path) -> Path:
+    """Resolve the selected credentials file independently of installation writes.
+
+    Returns
+    -------
+    Path
+        An explicit file, portable installation file, or application-storage file.
+
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    add_provider_arguments(parser)
+    options, _ = parser.parse_known_args(namespace=_Options())
+    if options.env_file is not None:
+        return options.env_file.expanduser().resolve()
+    directory = (
+        root if options.portable else Path.home() / SETTINGS.storage.home_directory
+    )
+    return (directory / "environment" / ".env").resolve()
 
 
 def prepare(root: Path, *, interactive: bool) -> int | None:
@@ -25,7 +49,7 @@ def prepare(root: Path, *, interactive: bool) -> int | None:
     if any(argument in {"--help", "-h"} for argument in sys.argv[1:]):
         return None
     try:
-        return _prepare(root / "environment" / ".env", interactive=interactive)
+        return _prepare(settings_file(root), interactive=interactive)
     except KeyboardInterrupt:
         return 130
     except (OSError, ValueError) as error:
