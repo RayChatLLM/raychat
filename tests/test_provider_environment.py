@@ -6,16 +6,20 @@ import io
 import os
 import tempfile
 from contextlib import redirect_stderr
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from raychat.configuration import SETTINGS
 from raychat.provider_environment import NAMES, load, save
-from raychat.provider_setup import prepare
+from raychat.provider_setup import prepare, settings_file
 from raychat.ui.provider_setup import SetupForm
 from raychat.ui.renderer import Surface
 from raychat.ui.terminal import KeyDecoder, KeyEvent
 from tests.assertions import TypedTestCase
 from tests.environment_support import provider_environment
+
+_ALL_FIELDS_ROWS = 9
 
 
 class ProviderFileTests(TypedTestCase):
@@ -138,6 +142,96 @@ class ProviderFormTests(TypedTestCase):
             self.require("write permissions" in form.error)
             self.equal(form.values(), provider_environment())
 
+    def test_compact_layout_keeps_controls_errors_and_drafts_visible(self) -> None:
+        """Reflow at 80x14 and 80x12 without dropping controls or editing state."""
+        form = SetupForm(provider_environment())
+        form.focus = 2
+        form.error = "Fill in all three fields before continuing."
+        previous = form.values()
+        for rows in (24, 14, 12, 9, 6, 24):
+            with self.subTest(rows=rows):
+                surface = Surface(80, rows)
+                form.paint(surface)
+                screen = surface.to_plain()
+                self.require("Save and continue" in screen)
+                self.require("Esc: cancel" in screen)
+                self.require(form.error in screen)
+                if rows >= _ALL_FIELDS_ROWS:
+                    self.require("Token" in screen or "API token" in screen)
+                    self.require("Model" in screen)
+                    self.require("URL" in screen)
+                self.equal(form.values(), previous)
+                self.equal(form.focus, 2)
+                self.require("fixture-token" not in screen)
+
+    def test_compact_mouse_navigation_uses_reflowed_field_bounds(self) -> None:
+        """Click each compact field and save using the current viewport coordinates."""
+        form = SetupForm({})
+        form.paint(Surface(80, 12))
+        for index, bounds in enumerate(form.bounds):
+            self.equal(
+                form.handle(KeyEvent("click", x=bounds.x, y=bounds.y)),
+                index == len(NAMES),
+            )
+            self.equal(form.focus, index)
+
+
+class ProviderLocationTests(TypedTestCase):
+    """Select writable application storage by default and opt into portable storage."""
+
+    def test_default_uses_configured_application_storage(self) -> None:
+        """Keep credentials outside an installation even when a portable file exists."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installation = root / "installation"
+            home = root / "user-data"
+            save(
+                installation / "environment" / ".env",
+                provider_environment(model="wrong"),
+            )
+            expected = home / "environment" / ".env"
+            save(expected, provider_environment())
+            settings = replace(
+                SETTINGS,
+                storage=replace(SETTINGS.storage, home_directory=str(home)),
+            )
+            with (
+                mock.patch("raychat.provider_setup.SETTINGS", settings),
+                mock.patch("sys.argv", ["raychat.py"]),
+                mock.patch.dict(os.environ, dict[str, str](), clear=True),
+                mock.patch("raychat.provider_setup.configure") as configure,
+            ):
+                self.equal(settings_file(installation), expected.resolve())
+                self.equal(prepare(installation, interactive=True), None)
+                self.equal(
+                    os.environ["RAYCHAT_MODEL"],
+                    provider_environment()["RAYCHAT_MODEL"],
+                )
+                configure.assert_not_called()
+
+    def test_explicit_and_portable_locations_are_mutually_exclusive(self) -> None:
+        """Select an explicit destination or a file beside the original launcher."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for arguments, expected in (
+                (["--env-file", str(root / "custom.env")], root / "custom.env"),
+                (["--portable"], root / "environment" / ".env"),
+            ):
+                with (
+                    self.subTest(arguments=arguments),
+                    mock.patch("sys.argv", ["raychat.py", *arguments]),
+                ):
+                    self.equal(settings_file(root), expected.resolve())
+            with (
+                mock.patch(
+                    "sys.argv",
+                    ["raychat.py", "--portable", "--env-file", "custom.env"],
+                ),
+                redirect_stderr(io.StringIO()),
+                self.rejected(SystemExit),
+            ):
+                settings_file(root)
+
 
 class ProviderStartupTests(TypedTestCase):
     """Keep help, cancellation and inherited settings predictable."""
@@ -149,7 +243,7 @@ class ProviderStartupTests(TypedTestCase):
             save(root / "environment" / ".env", provider_environment())
             with (
                 mock.patch.dict(os.environ, dict[str, str](), clear=True),
-                mock.patch("sys.argv", ["raychat.py"]),
+                mock.patch("sys.argv", ["raychat.py", "--portable"]),
                 mock.patch("raychat.provider_setup.configure") as configure,
             ):
                 self.equal(prepare(root, interactive=True), None)
@@ -167,7 +261,7 @@ class ProviderStartupTests(TypedTestCase):
             (root / "environment" / ".env").write_bytes(b"malformed-secret")
             with (
                 mock.patch.dict(os.environ, dict[str, str](), clear=True),
-                mock.patch("sys.argv", ["raychat.py", "--help"]),
+                mock.patch("sys.argv", ["raychat.py", "--portable", "--help"]),
                 mock.patch("raychat.provider_setup.configure") as configure,
             ):
                 self.equal(prepare(root, interactive=True), None)
@@ -175,7 +269,7 @@ class ProviderStartupTests(TypedTestCase):
             (root / "environment" / ".env").unlink()
             with (
                 mock.patch.dict(os.environ, dict[str, str](), clear=True),
-                mock.patch("sys.argv", ["raychat.py", "--exec", "hello"]),
+                mock.patch("sys.argv", ["raychat.py", "--portable", "--exec", "hello"]),
                 mock.patch("raychat.provider_setup.configure") as configure,
             ):
                 self.equal(prepare(root, interactive=False), None)
@@ -189,7 +283,7 @@ class ProviderStartupTests(TypedTestCase):
                 with (
                     self.subTest(result=result),
                     mock.patch.dict(os.environ, dict[str, str](), clear=True),
-                    mock.patch("sys.argv", ["raychat.py"]),
+                    mock.patch("sys.argv", ["raychat.py", "--portable"]),
                     mock.patch(
                         "raychat.provider_setup.configure",
                         return_value=None,
@@ -212,7 +306,7 @@ class ProviderStartupTests(TypedTestCase):
             output = io.StringIO()
             with (
                 mock.patch.dict(os.environ, dict[str, str](), clear=True),
-                mock.patch("sys.argv", ["raychat.py"]),
+                mock.patch("sys.argv", ["raychat.py", "--portable"]),
                 redirect_stderr(output),
             ):
                 self.equal(prepare(root, interactive=False), 1)

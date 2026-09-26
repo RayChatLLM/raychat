@@ -11,8 +11,9 @@ if TYPE_CHECKING:
 
 _REQUIRED = ("RAYCHAT_AUTH_TOKEN", "RAYCHAT_MODEL", "RAYCHAT_BASE_URL")
 _HELP = (
-    "Edit environment/.env in your RayChat installation, or launch interactively "
-    "to open the setup window. Settings load automatically; nonblank shell "
+    "Launch interactively to save settings in application storage, use --env-file "
+    "PATH, or use --portable for installation-local environment/.env. "
+    "Settings load automatically; nonblank shell "
     "variables take precedence. See README.md and environment/windows.env, "
     "environment/linux.env, or environment/macos.env for examples."
 )

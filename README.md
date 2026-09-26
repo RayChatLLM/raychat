@@ -15,13 +15,15 @@ python raychat.py --workspace ./workspace
 
 On first launch, a setup window asks for your API token, model ID, and API base
 URL. Paste each value, then choose **Save and continue**. RayChat saves them in
-`environment/.env` beside the launcher and loads them automatically on later runs.
+`~/.raychat/environment/.env` in your user storage and loads them automatically
+on later runs. The installation directory can be read-only.
 
 Use `/models` in the TUI to fetch all model IDs from the configured provider's
 OpenAI-compatible `GET /models` endpoint. Type to filter; use arrows, Page Up/Down,
 Home/End, Enter, or click to inspect an ID. Escape closes the menu. To change the
-active model, edit `RAYCHAT_MODEL` in `environment/.env` and restart RayChat.
-Saved sessions and profile settings cannot override it. Child chats, task evaluation, and optimization
+active model, edit `RAYCHAT_MODEL` in your saved environment file and restart
+RayChat. Saved sessions and profile settings cannot override it. Child chats,
+task evaluation, and optimization
 reflection use the same endpoint, model, and token as the main chat.
 The `/system` panel wraps the complete model identifier onto multiple lines,
 including its provider path.
@@ -33,34 +35,53 @@ source inspection, live-update, status, and recovery tools. See
 Every launch requires exactly three provider settings. Incomplete settings open
 the interactive setup window; `--exec` or launches without a terminal report the
 missing values instead. `--help` works without them. `RAYCHAT_BASE_URL` is the API
-root;
-RayChat derives `/chat/completions` and `/models` from it. A complete URL ending
+root; RayChat derives `/chat/completions` and `/models` from it. A complete URL ending
 in `/chat/completions` is also normalized to that same root. There is no default
 provider address or model, and `--model` and `--url` are removed. Other providers'
 credential environment variables are not consulted.
 
 Plugin selection, request options, limits, storage, and rendering settings live
 in [raychat.json](raychat.json). `--config PATH` selects another complete JSON
-configuration. Those settings cannot change the provider token, model, or URL.
+configuration. Provider values belong in the selected environment file;
+`storage.home_directory` controls the default location of that file.
 Configuration rejects duplicate keys, invalid types and ranges, non-finite values,
 unsupported versions, and oversized files.
 
 ### Environment files
 
-You can use the setup window or edit `environment/.env` directly. The window has
+You can use the setup window or edit the saved file directly. The window has
 three editable fields, a masked token, and a **Save and continue** button. Use
 Tab/Shift+Tab or click to move between fields; Enter advances or saves. Escape
 cancels without saving. Invalid values and write failures stay in the form so
-you can correct them.
+you can correct them. At 80×14 or 80×12, the form uses a compact layout with the
+fields, Save button, errors, and keyboard controls visible. Resizing preserves
+your entries and focus.
 
-For manual setup, copy your platform's example once, then fill in all three values:
+By default, settings live in `~/.raychat/environment/.env` on every platform.
+Changing `storage.home_directory` in your selected JSON configuration also moves
+this file to that application storage directory. RayChat creates the settings
+directory when you save; it does not need write access to its installation.
+
+Use `--env-file PATH` to select another writable settings file for both loading
+and saving:
+
+```bash
+python raychat.py --env-file ~/raychat-provider.env
+```
+
+For an explicit portable setup, use `--portable`. This loads and saves
+`environment/.env` beside the launcher instead of the user-storage file. The
+installation must be writable for the setup window to save there. These two
+options are mutually exclusive; use the same option on subsequent launches.
+
+To fill in a portable file manually, copy your platform's example once:
 
 Linux or macOS:
 
 ```bash
 cp environment/linux.env environment/.env  # macOS: use environment/macos.env
 # Edit environment/.env with your preferred text editor.
-python raychat.py --workspace ./workspace
+python raychat.py --portable --workspace ./workspace
 ```
 
 Windows (PowerShell):
@@ -69,10 +90,10 @@ Windows (PowerShell):
 Copy-Item environment/windows.env environment/.env
 notepad environment/.env
 # Fill in all three values, save, and close Notepad.
-python raychat.py --workspace ./workspace
+python raychat.py --portable --workspace ./workspace
 ```
 
-The file uses the same format on every platform:
+All locations use the same format:
 
 ```dotenv
 RAYCHAT_AUTH_TOKEN=your-api-token
@@ -85,15 +106,17 @@ supported; values are literal text, with no shell expansion. Do not source the
 file or run an export/PowerShell import command.
 
 Nonblank shell variables override file values; missing or blank variables use
-the file. The file is resolved relative to the RayChat launcher, regardless of
-the current directory, workspace, or JSON configuration. A root-level `.env` and
-the example platform files are not loaded; move existing saved settings into
-`environment/.env`. Restart RayChat after editing settings.
+the selected file. Relative `--env-file` paths are resolved from the launch
+directory. Portable paths are resolved relative to the launcher, independent of
+the current directory or workspace. Other environment files and the platform
+examples are not loaded automatically. If you already filled in the installation's
+`environment/.env`, launch with `--portable` or move it to your user-storage path.
+Restart RayChat after editing settings.
 
-`environment/.env` is ignored by Git and excluded from releases and core snapshots.
-It contains your token, so keep it private. The setup window saves it atomically
-and uses owner-only permissions on POSIX. There are no default provider values
-and no additional packages to install.
+The default file lives outside the installation; the portable `.env` is ignored
+by Git. Neither is included in releases or core snapshots. Keep custom settings
+files private too. The setup window saves atomically and uses owner-only
+permissions on POSIX. There are no default provider values or extra packages.
 
 ## Raw HTTP debugging
 
