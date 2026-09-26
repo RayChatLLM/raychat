@@ -3,6 +3,7 @@
 param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
+    [switch] $IdleDiagnostic,
     [string] $ExpectedSid,
     [string] $OutputDirectory = "ci-output"
 )
@@ -47,8 +48,27 @@ if ($Child) {
         ForEach-Object {
             ([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName) -replace '\.py$', '') -replace '[\\/]', '.'
         })
+    if ($IdleDiagnostic) { $Modules = @('diagnostic_idle') }
     if ($Modules.Count -eq 0) { throw 'No unit-test modules were discovered.' }
-    $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
+    if ($IdleDiagnostic) {
+        $ExpectedTests = 1
+        $IdleScript = Join-Path $OutputDirectory 'diagnostic_idle.py'
+        @'
+import time
+import unittest
+
+class IdleLifetime(unittest.TestCase):
+    def test_standard_user_remains_alive_for_twelve_minutes(self):
+        for second in range(720):
+            if second % 30 == 0:
+                print(f"Idle diagnostic heartbeat: {second} seconds", flush=True)
+            time.sleep(1)
+
+unittest.main(verbosity=2)
+'@ | Set-Content -Encoding utf8 $IdleScript
+    } else {
+        $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
+    }
     if ($LASTEXITCODE -ne 0) { throw 'Unit discovery failed.' }
     $ExpectedTests = [int]$ExpectedTests
     $Shards = @()
@@ -58,7 +78,7 @@ if ($Child) {
     try {
         # Run the concurrency benchmark in a fresh process before other suites.
         # All discovered tests still run exactly once under the same deadline.
-        $Phases = @('stress', 'remaining')
+        $Phases = if ($IdleDiagnostic) { @('remaining') } else { @('stress', 'remaining') }
         foreach ($Phase in $Phases) {
             $PhaseModules = @(if ($Phase -eq 'stress') {
                 'tests.test_workflow_stress'
@@ -100,6 +120,7 @@ if ($Child) {
                         }
                         PassThru = $true
                     }
+                    if ($IdleDiagnostic) { $UnitLaunch.ArgumentList = @('-B', '-S', $IdleScript) }
                     $Shard = [pscustomobject]@{
                         Slot = $GroupIndex; Process = (Start-Process @UnitLaunch)
                         Stdout = $UnitOut; Stderr = $UnitErr; Modules = $Selection
@@ -140,6 +161,7 @@ if ($Child) {
         if ($ActualTests -ne $ExpectedTests) { $UnitExit = 1 }
         [ordered]@{
             expected = $ExpectedTests; completed = $ActualTests; passed = ($UnitExit -eq 0)
+            diagnostic = [bool]$IdleDiagnostic
         } |
             ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-report.json')
     } finally {
@@ -351,7 +373,8 @@ try {
             ArgumentList = '-NoLogo -NoProfile -NonInteractive -File "' +
                 (Join-Path $Source 'tools/verify_windows_filesystem.ps1') +
                 '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value +
-                ' -OutputDirectory "' + $ChildOutput + '"'
+                ' -OutputDirectory "' + $ChildOutput + '"' +
+                $(if ($IdleDiagnostic) { ' -IdleDiagnostic' } else { '' })
             Credential = $Credential
             LoadUserProfile = $true
             Environment = $ChildEnvironment

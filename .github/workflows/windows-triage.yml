@@ -1,4 +1,4 @@
-# Temporary full-suite diagnosis; this job is never a release publication check.
+# Temporary controlled diagnosis; these jobs cannot certify release publication.
 name: Windows stress diagnostic
 
 on:
@@ -16,10 +16,30 @@ concurrency:
 
 jobs:
   windows:
-    name: Windows module-isolation diagnostic
-    runs-on: windows-latest
+    name: Windows lifetime diagnostic / ${{ matrix.variant }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: idle
+            os: windows-latest
+            mode: background
+            idle: '1'
+            finish: finish-diagnostic
+          - variant: foreground
+            os: windows-latest
+            mode: foreground
+            idle: '0'
+            finish: finish
+          - variant: older-image
+            os: windows-2022
+            mode: background
+            idle: '0'
+            finish: finish
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     env:
+      RAYCHAT_WINDOWS_IDLE_DIAGNOSTIC: ${{ matrix.idle }}
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: '1'
@@ -32,304 +52,336 @@ jobs:
           cache-dependency-path: requirements-windows-test.txt
       - name: Install CI-only console driver
         run: python -m pip install -r requirements-windows-test.txt
-      - name: Start full acceptance with fresh module interpreters
+      - name: Run unchanged full acceptance in the foreground
+        if: matrix.mode == 'foreground'
+        timeout-minutes: 22
+        run: |
+          $Python = (Get-Command python).Source
+          ./tools/verify_windows_filesystem.ps1 -Python $Python
+      - name: Start supervised background acceptance
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor start
       - name: Wait for diagnostic checkpoint 1
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 1
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-1-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-1-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 2
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 2
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-2-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-2-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 3
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 3
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-3-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-3-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 4
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 4
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-4-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-4-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 5
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 5
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-5-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-5-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 6
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 6
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-6-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-6-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 7
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 7
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-7-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-7-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 8
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 8
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-8-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-8-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 9
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 9
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-9-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-9-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 10
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 10
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-10-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-10-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 11
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 11
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-11-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-11-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 12
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 12
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-12-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-12-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 13
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 13
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-13-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-13-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 14
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 14
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-14-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-14-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 15
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 15
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-15-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-15-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 16
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 16
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-16-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-16-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 17
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 17
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-17-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-17-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 18
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 18
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-18-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-18-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 19
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 19
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-19-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-19-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 20
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 20
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-20-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-20-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 21
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 21
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-21-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-21-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 22
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 22
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-22-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-22-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 23
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 23
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-23-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-23-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
       - name: Wait for diagnostic checkpoint 24
+        if: matrix.mode == 'background'
         timeout-minutes: 2
         run: python -B -S -m tools.windows_ci_supervisor checkpoint --seconds 30
       - name: Retain diagnostic checkpoint 24
-        if: always()
+        if: matrix.mode == 'background' && always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-24-${{ github.run_attempt }}
+          name: windows-triage-${{ matrix.variant }}-24-${{ github.run_attempt }}
           path: |
             ci-output/windows-standard-user/
             ci-output/windows-supervisor.*
           if-no-files-found: error
-      - name: Require actual full acceptance evidence
+      - name: Require completed background evidence
+        if: matrix.mode == 'background'
         timeout-minutes: 9
-        run: python -B -S -m tools.windows_ci_supervisor finish
+        run: python -B -S -m tools.windows_ci_supervisor ${{ matrix.finish }}
       - name: Retain complete diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-triage-final
+          name: windows-triage-${{ matrix.variant }}-final
           path: ci-output/
           if-no-files-found: error
