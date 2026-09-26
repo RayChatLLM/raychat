@@ -136,6 +136,34 @@ $Retired = $true
 $ChildOutput = $null
 $Password = ConvertTo-SecureString ('Rc!9' + [guid]::NewGuid().ToString('N')) -AsPlainText -Force
 
+function Save-Progress([string] $Stage) {
+    # Keep diagnostics in the checkout before any potentially blocking cleanup.
+    # A step deadline can then retain them even if an OS operation never returns.
+    $Processes = @(Get-Process -ErrorAction SilentlyContinue)
+    $Details = @($Processes | Where-Object {
+        $_.ProcessName -in @('python', 'pwsh', 'conhost', 'MsMpEng', 'Runner.Worker', 'Runner.Listener')
+    } | Select-Object Id, ProcessName, CPU, WorkingSet64, HandleCount -ErrorAction SilentlyContinue)
+    $Logs = @()
+    if ($null -ne $ChildOutput -and (Test-Path -LiteralPath $ChildOutput)) {
+        foreach ($Log in @(Get-ChildItem -LiteralPath $ChildOutput -File -Filter 'unit-*.*')) {
+            $Logs += [ordered]@{ name = $Log.Name; bytes = $Log.Length }
+            Copy-Item -LiteralPath $Log.FullName -Destination $Reports -Force
+        }
+    }
+    [ordered]@{
+        utc = [DateTime]::UtcNow.ToString('o')
+        stage = $Stage
+        process_count = $Processes.Count
+        processes = $Details
+        disks = @(Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free)
+        tcp_states = @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpConnections() |
+            Group-Object State | Select-Object Name, Count)
+        unit_logs = $Logs
+    } | ConvertTo-Json -Depth 5 -Compress |
+        Add-Content -Encoding utf8 (Join-Path $Reports 'progress.jsonl')
+    Write-Output "Windows acceptance: $Stage; $($Processes.Count) processes at $([DateTime]::UtcNow.ToString('o'))."
+}
+
 function Save-DefenderState([string] $Name) {
     $Status = Get-MpComputerStatus | Select-Object AMRunningMode, AMServiceEnabled,
         AMProductVersion, AntivirusEnabled, AntivirusSignatureVersion,
@@ -173,6 +201,7 @@ function Assert-DefenderEnabled([string] $Name) {
 }
 
 try {
+    Save-Progress 'provisioning'
     Write-Output "Provisioning ordinary-user acceptance at $([DateTime]::UtcNow.ToString('o'))."
     $Account = New-LocalUser -Name $AccountName -Password $Password -AccountNeverExpires
     Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $Account
@@ -267,12 +296,15 @@ try {
             PassThru = $true
         }
         Write-Output "Starting tests at $([DateTime]::UtcNow.ToString('o'))."
+        Save-Progress 'starting standard-user process'
         $Process = Start-Process @Launch
         $Retired = $false
+        Save-Progress "started standard-user process $($Process.Id)"
         # Short waits keep cancellation responsive and expose each Python stage.
         $Waiting = [Diagnostics.Stopwatch]::StartNew()
         $PrintedLines = @{}
         $BudgetMinutes = 20
+        $NextSnapshot = 30
         do {
             $Exited = $Process.WaitForExit(1000)
             foreach ($LogPath in @($Launch.RedirectStandardOutput, $Launch.RedirectStandardError)) {
@@ -282,6 +314,10 @@ try {
                     $Lines[$Count..($Lines.Count - 1)] | Write-Output
                     $PrintedLines[$LogPath] = $Lines.Count
                 }
+            }
+            if ($Waiting.Elapsed.TotalSeconds -ge $NextSnapshot) {
+                Save-Progress "running standard-user process $($Process.Id)"
+                $NextSnapshot = $Waiting.Elapsed.TotalSeconds + 30
             }
             if ($Waiting.Elapsed.TotalMinutes -ge $BudgetMinutes) {
                 throw "$Phase tests exceeded $BudgetMinutes minutes."
@@ -297,6 +333,7 @@ try {
 } catch {
     $Failure = $_
 } finally {
+    try { Save-Progress 'entering cleanup' } catch { Write-Warning $_ }
     try {
         if ($null -ne $Process) {
             if (-not $Retired) {

@@ -63,6 +63,7 @@ jobs:
         run: python -B -m tools.ci_release --output ci-output
       - name: Unit suite and real release console as a standard user with Defender
         if: runner.os == 'Windows'
+        timeout-minutes: 18
         shell: pwsh
         run: ./tools/verify_windows_filesystem.ps1 -Python (Get-Command python).Source
       - name: Retain tested archive, checksums, timings and terminal evidence
