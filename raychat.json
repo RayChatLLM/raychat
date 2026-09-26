@@ -309,6 +309,7 @@
     ],
     "source_files": [
       ".gitattributes",
+      ".github/actions/windows-acceptance/action.yml",
       ".github/workflows/extended.yml",
       ".github/workflows/portable.yml",
       ".github/workflows/publish.yml",

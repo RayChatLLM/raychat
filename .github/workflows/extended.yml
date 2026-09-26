@@ -33,3 +33,33 @@ jobs:
           name: extended-terminal-evidence
           path: ci-output/acceptance/
           if-no-files-found: error
+
+  defender:
+    name: Full release acceptance / Windows + Defender
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-windows-test.txt
+      - name: Install CI-only console and test drivers
+        run: python -m pip install -r requirements-windows-test.txt
+      - name: Full ordinary-user suite with verified Defender protection
+        uses: ./.github/actions/windows-acceptance
+        with:
+          mode: defender
+          artifact-prefix: defender-windows
+      - name: Retain Defender release and terminal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extended-windows-defender
+          path: ci-output/
+          if-no-files-found: error

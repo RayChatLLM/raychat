@@ -52,7 +52,7 @@ jobs:
           assert r['repository']['full_name'] == os.environ['GH_REPO']
           assert r['head_repository']['full_name'] == os.environ['GH_REPO']
           jobs = json.load(open('jobs.json'))['jobs']
-          expected = {'Release / Linux', 'Release / macOS', 'Release / Windows + Defender'}
+          expected = {'Release / Linux', 'Release / macOS', 'Release / Windows'}
           assert {j['name'] for j in jobs} == expected
           assert all(j['conclusion'] == 'success' and j['head_sha'] == r['head_sha'] for j in jobs)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:

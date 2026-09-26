@@ -35,6 +35,7 @@ class _Arguments(argparse.Namespace):
     output: Path
     seconds: float
     deadline: float
+    mode: str
 
 
 def _status(output: Path) -> int | None:
@@ -42,11 +43,14 @@ def _status(output: Path) -> int | None:
     return int(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def _deadline(output: Path) -> float:
+def _deadline(output: Path, mode: str) -> float:
     fields = object_field(
         json_object((output / "windows-supervisor.json").read_bytes()),
         "Windows supervisor",
     )
+    if fields.get("mode") != mode:
+        message = "Windows acceptance mode does not match the requested gate."
+        raise RuntimeError(message)
     return number_field(fields["deadline"], "supervisor deadline")
 
 
@@ -167,7 +171,11 @@ def _defender_evidence(path: Path) -> None:
         raise RuntimeError(message)
 
 
-def _completed_evidence(output: Path) -> None:
+def _completed_evidence(output: Path, mode: str) -> None:
+    actual = _report(output / "windows-standard-user/mode.json")
+    if actual.get("mode") != mode:
+        message = "Windows harness did not run the requested acceptance mode."
+        raise RuntimeError(message)
     unit = _report(output / "unit-report.json")
     if unit.get("diagnostic"):
         message = "Diagnostic selections cannot certify the full release suite."
@@ -185,11 +193,12 @@ def _completed_evidence(output: Path) -> None:
     ):
         message = "Windows acceptance lacks a successful native release launch."
         raise RuntimeError(message)
-    for phase in ("before", "after"):
-        _defender_evidence(output / f"windows-standard-user/enabled-{phase}.json")
+    if mode == "defender":
+        for phase in ("before", "after"):
+            _defender_evidence(output / f"windows-standard-user/enabled-{phase}.json")
 
 
-def _start(output: Path) -> None:
+def _start(output: Path, mode: str) -> None:
     output.mkdir(parents=True, exist_ok=True)
     state = output / "windows-supervisor.json"
     if state.exists() or (output / "windows-supervisor.exit").exists():
@@ -207,6 +216,8 @@ def _start(output: Path) -> None:
         str(output),
         "--deadline",
         str(deadline),
+        "--mode",
+        mode,
     )
     # Regular standard streams and close_fds prevent an inherited Actions output
     # pipe from keeping the launching workflow step open until the tests finish.
@@ -229,7 +240,7 @@ def _start(output: Path) -> None:
         )
     try:
         state.write_text(
-            json_text({"pid": process.pid, "deadline": deadline}) + "\n",
+            json_text({"pid": process.pid, "deadline": deadline, "mode": mode}) + "\n",
             encoding="utf-8",
         )
     except BaseException as error:
@@ -279,7 +290,12 @@ def run_harness(command: Sequence[str], output: Path, deadline: float) -> int:
     return result
 
 
-def wait_harness(output: Path, seconds: float | None) -> int:
+def wait_harness(
+    output: Path,
+    seconds: float | None,
+    *,
+    mode: str = "ordinary",
+) -> int:
     """Wait briefly for a checkpoint or require the harness's final exit status.
 
     Returns
@@ -293,13 +309,13 @@ def wait_harness(output: Path, seconds: float | None) -> int:
         A final wait reached the shared deadline without completed evidence.
 
     """
-    deadline = _deadline(output)
+    deadline = _deadline(output, mode)
     limit = deadline if seconds is None else min(deadline, time.time() + seconds)
     while True:
         status = _status(output)
         if status is not None:
             if seconds is None and status == 0:
-                _completed_evidence(output)
+                _completed_evidence(output, mode)
             return status if seconds is None else 0
         remaining = limit - time.time()
         if remaining <= 0:
@@ -336,10 +352,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("ci-output"))
     parser.add_argument("--seconds", type=float, default=180)
     parser.add_argument("--deadline", type=float, default=0)
+    parser.add_argument("--mode", choices=("ordinary", "defender"), default="ordinary")
     args = parser.parse_args(namespace=_Arguments())
     output = args.output.resolve()
     if args.operation == "start":
-        _start(output)
+        _start(output, args.mode)
         return 0
     if args.operation == "run":
         powershell = shutil.which("pwsh")
@@ -356,11 +373,16 @@ def main() -> int:
                 str(_ROOT / "tools/verify_windows_filesystem.ps1"),
                 "-Python",
                 sys.executable,
+                *(("-Defender",) if args.mode == "defender" else ()),
             ),
             output,
             args.deadline,
         )
-    return wait_harness(output, None if args.operation == "finish" else args.seconds)
+    return wait_harness(
+        output,
+        None if args.operation == "finish" else args.seconds,
+        mode=args.mode,
+    )
 
 
 if __name__ == "__main__":

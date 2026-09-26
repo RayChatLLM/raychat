@@ -15,6 +15,7 @@ from tools.acceptance_support import json_text
 
 def _passing_evidence(output: Path) -> None:
     reports: dict[str, object] = {
+        "windows-standard-user/mode.json": {"mode": "defender"},
         "unit-report.json": {"expected": 2, "completed": 2, "passed": True},
         "acceptance/report.json": {
             "passed": True,
@@ -56,18 +57,47 @@ def _passing_evidence(output: Path) -> None:
 class WindowsSupervisorTests(TypedTestCase):
     """Preserve actual exit status and one deadline across checkpoint waits."""
 
+    def test_ordinary_mode_cannot_satisfy_a_defender_gate(self) -> None:
+        """Ordinary runs need full evidence but never substitute for Defender."""
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            _passing_evidence(output)
+            state = output / "windows-supervisor.json"
+            state.write_text(
+                json_text({"deadline": time.time() + 30, "mode": "ordinary"}),
+                encoding="utf-8",
+            )
+            (output / "windows-supervisor.exit").write_text("0\n", encoding="utf-8")
+            reports = output / "windows-standard-user"
+            (reports / "mode.json").write_text(
+                json_text({"mode": "ordinary"}),
+                encoding="utf-8",
+            )
+            for phase in ("before", "after"):
+                (reports / f"enabled-{phase}.json").unlink()
+            self.equal(supervisor.wait_harness(output, None), 0)
+            with self.rejected(RuntimeError, "mode"):
+                supervisor.wait_harness(output, None, mode="defender")
+            # Changing only the requested/state mode cannot invent actual coverage.
+            state.write_text(
+                json_text({"deadline": time.time() + 30, "mode": "defender"}),
+                encoding="utf-8",
+            )
+            with self.rejected(RuntimeError, "mode"):
+                supervisor.wait_harness(output, None, mode="defender")
+
     def test_checkpoints_do_not_grant_success_to_an_unfinished_run(self) -> None:
         """A missing exit marker must fail the final gate, even after checkpoints."""
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             state = output / "windows-supervisor.json"
-            original = json_text({"deadline": time.time() - 1})
+            original = json_text({"deadline": time.time() - 1, "mode": "defender"})
             state.write_text(original, encoding="utf-8")
-            self.equal(supervisor.wait_harness(output, 0), 0)
+            self.equal(supervisor.wait_harness(output, 0, mode="defender"), 0)
             self.equal(state.read_text(encoding="utf-8"), original)
             self.require(not (output / "windows-supervisor.exit").exists())
             with self.rejected(TimeoutError, "completed exit status"):
-                supervisor.wait_harness(output, None)
+                supervisor.wait_harness(output, None, mode="defender")
 
     def test_final_gate_preserves_the_real_process_status(self) -> None:
         """Run a real child once and require its exact successful or failed exit."""
@@ -76,7 +106,7 @@ class WindowsSupervisorTests(TypedTestCase):
             _passing_evidence(output)
             deadline = time.time() + 30
             (output / "windows-supervisor.json").write_text(
-                json_text({"deadline": deadline}),
+                json_text({"deadline": deadline, "mode": "defender"}),
                 encoding="utf-8",
             )
             for status in (0, 7):
@@ -94,11 +124,16 @@ class WindowsSupervisorTests(TypedTestCase):
                     ),
                     status,
                 )
-                self.equal(supervisor.wait_harness(output, None), status)
+                self.equal(
+                    supervisor.wait_harness(output, None, mode="defender"),
+                    status,
+                )
 
     def test_zero_exit_cannot_replace_missing_or_failed_acceptance(self) -> None:
         """A silent successful process cannot certify tests it never ran."""
         cases: tuple[tuple[str, object | None], ...] = (
+            ("windows-standard-user/mode.json", None),
+            ("windows-standard-user/mode.json", {"mode": "ordinary"}),
             ("unit-report.json", None),
             (
                 "unit-report.json",
@@ -122,7 +157,7 @@ class WindowsSupervisorTests(TypedTestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             (output / "windows-supervisor.json").write_text(
-                json_text({"deadline": time.time() + 30}),
+                json_text({"deadline": time.time() + 30, "mode": "defender"}),
                 encoding="utf-8",
             )
             (output / "windows-supervisor.exit").write_text("0\n", encoding="utf-8")
@@ -134,9 +169,9 @@ class WindowsSupervisorTests(TypedTestCase):
                         path.unlink()
                     else:
                         path.write_text(json_text(replacement), encoding="utf-8")
-                    self.equal(supervisor.wait_harness(output, 0), 0)
+                    self.equal(supervisor.wait_harness(output, 0, mode="defender"), 0)
                     with self.rejected(RuntimeError):
-                        supervisor.wait_harness(output, None)
+                        supervisor.wait_harness(output, None, mode="defender")
 
     def test_infrastructure_exception_cannot_expand_the_scan_bypass(self) -> None:
         """Permit one pinned platform file, rejecting broader paths or identities."""
@@ -185,7 +220,7 @@ class WindowsSupervisorTests(TypedTestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             (output / "windows-supervisor.json").write_text(
-                json_text({"deadline": time.time() + 30}),
+                json_text({"deadline": time.time() + 30, "mode": "defender"}),
                 encoding="utf-8",
             )
             (output / "windows-supervisor.exit").write_text("0\n", encoding="utf-8")
@@ -207,10 +242,13 @@ class WindowsSupervisorTests(TypedTestCase):
                         preferences[key] = value
                     evidence.write_text(json_text(report), encoding="utf-8")
                     if section == "valid":
-                        self.equal(supervisor.wait_harness(output, None), 0)
+                        self.equal(
+                            supervisor.wait_harness(output, None, mode="defender"),
+                            0,
+                        )
                     else:
                         with self.rejected(RuntimeError):
-                            supervisor.wait_harness(output, None)
+                            supervisor.wait_harness(output, None, mode="defender")
 
     def test_timeout_cannot_publish_a_successful_exit_marker(self) -> None:
         """Retire an overdue real child without misreporting completed tests."""

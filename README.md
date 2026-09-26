@@ -519,22 +519,26 @@ from `release-version.txt`; change it deliberately for a new public release.
 
 Routine CI runs Python 3.12 on Linux, macOS, and Windows. Each job runs the full
 unit suite once and tests the extracted public launcher. Windows uses a standard
-user with Defender enabled and a CI-only ConPTY driver. Windows runs the stress
-module first, then runs each remaining module in a fresh standard-library test
-process, with at most four running concurrently. Every discovered test runs once.
-On hosted Windows runners, CI verifies the provisioning daemon’s identity before
+user with the hosted runner’s normal security settings and a CI-only ConPTY
+driver. Windows runs the stress module first, then runs each remaining module
+in a fresh standard-library test process, with at most four running concurrently. Every discovered test runs once.
+A separate nightly/manual Windows job runs the same suite with Defender enabled.
+For an on-demand check, enable the Defender option when dispatching Release CI.
+That job verifies the hosted provisioning daemon’s identity before
 exempting that single infrastructure executable from Defender scanning. This
 works around a reproduced detection that disconnects the runner even while idle;
 RayChat, Python, plugins, and test storage remain scanned. Broader exclusions fail
 the acceptance gate, and before/after protection reports are retained.
 Strict typing, lint, formatting, and negative type contracts run once on Linux.
-The 14 extended terminal scenarios run nightly or through the manual extended
-workflow.
+The 14 extended Linux terminal scenarios also run nightly or through the manual
+extended workflow. Defender and extended terminal jobs do not block routine PR
+checks.
 
 After a version change merges into `main`, successful platform jobs publish their
 already-tested, matching ZIP as a GitHub Release. Pull requests never publish.
 Existing release tags and public assets are never overwritten. CI retains
-archive hashes, per-stage timings, console transcripts, and Defender evidence.
+archive hashes, per-stage timings, and console transcripts. The nightly/manual
+Windows job additionally retains before/after Defender evidence.
 
 The previous 12-job run took about 16 minutes elapsed (run `36213496580`).
 The consolidated run's measured timings are recorded in the release PR and

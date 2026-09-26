@@ -3,6 +3,7 @@
 param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
+    [switch] $Defender,
     [string] $ExpectedSid,
     [string] $OutputDirectory = "ci-output"
 )
@@ -416,14 +417,18 @@ try {
         RAYCHAT_TEST_SID = $Account.SID.Value
         RAYCHAT_TEST_DENIED_DIRECTORY = $Denied; RAYCHAT_TEST_OTHER_VOLUME = $OtherRoot
     }
-    $HostedException = Get-HostedDefenderException
-    $null = Save-DefenderState 'inherited'
-    Write-Output "Updating Defender security intelligence at $([DateTime]::UtcNow.ToString('o'))."
-    Start-Service WinDefend
-    Update-MpSignature
-    $null = Save-DefenderState 'after-signature-update'
-    Save-Progress 'updated Defender security intelligence'
-    foreach ($Phase in @('defender')) {
+    $Mode = if ($Defender) { 'defender' } else { 'ordinary' }
+    @{ mode = $Mode } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Reports 'mode.json')
+    if ($Defender) {
+        $HostedException = Get-HostedDefenderException
+        $null = Save-DefenderState 'inherited'
+        Write-Output "Updating Defender security intelligence at $([DateTime]::UtcNow.ToString('o'))."
+        Start-Service WinDefend
+        Update-MpSignature
+        $null = Save-DefenderState 'after-signature-update'
+        Save-Progress 'updated Defender security intelligence'
+    }
+    foreach ($Phase in @($Mode)) {
         if ($Phase -eq 'defender') {
             Write-Output "Enabling Defender at $([DateTime]::UtcNow.ToString('o'))."
             # Retain only the verified platform daemon file while every tested
