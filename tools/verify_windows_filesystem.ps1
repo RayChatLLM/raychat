@@ -3,7 +3,6 @@
 param(
     [Parameter(Mandatory)][string] $Python,
     [switch] $Child,
-    [ValidateSet("", "launcher", "opaque", "pair")][string] $Diagnostic = "",
     [string] $ExpectedSid,
     [string] $OutputDirectory = "ci-output"
 )
@@ -48,16 +47,8 @@ if ($Child) {
         ForEach-Object {
             ([IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName) -replace '\.py$', '') -replace '[\\/]', '.'
         })
-    if ($Diagnostic) {
-        $Modules = @(if ($Diagnostic -in @('launcher', 'pair')) { 'tests.test_user_release' }
-            if ($Diagnostic -in @('opaque', 'pair')) { 'tests.test_opaque_incident_demo' })
-    }
     if ($Modules.Count -eq 0) { throw 'No unit-test modules were discovered.' }
-    $ExpectedTests = if ($Diagnostic) {
-        & $Python -B -S -c "import sys, unittest; print(unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:]).countTestCases())" @Modules
-    } else {
-        & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
-    }
+    $ExpectedTests = & $Python -B -S -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())"
     if ($LASTEXITCODE -ne 0) { throw 'Unit discovery failed.' }
     $ExpectedTests = [int]$ExpectedTests
     $Shards = @()
@@ -67,7 +58,7 @@ if ($Child) {
     try {
         # Run the concurrency benchmark in a fresh process before other suites.
         # All discovered tests still run exactly once under the same deadline.
-        $Phases = if ($Diagnostic) { @('remaining') } else { @('stress', 'remaining') }
+        $Phases = @('stress', 'remaining')
         foreach ($Phase in $Phases) {
             $PhaseModules = @(if ($Phase -eq 'stress') {
                 'tests.test_workflow_stress'
@@ -75,48 +66,55 @@ if ($Child) {
                 $Modules | Where-Object { $_ -ne 'tests.test_workflow_stress' }
             })
             $Parallelism = if ($Phase -eq 'remaining') { 3 } else { 1 }
-            $CurrentShards = @()
-            for ($GroupIndex = 0; $GroupIndex -lt $Parallelism; $GroupIndex++) {
-                $Selection = @(for ($Offset = $GroupIndex; $Offset -lt $PhaseModules.Count; $Offset += $Parallelism) { $PhaseModules[$Offset] })
-                $Index = $Shards.Count
-                if ($Selection.Count -eq 0) { continue }
-                $UnitOut = Join-Path $OutputDirectory "unit-$Index.stdout.log"
-                $UnitErr = Join-Path $OutputDirectory "unit-$Index.stderr.log"
-                # Independent test processes must not contend for the application's
-                # default package store. Descendants within each shard still share
-                # its profile, preserving the real cross-process ownership tests.
-                $UnitProfile = (New-Item -ItemType Directory -Force (
-                    Join-Path $env:USERPROFILE "unit-$Index")).FullName
-                $UnitTemp = (New-Item -ItemType Directory -Force (
-                    Join-Path $env:TEMP "unit-$Index")).FullName
-                $UnitLaunch = @{
-                    FilePath = $Python
-                    ArgumentList = @('-B', '-S', '-X', 'faulthandler', '-m', 'unittest', '-v', '--durations', '20') + $Selection
-                    WorkingDirectory = (Get-Location).Path
-                    RedirectStandardOutput = $UnitOut
-                    RedirectStandardError = $UnitErr
-                    Environment = @{
-                        HOME = $UnitProfile; USERPROFILE = $UnitProfile
-                        APPDATA = $UnitProfile; LOCALAPPDATA = $UnitProfile
-                        TEMP = $UnitTemp; TMP = $UnitTemp
-                    }
-                    PassThru = $true
-                }
-                $Shard = [pscustomobject]@{
-                    Process = (Start-Process @UnitLaunch)
-                    Stdout = $UnitOut; Stderr = $UnitErr; Modules = $Selection
-                    Profile = $UnitProfile; Temporary = $UnitTemp
-                }
-                $Shards += $Shard
-                $CurrentShards += $Shard
-            }
-            $Shards | Select-Object Modules, Profile, Temporary | ConvertTo-Json -Depth 4 |
-                Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-modules.json')
-            Write-Output "Running $Phase phase: $($PhaseModules.Count) modules across $($CurrentShards.Count) native unittest processes."
+            $ActiveShards = @{}
+            $NextModule = 0
+            Write-Output "Running $Phase phase: $($PhaseModules.Count) modules in fresh interpreters, at most $Parallelism concurrently."
             do {
-                $AllExited = $true
-                foreach ($Shard in $CurrentShards) {
-                    if (-not $Shard.Process.WaitForExit(250)) { $AllExited = $false }
+                $Launched = $false
+                for ($GroupIndex = 0; $GroupIndex -lt $Parallelism; $GroupIndex++) {
+                    if ($ActiveShards.ContainsKey($GroupIndex)) { continue }
+                    if ($NextModule -ge $PhaseModules.Count) { break }
+                    $Selection = @($PhaseModules[$NextModule])
+                    $NextModule++
+                    $Index = $Shards.Count
+                    $UnitOut = Join-Path $OutputDirectory "unit-$Index.stdout.log"
+                    $UnitErr = Join-Path $OutputDirectory "unit-$Index.stderr.log"
+                    # Independent test processes must not contend for the application's
+                    # default package store. Descendants within each module still share
+                    # its profile, preserving the real cross-process ownership tests.
+                    $ProfileIndex = if ($Phase -eq 'stress') { 0 } else { $GroupIndex + 1 }
+                    $UnitProfile = (New-Item -ItemType Directory -Force (
+                        Join-Path $env:USERPROFILE "unit-$ProfileIndex")).FullName
+                    $UnitTemp = (New-Item -ItemType Directory -Force (
+                        Join-Path $env:TEMP "unit-$ProfileIndex")).FullName
+                    $UnitLaunch = @{
+                        FilePath = $Python
+                        ArgumentList = @('-B', '-S', '-X', 'faulthandler', '-m', 'unittest', '-v', '--durations', '20') + $Selection
+                        WorkingDirectory = (Get-Location).Path
+                        RedirectStandardOutput = $UnitOut
+                        RedirectStandardError = $UnitErr
+                        Environment = @{
+                            HOME = $UnitProfile; USERPROFILE = $UnitProfile
+                            APPDATA = $UnitProfile; LOCALAPPDATA = $UnitProfile
+                            TEMP = $UnitTemp; TMP = $UnitTemp
+                        }
+                        PassThru = $true
+                    }
+                    $Shard = [pscustomobject]@{
+                        Slot = $GroupIndex; Process = (Start-Process @UnitLaunch)
+                        Stdout = $UnitOut; Stderr = $UnitErr; Modules = $Selection
+                        Profile = $UnitProfile; Temporary = $UnitTemp
+                    }
+                    $Shards += $Shard
+                    $ActiveShards[$GroupIndex] = $Shard
+                    $Launched = $true
+                }
+                if ($Launched) {
+                    $Shards | Select-Object Modules, Profile, Temporary | ConvertTo-Json -Depth 4 |
+                        Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-modules.json')
+                }
+                foreach ($Shard in @($ActiveShards.Values)) {
+                    $Exited = $Shard.Process.WaitForExit(250)
                     foreach ($UnitLog in @($Shard.Stdout, $Shard.Stderr)) {
                         $Lines = @(Get-Content -LiteralPath $UnitLog -ErrorAction SilentlyContinue)
                         $Count = if ($PrintedUnitLines.ContainsKey($UnitLog)) { $PrintedUnitLines[$UnitLog] } else { 0 }
@@ -125,9 +123,10 @@ if ($Child) {
                             $PrintedUnitLines[$UnitLog] = $Lines.Count
                         }
                     }
+                    if ($Exited) { $ActiveShards.Remove($Shard.Slot) }
                 }
                 if ($UnitClock.Elapsed.TotalSeconds -ge 900) { throw 'Unit suite exceeded 900 seconds.' }
-            } while (-not $AllExited)
+            } while ($NextModule -lt $PhaseModules.Count -or $ActiveShards.Count -gt 0)
         }
         $UnitExit = 0
         $ActualTests = 0
@@ -141,7 +140,6 @@ if ($Child) {
         if ($ActualTests -ne $ExpectedTests) { $UnitExit = 1 }
         [ordered]@{
             expected = $ExpectedTests; completed = $ActualTests; passed = ($UnitExit -eq 0)
-            diagnostic = [bool]$Diagnostic; selection = $Diagnostic
         } |
             ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'unit-report.json')
     } finally {
@@ -174,6 +172,7 @@ $Process = $null
 $Failure = $null
 $Retired = $true
 $ChildOutput = $null
+$AcceptanceStarted = [DateTime]::Now
 $Password = ConvertTo-SecureString ('Rc!9' + [guid]::NewGuid().ToString('N')) -AsPlainText -Force
 
 function Save-Progress([string] $Stage) {
@@ -213,6 +212,20 @@ function Save-Progress([string] $Stage) {
         unit_logs = $Logs
     } | ConvertTo-Json -Depth 5 -Compress |
         Add-Content -Encoding utf8 (Join-Path $Reports 'progress.jsonl')
+    # Threat/block evidence is diagnostic only; absent logs never affect acceptance.
+    try {
+        $Events = @(Get-WinEvent -FilterHashtable @{
+            LogName = 'Microsoft-Windows-Windows Defender/Operational'
+            Id = @(1116, 1117, 1121, 1122)
+            StartTime = $AcceptanceStarted
+        } -MaxEvents 20 -ErrorAction SilentlyContinue |
+            Select-Object TimeCreated, Id, Message)
+        [ordered]@{ checked_utc = [DateTime]::UtcNow.ToString('o'); events = $Events } |
+            ConvertTo-Json -Depth 4 |
+            Set-Content -Encoding utf8 (Join-Path $Reports 'defender-events.json')
+    } catch {
+        Write-Verbose "Defender event diagnostics unavailable: $($_.Exception.Message)"
+    }
     Write-Output "Windows acceptance: $Stage; $($Processes.Count) processes at $([DateTime]::UtcNow.ToString('o'))."
 }
 
@@ -338,8 +351,7 @@ try {
             ArgumentList = '-NoLogo -NoProfile -NonInteractive -File "' +
                 (Join-Path $Source 'tools/verify_windows_filesystem.ps1') +
                 '" -Child -Python "' + $Python + '" -ExpectedSid ' + $Account.SID.Value +
-                ' -OutputDirectory "' + $ChildOutput + '"' +
-                $(if ($Diagnostic) { ' -Diagnostic ' + $Diagnostic } else { '' })
+                ' -OutputDirectory "' + $ChildOutput + '"'
             Credential = $Credential
             LoadUserProfile = $true
             Environment = $ChildEnvironment
