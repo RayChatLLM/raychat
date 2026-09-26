@@ -812,15 +812,18 @@ class SubagentCoordinatorTests(PackageTestCase):
         thread = threading.Thread(target=run)
         thread.start()
         try:
-            require(request_started.wait(3))
+            # Defender scans cold worker imports before the first HTTP request.
+            require(request_started.wait(30 if os.name == "nt" else 3))
             cancelled.set()
             thread.join(3)
             require(not (thread.is_alive()))
         finally:
+            cancelled.set()
             release_server.set()
             server.shutdown()
             server.server_close()
             server_thread.join(3)
+            thread.join(3)
         equal(len(caught), 1)
         require(isinstance(caught[0], CancelledError))
 
@@ -1235,7 +1238,9 @@ class GoalModeTests(PackageTestCase):
             default_profile="primary",
         )
         controller = goal_module.GoalController(goal_module.GoalJudge(router))
-        run_options: dict[str, object] = {"goal_controller": controller}
+        runtime = create_runtime(self.root, goal_controller=controller)
+        self.addCleanup(runtime.close)
+        run_options: dict[str, object] = {"runtime": runtime}
         worker = AgentWorker(main, self.root, run_options=run_options)
         kinds = []
         result = None
@@ -1637,6 +1642,22 @@ class ActionProtocolTests(PackageTestCase):
 
 class TransportBoundaryTests(PackageTestCase):
     """Exercise framing and failure cleanup through real isolated interpreters."""
+
+    def test_windows_worker_has_no_attached_console(self) -> None:
+        """Pipe-only workers allocate neither a console window nor a server."""
+        if os.name != "nt":
+            self.skipTest("Windows console APIs are required")
+        launcher = ChildLauncher(
+            "import ctypes,json,sys\nsys.stdin.buffer.read()\n"
+            "kernel = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+            "processes = (ctypes.c_uint32 * 1)()\n"
+            "count = kernel.GetConsoleProcessList(processes, 1)\n"
+            "message = f'{count} {ctypes.get_last_error()}'\n"
+            "print(json.dumps({'type': 'final', 'message': message}))\n",
+        )
+        with mock.patch.object(asyncio, "create_subprocess_exec", new=launcher):
+            equal(process_runtime.run_child(None, {}, None), "0 6")
+        require(launcher.processes[0].returncode is not None)
 
     def test_parent_sigkill_cancels_isolated_command_process_tree(self) -> None:
         """Reap an isolated command tree when its owning core is killed."""

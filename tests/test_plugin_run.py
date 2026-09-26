@@ -311,12 +311,8 @@ class RunAgentTests(_RunFixture):
         self.require((len(selected)) < (len(all_items)))
         self.equal(selected, all_items[-len(selected) :])
 
-        actual_floor = copy.deepcopy(chat.calls[0])
-        actual_floor[1]["content"] += (
-            _rc_context.COMPACTION_SEPARATOR + _rc_context.COMPACTION_PREFIX
-        )
-        self.require((_rc_context.messages_size(actual_floor)) <= (budget))
-
+        # This first request has no history to compact. Check the actual
+        # request budget; adding a future digest incorrectly consumes headroom.
         one_more = all_items[-len(selected) - 1 :]
         expanded_memory = _json_dump(
             one_more,
@@ -328,9 +324,6 @@ class RunAgentTests(_RunFixture):
             rendered_memory,
             expanded_memory,
             1,
-        )
-        expanded_floor[1]["content"] += (
-            _rc_context.COMPACTION_SEPARATOR + _rc_context.COMPACTION_PREFIX
         )
         self.require((_rc_context.messages_size(expanded_floor)) > (budget))
 

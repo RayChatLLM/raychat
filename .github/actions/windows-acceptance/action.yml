@@ -1,0 +1,90 @@
+name: Windows acceptance
+description: Run the full ordinary-user release checks with an explicit security mode.
+inputs:
+  mode:
+    description: ordinary or defender; the final gate requires the selected mode.
+    required: true
+  artifact-prefix:
+    description: Prefix for immutable diagnostic checkpoint artifacts.
+    default: windows
+runs:
+  using: composite
+  steps:
+    - name: Start supervised Windows acceptance
+      shell: pwsh
+      run: python -B -S -m tools.windows_ci_supervisor start --mode ${{ inputs.mode }}
+    - name: Wait for Windows checkpoint 1
+      shell: pwsh
+      run: python -B -S -m tools.windows_ci_supervisor checkpoint --mode ${{ inputs.mode }} --seconds 30
+    - name: Retain Windows checkpoint 1 before further testing
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-prefix }}-checkpoint-1-${{ github.run_attempt }}
+        path: |
+          ci-output/windows-standard-user/
+          ci-output/windows-supervisor.*
+        if-no-files-found: error
+    - name: Wait for Windows checkpoint 2
+      shell: pwsh
+      run: python -B -S -m tools.windows_ci_supervisor checkpoint --mode ${{ inputs.mode }} --seconds 180
+    - name: Retain Windows checkpoint 2 before further testing
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-prefix }}-checkpoint-2-${{ github.run_attempt }}
+        path: |
+          ci-output/windows-standard-user/
+          ci-output/windows-supervisor.*
+        if-no-files-found: error
+    - name: Wait for Windows checkpoint 3
+      shell: pwsh
+      run: python -B -S -m tools.windows_ci_supervisor checkpoint --mode ${{ inputs.mode }} --seconds 180
+    - name: Retain Windows checkpoint 3 before further testing
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-prefix }}-checkpoint-3-${{ github.run_attempt }}
+        path: |
+          ci-output/windows-standard-user/
+          ci-output/windows-supervisor.*
+        if-no-files-found: error
+    - name: Wait for Windows checkpoint 4
+      shell: pwsh
+      run: python -B -S -m tools.windows_ci_supervisor checkpoint --mode ${{ inputs.mode }} --seconds 180
+    - name: Retain Windows checkpoint 4 before further testing
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-prefix }}-checkpoint-4-${{ github.run_attempt }}
+        path: |
+          ci-output/windows-standard-user/
+          ci-output/windows-supervisor.*
+        if-no-files-found: error
+    - name: Wait for Windows checkpoint 5
+      shell: pwsh
+      run: python -B -S -m tools.windows_ci_supervisor checkpoint --mode ${{ inputs.mode }} --seconds 180
+    - name: Retain Windows checkpoint 5 before further testing
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-prefix }}-checkpoint-5-${{ github.run_attempt }}
+        path: |
+          ci-output/windows-standard-user/
+          ci-output/windows-supervisor.*
+        if-no-files-found: error
+    - name: Wait for Windows checkpoint 6
+      shell: pwsh
+      run: python -B -S -m tools.windows_ci_supervisor checkpoint --mode ${{ inputs.mode }} --seconds 180
+    - name: Retain Windows checkpoint 6 before further testing
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-prefix }}-checkpoint-6-${{ github.run_attempt }}
+        path: |
+          ci-output/windows-standard-user/
+          ci-output/windows-supervisor.*
+        if-no-files-found: error
+    - name: Require completed Windows acceptance
+      shell: pwsh
+      run: python -B -S -m tools.windows_ci_supervisor finish --mode ${{ inputs.mode }}

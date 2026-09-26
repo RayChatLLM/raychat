@@ -56,6 +56,8 @@ if TYPE_CHECKING:
 
 _provider = ServiceSlot[ProviderService]("http_provider")
 _LOGGER = logging.getLogger(__name__)
+DETERMINISTIC_TIMEOUT = 120
+
 MAX_AGENTS = 256
 MAX_PADDING_PAGES = 12
 MAX_PARALLEL = 16
@@ -230,7 +232,9 @@ class _Benchmark:
     events: list[tuple[str, int]] = field(default_factory=list)
 
     def cancel(self) -> None:
-        if time.monotonic() > self.started + (900 if self.settings.live else 120):
+        if time.monotonic() > self.started + (
+            900 if self.settings.live else DETERMINISTIC_TIMEOUT
+        ):
             message = "Collective workflow benchmark exceeded its deadline."
             raise TimeoutError(message)
 

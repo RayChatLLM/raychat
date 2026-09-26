@@ -10,6 +10,7 @@ import json
 import math
 import re
 import tempfile
+from contextlib import ExitStack
 from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
@@ -115,6 +116,7 @@ class ChatAPITests(ProviderTestCase):
         with (
             tempfile.TemporaryDirectory() as directory,
             mock.patch.object(Path, "home", return_value=Path(directory)),
+            ExitStack() as cleanup,
         ):
             args = arguments([
                 "--workspace",
@@ -129,7 +131,7 @@ class ChatAPITests(ProviderTestCase):
                     "RAYCHAT_BASE_URL": "https://fixture-provider.invalid/v1",
                 },
             )
-            self.addCleanup(resources.close)
+            cleanup.callback(resources.close)
             runtime = resources.runtime
             primary: object = CHAT.validate(runtime.services[CHAT.name]).chat
             clone: object = CHAT.validate(runtime.services[CHAT.name]).factory()
@@ -159,8 +161,8 @@ class ChatAPITests(ProviderTestCase):
             if resources.store is None:
                 self.fail("The fixture requires a session journal.")
             worker = create_worker(args, resources)
-            self.addCleanup(worker.join)
-            self.addCleanup(worker.stop)
+            cleanup.callback(worker.join)
+            cleanup.callback(worker.stop)
             worker.restore_conversation(resources.store.snapshot())
             self.equal(runtime.menu("models").selected, "original")
             runtime.reload()

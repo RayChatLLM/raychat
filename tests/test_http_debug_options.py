@@ -110,7 +110,11 @@ async def _launch_debug(directory: Path, url: str, source: Path) -> _LaunchResul
     )
     try:
         completion: Awaitable[tuple[bytes, bytes]] = process.communicate()
-        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(completion, 20)
+        # A cold CLI also starts the real isolated HTTP worker on Windows.
+        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(
+            completion,
+            90 if os.name == "nt" else 20,
+        )
         stdout, stderr = await bounded
         status = process.returncode
         if status is None:

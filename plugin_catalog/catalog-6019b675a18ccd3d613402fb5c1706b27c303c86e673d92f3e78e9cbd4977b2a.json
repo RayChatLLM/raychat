@@ -301,8 +301,8 @@
       "instructions": "Run tests or programs with {\"action\":\"run\",\"argv\":[\"python3\",\"-B\",\"-S\",\"script.py\"]}. Use argument arrays, never a shell command string. Optional cwd is workspace-relative. The host kills commands at its configured timeout (default 30 seconds; timed-out results say so in stderr) and keeps only the first 1536 bytes of each output stream, so run short, noninteractive commands that print little. A command that legitimately needs longer may set \"timeout\" (seconds, up to 120) on the run action. Inspect returncode and truncation metadata before reporting success.",
       "requires": {},
       "sdk": 4,
-      "sha256": "51ef4a71775da6db955d22567a32be8746bacb142199f1e82cbb21dc1c79b277",
-      "url": "package-51ef4a71775da6db955d22567a32be8746bacb142199f1e82cbb21dc1c79b277.zip",
+      "sha256": "1e7bdf3543e055d4e5cba2a42dba06be35d3eebea0b7c95164721ebfebc7a017",
+      "url": "package-1e7bdf3543e055d4e5cba2a42dba06be35d3eebea0b7c95164721ebfebc7a017.zip",
       "version": "1.0.0"
     },
     {

@@ -1558,7 +1558,8 @@ class Runtime(_RuntimeRegistry):
             Path(path).expanduser().resolve() for path in directories
         ]
         self.auto_reload = enabled
-        self._fingerprints = self._watched()
+        # Captured workers disable watching and need no installed-source locks.
+        self._fingerprints = self._watched() if enabled else {}
 
     def refresh(self, *, notify: EventCallback | None = None) -> None:
         """Activate changed plugin sources when the runtime is idle."""
