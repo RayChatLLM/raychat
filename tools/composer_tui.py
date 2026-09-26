@@ -42,6 +42,54 @@ def _completion(case: Case, chat: TerminalChat) -> None:
     )
 
 
+def _composer_contains(chat: TerminalChat, text: str) -> None:
+    settle(chat)
+    screen = chat.screen()
+    parts = re.split(r"─ (?:MESSAGE |Editing queued message )", screen, maxsplit=1)
+    require(len(parts) > 1, screen)
+    require(text in parts[1], parts[1])
+
+
+def _history(case: Case, chat: TerminalChat) -> None:
+    chat.command("HISTORY_FIRST", "ANSWER_HISTORY_FIRST")
+    chat.command("HISTORY_SECOND", "ANSWER_HISTORY_SECOND")
+    chat.send("UNFINISHED\x01\x1b[C\x1b[A")
+    _composer_contains(chat, "HISTORY_SECOND")
+    chat.send(b"\x1b[A")
+    _composer_contains(chat, "HISTORY_FIRST")
+    chat.send(b"\x1b[B\x1b[B!")
+    _composer_contains(chat, "U!NFINISHED")
+    chat.send(b"\x01\x0b\x1b[A\x01\x05_EDITED\r")
+    chat.wait("ANSWER_HISTORY_SECOND_EDITED")
+    chat.send(b"\x1b[A\x1b[A")
+    _composer_contains(chat, "HISTORY_SECOND")
+    chat.send(b"\x1b[B\x1b[B")
+    chat.send("/system \r\x1b[A")
+    _composer_contains(chat, "/system ")
+    chat.send(b"\x1b[A")
+    _composer_contains(chat, "HISTORY_SECOND_EDITED")
+    chat.send(b"\x01\x0b")
+    multiline = "UNICODE_雪🙂\n" + "wrapped_" * 18 + "FINAL_LINE"
+    chat.send("\x1b[200~" + multiline + "\x1b[201~\x01\x05_SUFFIX")
+    _composer_contains(chat, "FINAL_LINE_SUFFIX")
+    chat.send(b"\r")
+    chat.wait("FINAL_LINE_SUFFIX")
+    settle(chat)
+    prompts = read_messages(case.work / "requests.jsonl")
+    require(
+        any(
+            message["role"] == "user" and message["content"] == multiline + "_SUFFIX"
+            for request in prompts
+            for message in request
+        ),
+        "Ctrl+E did not append after the complete multiline text",
+    )
+    case.checks.append(
+        "Up/Down recalls messages and commands, restores draft cursor, and "
+        "resubmits edits; Ctrl+E appends after Unicode, multiline and wrapped text",
+    )
+
+
 def _queue_edits(case: Case, chat: TerminalChat) -> None:
     chat.send("BLOCK_QUEUE\r")
     wait_file(chat, case.work / "BLOCK_QUEUE.started")
@@ -49,8 +97,16 @@ def _queue_edits(case: Case, chat: TerminalChat) -> None:
     chat.wait("2 QUEUED")
     chat.wait("1. ORIGINAL_ONE")
     chat.wait("2. ORIGINAL_TWO")
+    chat.send(b"\x1b[A")
+    _composer_contains(chat, "ORIGINAL_TWO")
+    chat.send(b"\x1b[A")
+    _composer_contains(chat, "ORIGINAL_ONE")
+    chat.send(b"\x1b[B\x1b[B")
+    _composer_contains(chat, "UNFINISHED_DRAFT")
     chat.send(b"\x1b[1;2A\x01\x0bEDITED_TWO\x1b[1;2A\x01\x0bEDITED_ONE")
     chat.wait("Editing queued message 1 of 2")
+    chat.send(b"\x1b[A\x1b[B\x01\x05_SUFFIX")
+    _composer_contains(chat, "EDITED_ONE_SUFFIX")
     (case.work / "BLOCK_QUEUE.release").touch()
     chat.wait("ANSWER_BLOCK_QUEUE")
     settle(chat)
@@ -71,10 +127,28 @@ def _queue_edits(case: Case, chat: TerminalChat) -> None:
         )
         for request in request_messages
     ]
-    require(prompts[-3:] == ["BLOCK_QUEUE", "EDITED_ONE", "EDITED_TWO"], prompts)
+    require(prompts[-3:] == ["BLOCK_QUEUE", "EDITED_ONE_SUFFIX", "EDITED_TWO"], prompts)
     case.checks.append(
         "Multiple queue edits remain temporary while browsing and dispatch "
         "in FIFO order after Enter; draft restored",
+    )
+
+
+def _queue_cancel(case: Case, chat: TerminalChat) -> None:
+    chat.send(b"\x01\x0b")
+    chat.send("BLOCK_CANCEL_NAV\rQUEUED_KEEP\rDRAFT_KEEP\x1b[1;2A")
+    chat.wait("Editing queued message 1 of 1")
+    chat.send(b"\x01\x0bDISCARDED_EDIT\x1b")
+    _composer_contains(chat, "DRAFT_KEEP")
+    chat.send(b"\x1b[A")
+    _composer_contains(chat, "QUEUED_KEEP")
+    chat.send(b"\x1b[B")
+    _composer_contains(chat, "DRAFT_KEEP")
+    (case.work / "BLOCK_CANCEL_NAV.release").touch()
+    chat.wait("ANSWER_QUEUED_KEEP")
+    case.checks.append(
+        "Busy history recalls queued submissions; queue Escape discards edits "
+        "and restores draft while submitted history remains unchanged",
     )
 
 
@@ -152,6 +226,9 @@ def _child_queue(case: Case, chat: TerminalChat) -> None:
     chat.wait("2 subagents running")
     chat.command("/agents", "Agent sessions")
     select_child(chat, "left")
+    chat.send("CHILD_DRAFT_TEST\x1b[A!")
+    _composer_contains(chat, "CHILD_DRAFT_TEST!")
+    chat.send(b"\x01\x0b")
     chat.send("CHILD_OLD\rCHILD_DRAFT\x1b[1;2A\x01\x0bCHILD_EDITED")
     chat.wait("Editing queued message 1 of 1")
     (case.work / "BLOCK_LEFT.release").touch()
@@ -164,11 +241,20 @@ def _child_queue(case: Case, chat: TerminalChat) -> None:
     chat.send(b"\r")
     chat.wait("ANSWER_CHILD_EDITED")
     chat.wait("CHILD_DRAFT")
+    chat.send(b"\x1b[A")
+    _composer_contains(chat, "CHILD_OLD")
+    chat.send(b"\x1b[B")
+    _composer_contains(chat, "CHILD_DRAFT")
     chat.send(b"\x01\x0b")
     chat.command("/parent", "Main chat")
     (case.work / "BLOCK_RIGHT.release").touch()
     chat.wait("WORKFLOW_FINISHED")
     chat.wait("0 subagents running")
+    chat.send(b"\x1b[A")
+    _composer_contains(chat, "/agents")
+    chat.send(b"\x1b[A")
+    _composer_contains(chat, "START_WORKFLOW")
+    chat.send(b"\x01\x0b")
     case.checks.append(
         "Queue editing works in a workflow child chat; parent and sibling "
         "continue independently; live subagent count returns to zero",
@@ -181,7 +267,9 @@ def run(output: Path, root: Path = SOURCE) -> None:
     chat = case.chat(persist=True)
     try:
         _completion(case, chat)
+        _history(case, chat)
         _queue_edits(case, chat)
+        _queue_cancel(case, chat)
         _rapid_queue(case, chat)
         _copy_selection(case, chat)
         _child_queue(case, chat)
