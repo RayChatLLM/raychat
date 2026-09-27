@@ -1,14 +1,9 @@
 # Live core updates and recovery
 
-Interactive `python raychat.py` runs a replaceable Python core. On POSIX systems
-with `/bin/zsh`, a small native guardian owns terminal modes and input forwarding;
-the core writes durable checkpoints locally. The full Python supervisor starts
-when update, verification, recovery, or another supervisor operation needs it.
-Promotion transfers the existing core process and pipes before handling that
-operation. Windows, systems without `/bin/zsh`, and explicit recovery launches use
-the Python supervisor from the start. Both paths preserve terminal restoration,
-buffered input, and dispatch durability. `--exec` remains a single noninteractive
-job.
+Interactive `python raychat.py` uses the same Python supervisor and replaceable
+Python core on macOS, Linux, and Windows. The supervisor owns terminal modes,
+input forwarding, durable recovery checkpoints, and core replacement. `--exec`
+remains a single noninteractive job.
 
 - `/update /absolute/path/to/source` copies a developer checkout into an isolated
   candidate. `/update` uses the launch source.
@@ -88,7 +83,7 @@ while the terminal is open. Keep this directory if recovery may be needed later.
 Each successfully activated release also retains its initial compatible state
 snapshot independently of later checkpoints.
 
-Recovery writes are serialized within the local bridge or supervisor. Temporary
+Recovery writes are serialized within the supervisor. Temporary
 files are flushed, synced, and closed before atomic replacement. Windows permission errors during
 replacement are retried for up to half a second. If saving still fails, the last
 saved file remains intact and the footer reports the failure; the supervisor stays
@@ -137,44 +132,55 @@ exports and large clipboard selections still materialize the requested text.
 Per-entry metadata and plugin-owned state also consume memory, so these bounds are
 not a fixed maximum for total process memory.
 
-For a native-guardian launch, pages live in
-`~/.raychat/live/LAUNCH_ID/text-pages/` under the configured storage home. Keep the
-entire launch directory for recovery: a checkpoint containing page references is
-not a standalone copy of its text. Closing a child chat, replacing a core, or
-closing a page store does not delete referenced pages. Other launch paths and
-standalone session use create a private `raychat-text-pages-*` temporary directory
-when no owning page directory was supplied. Those files are also retained after
-store closure. Remove them only when the associated run and its recovery state
-are no longer needed. Paging therefore exchanges retained text memory for disk
-storage; it does not impose a total disk quota or automatic retention policy.
+Interactive pages live in `~/.raychat/live/LAUNCH_ID/text-pages/` under the
+configured storage home. Keep the entire launch directory for recovery: a
+checkpoint containing page references is not a standalone copy of its text.
+Closing a child chat, replacing a core, or closing a page store does not delete
+referenced pages. Standalone sessions create a private `raychat-text-pages-*`
+temporary directory when no owning page directory was supplied. Those files are
+also retained after store closure. Remove them only when the associated run and
+its recovery state are no longer needed. Paging therefore exchanges retained text
+memory for disk storage; it does not impose a total disk quota or automatic
+retention policy.
 
-The current implementation budgets are:
+All tunable history and cache budgets are in the top-level `memory` section of
+[raychat.json](../raychat.json). `--config PATH` selects a complete configuration;
+existing custom configurations must add this section with all twelve fields.
+Change values before launching: a running supervisor freezes its configuration
+for updates and recovery. Restart normally with the edited configuration to use
+new values; recovering an existing launch retains its original settings and page
+limits.
 
-| Purpose | Value | Definition |
-| --- | --- | --- |
-| Conversation and transcript paging threshold | 4,096 characters | `session.py`, `ui/state.py` |
-| Input recall paging threshold | 1,024 characters | `ui/input_history.py` |
-| Maximum individual text page | 1,048,576 UTF-8 bytes (1 MiB) | `paged_text.py` |
-| Recent page deduplication index | 256 references; no retained text bodies | `paged_text.py` |
-| Largest cached context summary | 4,096 characters | `session.py` |
-| Context summary cache | 262,144 UTF-8 bytes and 512 entries, process-wide | `session.py` |
-| Page reads and checkpoint-file reads | 65,536-byte chunks | `paged_text.py`, `local_bridge.py` |
-| Page-store lock acquisition | 1 second | `paged_text.py` |
+| `memory` setting | Default | Effect |
+| --- | ---: | --- |
+| `message_page_min_chars` | 4096 | Page semantic conversation messages at this character count. |
+| `transcript_page_min_chars` | 4096 | Page displayed transcript bodies at this character count. |
+| `input_history_page_min_chars` | 1024 | Page recalled inputs at this character count. |
+| `input_history_max_items` | 256 | Maximum recalled inputs per chat, retaining at least one. |
+| `input_history_max_bytes` | 262144 | Recalled UTF-8 payload budget per chat, retaining at least one input. |
+| `text_page_max_bytes` | 1048576 | Maximum individual UTF-8 page size. |
+| `text_page_recent_refs` | 256 | Recent deduplication references; cached entries retain no text bodies. |
+| `text_page_read_chunk_bytes` | 65536 | Maximum chunk for page reads. |
+| `text_page_lock_timeout_seconds` | 1.0 | How long a page writer waits for the file lock. |
+| `summary_max_chars` | 4096 | Largest context summary eligible for caching. |
+| `summary_cache_max_bytes` | 262144 | Process-wide cached summary UTF-8 payload budget. |
+| `summary_cache_max_items` | 512 | Process-wide cached summary entry budget. |
 
-These implementation budgets are currently constants in the named modules, not
-settings in `raychat.json`. Cache byte accounting counts the text payload rather
-than Python object overhead. Evicting a cached summary or page reference does not
-delete the original message or its durable page. Conversation messages larger
-than one page remain inline; displayed transcript bodies larger than 1 MiB are
-rejected. The existing editor limit (`tui.input_max_chars`, default 16,384) and
-provider reply limit (`limits.max_reply_chars`, default 262,144) remain separate
-configuration settings.
+Values are positive integers except `text_page_lock_timeout_seconds`, which is a
+positive finite number. `text_page_recent_refs`, `summary_cache_max_bytes`, and
+`summary_cache_max_items` also accept zero to disable the corresponding cache.
+Unknown or missing fields are rejected. `text_page_max_bytes` must be at least
+four times the larger of `tui.input_max_chars` and `limits.max_reply_chars`, so the
+accepted input and reply limits fit even with four-byte Unicode characters.
 
-Input recall still retains at most 256 recent inputs and 256 KiB of UTF-8 text per
-chat, keeping at least one input. This pre-existing, documented recall eviction
-does not erase conversation history. The interactive transcript remains scrollable
-for the run; `limits.max_transcript_entries` is available to callers that explicitly
-construct a bounded `TuiState`, rather than limiting the normal interactive view.
+These settings bound individual components, not total process memory. Byte
+accounting counts text payload rather than Python object overhead. Evicting a
+cached summary or page reference does not delete the original message or its
+durable page. Semantic messages larger than a page remain inline; transcript
+bodies larger than a page are rejected. Input recall eviction does not erase
+conversation history. The interactive transcript remains scrollable for the run;
+`limits.max_transcript_entries` is available to callers that explicitly construct
+a bounded `TuiState`, rather than limiting the normal interactive view.
 
 Provider context compaction is separate from paging. The existing context policy
 fits selected recent turns and summaries into `chat.context_chars` and
@@ -185,54 +191,29 @@ lossless representation or remove the retained source messages.
 
 ## Private runtime environment and protocol values
 
-The following variables transfer ownership between launcher, guardian, core, and
-supervisor. They are private runtime metadata, not provider settings or supported
-user tuning options. Do not add them to an environment template or manually reuse
-them across launches. The launcher replaces inherited `RAYCHAT_GUARDIAN_*` values;
-adoption removes those values after consuming its launch metadata.
+These variables transfer launch ownership to the core. They are private runtime
+metadata, not user tuning options. Do not add them to an environment template or
+manually reuse them across launches.
 
 | Variable | Runtime value and owner |
 | --- | --- |
-| `RAYCHAT_GUARDIAN_DIR` | Private directory for this launch, allocated by the launcher |
-| `RAYCHAT_GUARDIAN_SOURCE` | Original source checkout path, supplied by the launcher |
-| `RAYCHAT_GUARDIAN_PYTHON` | Launcher's `sys.executable` |
-| `RAYCHAT_GUARDIAN_ENTRY` | Guardian entry script; switched to the verified release after preparation |
-| `RAYCHAT_GUARDIAN_TERMINAL` | JSON encoding of captured POSIX terminal attributes |
-| `RAYCHAT_GUARDIAN_SAVED_STTY` | Native `stty -g` restoration string, captured by the guardian |
-| `RAYCHAT_GUARDIAN_CORE_LOG` | `core.log` in the launch directory |
-| `RAYCHAT_GUARDIAN_CORE_PID` | Child PID owned by the guardian |
-| `RAYCHAT_GUARDIAN_CORE_EXIT_STATUS` | Waited child exit status, only after reaping |
-| `RAYCHAT_GUARDIAN_LAUNCH_SHA256` | Digest of authenticated launch metadata |
-| `RAYCHAT_GUARDIAN_RELEASE` | Verified release path supplied by the preparer |
-| `RAYCHAT_GUARDIAN_RELEASE_IDENTITY` | Verified release SHA-256 identity supplied by the preparer |
-| `RAYCHAT_PLUGIN_CODE_SHA256` | Verified plugin-code registry digest; consumed by the core before cache authorization |
-| `RAYCHAT_TEXT_PAGE_DIR` | Owning run's durable page directory; inherited across core replacement |
+| `RAYCHAT_PLUGIN_CODE_SHA256` | Verified plugin-code registry digest; consumed by the core before cache authorization. |
+| `RAYCHAT_TEXT_PAGE_DIR` | Supervisor-owned durable page directory, inherited across core replacement. |
 
-`RAYCHAT_CONFIG` already selects configuration internally; preparation points it
+`RAYCHAT_CONFIG` selects configuration internally; the supervisor points it
 at the frozen launch copy. `RAYCHAT_RECOVERY` is the existing supervisor recovery
 handoff marker. `RAYCHAT_HTTP_DEBUG_DIR` remains the existing documented HTTP
 capture option; moving its constant to `http_settings.py` does not add a new option.
 Provider credentials and model selection continue to use the documented provider
 environment variables.
 
-Wire and storage format constants remain fixed on both sides of the protocol:
-the guardian reads at most 250 raw bytes per packet, escapes them to at most 500
-bytes, and sends `I` plus eight decimal length digits and `;` before the body.
-DLE escapes encode DLE, newline, and NUL. More than 65,536 queued encoded bytes
-triggers supervisor promotion while preserving the last bounded read. Adoption
-accepts at most 131,072 encoded bytes from each saved pending-input file. Native
-input polling uses 20 ms; preparation waits up to 10 seconds with 5 ms polling
-for the guardian acknowledgment; adoption uses a 10-second barrier with 10 ms
-polling. These values require coordinated guardian/core changes, not independent
-JSON overrides.
-
 Text pages use `RAYCHAT-TEXT-PAGES-1`, `RAYPAGE1`, and `PAGE-END` markers and
 version-1 `$raychat_text_page` references. Plugin bytecode uses the versioned
 `_plugin_code_registry.json` and hashed `_plugin_code_data` payloads, authorized
 only against a verified release; one compiled payload is bounded to 128 MiB.
 These are integrity/compatibility rules, not memory targets. The existing 64 MiB
-wire-message limit and 1 MiB clipboard limit are unchanged. New source filenames
-in `raychat.json`'s `release.source_files` are packaging inventory, not new settings.
+wire-message limit is unchanged. `release.source_files` is packaging inventory,
+separate from the `memory` settings above.
 
 ## Validation and activation
 

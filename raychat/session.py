@@ -41,7 +41,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypedDict, runtime_checkable
 
-from raychat.checkpoint_stream import JsonArray, JsonObject
 from raychat.configuration import SETTINGS
 from raychat.service_contracts import CONTEXT_FACTORY
 
@@ -139,10 +138,10 @@ class _CoreReview(Protocol):
         ...
 
 
-_PAGE_MIN_CHARS = 4096
-_SUMMARY_MAX_CHARS = 4096
-_SUMMARY_CACHE_MAX_BYTES = 256 * 1024
-_SUMMARY_CACHE_MAX_ITEMS = 512
+_PAGE_MIN_CHARS = SETTINGS.memory.message_page_min_chars
+_SUMMARY_MAX_CHARS = SETTINGS.memory.summary_max_chars
+_SUMMARY_CACHE_MAX_BYTES = SETTINGS.memory.summary_cache_max_bytes
+_SUMMARY_CACHE_MAX_ITEMS = SETTINGS.memory.summary_cache_max_items
 _SUMMARY_CACHE_LOCK = threading.RLock()
 _SUMMARY_CACHE_BYTES = 0
 _SUMMARY_CACHE: OrderedDict[
@@ -192,7 +191,11 @@ class _StoredMessage(_WeakReferenceable):
         with _SUMMARY_CACHE_LOCK:
             object.__setattr__(self, "_summary_key", key)
             object.__setattr__(self, "_summary_length", len(summary))
-        if len(summary) <= _SUMMARY_MAX_CHARS:
+        if (
+            _SUMMARY_CACHE_MAX_BYTES > 0
+            and _SUMMARY_CACHE_MAX_ITEMS > 0
+            and len(summary) <= _SUMMARY_MAX_CHARS
+        ):
             size = len(summary.encode("utf-8"))
             if size <= _SUMMARY_CACHE_MAX_BYTES:
                 with _SUMMARY_CACHE_LOCK:
@@ -234,7 +237,7 @@ def _store_message(message: SessionMessage) -> _StoredMessage:
     stored: str | TextPageRef = (
         store_text(content)
         if len(content) >= _PAGE_MIN_CHARS
-        and len(content.encode("utf-8")) <= 1024 * 1024
+        and len(content.encode("utf-8")) <= SETTINGS.memory.text_page_max_bytes
         else content
     )
     return _StoredMessage(message.role, stored, message.kind, message.prompt_id)
@@ -584,30 +587,6 @@ class AgentSession:
             "state": copy.deepcopy(self.runtime.state),
             "page_stores": stores,
         }
-
-    def stream_checkpoint(self) -> JsonObject:
-        """Encode immutable records individually during an idle checkpoint.
-
-        Returns
-        -------
-        JsonObject
-            A synchronous checkpoint retaining only semantic record pointers.
-
-        """
-        history = tuple(self._history)
-
-        def members() -> Iterator[tuple[str, object]]:
-            stores: dict[str, object] = {}
-            yield (
-                "history",
-                JsonArray(
-                    lambda: (_checkpoint_record(item, stores) for item in history),
-                ),
-            )
-            yield "state", copy.deepcopy(self.runtime.state)
-            yield "page_stores", stores
-
-        return JsonObject(members)
 
     def validate_context(self) -> None:
         """Check that the current prompt fits the active context policy."""

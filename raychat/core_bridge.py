@@ -95,17 +95,6 @@ class CoreBridge:
                 self.writer.write(data)
                 self.writer.flush()
 
-    def release_checkpoint_snapshot(self) -> None:
-        """Allow bridges to release decoded state before a replacement capture."""
-
-    def restore_checkpoint_snapshot(self) -> None:
-        """Restore a released snapshot when replacement capture fails."""
-
-    @property
-    def stream_checkpoint_views(self) -> bool:
-        """Whether periodic checkpoints can capture and consume one view at a time."""
-        return False
-
     def poll(self) -> None:
         """Apply all received controls without dispatching application work."""
         while True:

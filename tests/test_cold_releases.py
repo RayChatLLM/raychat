@@ -33,15 +33,15 @@ def _source(root: Path) -> Path:
 class ColdReleaseTests(TypedTestCase):
     """Keep fixed evaluators and executable caches independent of supplied bytes."""
 
-    def test_precreated_guardian_directory_can_prepare_initial_release(self) -> None:
-        """The production guardian owns the directory before invoking preparation."""
+    def test_precreated_release_directory_can_prepare_initial_release(self) -> None:
+        """Preparation preserves data in an existing release directory."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.addCleanup(cleanup_tree, root)
             source = _source(root)
-            directory = root / "guardian"
+            directory = root / "releases"
             directory.mkdir(mode=0o700)
-            marker = directory / "guardian-owned"
+            marker = directory / "existing-data"
             marker.write_bytes(b"retained")
             manager, release = Releases.cold(source, directory)
             self.equal(manager.directory, directory.resolve())

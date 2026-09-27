@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING
 
+from raychat.configuration import SETTINGS
 from raychat.handoff import editor_parts, editor_state, optional_index
 from raychat.paged_text import TextPageRef, export_ref, parse_ref, read_ref, store_text
 from raychat.validation import array_field, configuration_fields, text_field
@@ -12,9 +13,9 @@ from raychat.validation import array_field, configuration_fields, text_field
 if TYPE_CHECKING:
     from .terminal import LineEditor
 
-_MAX_ITEMS = 256
-_MAX_BYTES = 256 * 1024
-_PAGE_MIN_CHARS = 1024
+_MAX_ITEMS = SETTINGS.memory.input_history_max_items
+_MAX_BYTES = SETTINGS.memory.input_history_max_bytes
+_PAGE_MIN_CHARS = SETTINGS.memory.input_history_page_min_chars
 
 
 def _text(item: str | TextPageRef) -> str:

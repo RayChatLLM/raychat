@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from raychat.checkpoint_stream import HandoffExporter
 from raychat.event_types import PLUGINS_RELOADED
 from raychat.sdk import (
     HTTP_PROVIDER,
@@ -156,10 +155,7 @@ class _Registration:
         api.on_close(self.sessions.close, on_reload=False)
         api.on_reload(lambda _ctx: self.sessions.export(), self.restore)
         api.on_handoff(
-            HandoffExporter(
-                lambda _ctx: self.sessions.export_handoff(),
-                lambda _ctx: self.sessions.stream_checkpoint(),
-            ),
+            lambda _ctx: self.sessions.export_handoff(),
             lambda value, _ctx: self.sessions.restore_handoff(value, self.coordinator),
         )
         api.on(PLUGINS_RELOADED, self.reconfigure)

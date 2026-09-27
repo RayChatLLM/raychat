@@ -8,9 +8,7 @@ import uuid
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from raychat.checkpoint_stream import JsonArray, JsonObject
-from raychat.checkpoint_stream import snapshot as stream_snapshot
-from raychat.handoff import export_plugins, restore_plugins, stream_plugins
+from raychat.handoff import export_plugins, restore_plugins
 from raychat.packages import Manifest, dependency_order
 from raychat.plugins import Runtime
 from raychat.sdk import checkpoint_snapshot
@@ -27,7 +25,7 @@ from .configuration import load as load_settings
 from .lifecycle import FailureCapture
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from raychat.plugin_sources import PluginSources
@@ -148,17 +146,6 @@ class ProcessConversation:
 
         """
         return self._session.export_checkpoint()
-
-    def stream_checkpoint(self) -> JsonObject:
-        """Stream the local semantic checkpoint without changing subprocess input.
-
-        Returns
-        -------
-        JsonObject
-            A synchronously consumed semantic checkpoint.
-
-        """
-        return self._session.stream_checkpoint()
 
     def restore_snapshot(self, snapshot: Mapping[str, object]) -> None:
         """Restore checked history and plugin state into the local owner."""
@@ -363,45 +350,6 @@ class AgentSessions:
                 else None,
             })
         return {"focused": self.focused_id, "children": children}
-
-    def stream_checkpoint(self) -> JsonObject:
-        """Stage one owned child at a time without changing ordinary handoffs.
-
-        Returns
-        -------
-        JsonObject
-            A synchronous child catalog with stable session membership.
-
-        """
-        entries = tuple(self.entries())
-        focused = self.focused_id
-
-        def children() -> Iterator[object]:
-            for entry in entries:
-                if not entry.owned:
-                    continue
-                if not entry.worker.quiescent:
-                    message = "Child work has not finished."
-                    raise RuntimeError(message)
-                session = entry.worker.session
-                runtime: object = getattr(session, "runtime", None)
-                child: dict[str, object] = {
-                    "id": entry.id,
-                    "name": entry.name,
-                    "parent": entry.parent_id,
-                    "profile": entry.profile,
-                    "task": entry.task,
-                    "status": entry.status,
-                    "snapshot": None if session is None else stream_snapshot(session),
-                    "resources": stream_plugins(runtime)
-                    if isinstance(runtime, Runtime)
-                    else None,
-                }
-                yield JsonObject(child.items)
-
-        return JsonObject(
-            lambda: (("focused", focused), ("children", JsonArray(children))),
-        )
 
     def restore_handoff(
         self,

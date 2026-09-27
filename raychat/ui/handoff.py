@@ -4,22 +4,17 @@ from __future__ import annotations
 
 import base64
 import copy
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast
 
-from raychat.checkpoint_stream import PluginFragment
-from raychat.checkpoint_stream import snapshot as stream_snapshot
 from raychat.handoff import (
     document,
     editor_parts,
     editor_state,
     export_plugins,
     restore_plugins,
-    stream_plugins,
 )
 from raychat.sdk import checkpoint_snapshot
 from raychat.storage import SessionStore
-from raychat.type_support import override
 from raychat.validation import (
     array_field,
     boolean_field,
@@ -34,30 +29,9 @@ from .selection import TextSelection
 from .state import _PrefixTranscriptRows
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from .controller import ChatView, _TuiController
 
 _POINT_DIMENSIONS = 2
-
-
-class _DeferredViews(Mapping[str, object]):
-    """Capture one owned view at a time during the immediate synchronous send."""
-
-    def __init__(self, views: Mapping[str, ChatView]) -> None:
-        self._owners = dict(views)
-
-    @override
-    def __getitem__(self, key: str) -> object:
-        return capture_view(self._owners[key], compact_state=True)
-
-    @override
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._owners)
-
-    @override
-    def __len__(self) -> int:
-        return len(self._owners)
 
 
 def _point(value: object, *, minimum: int | None = 0) -> tuple[int, int] | None:
@@ -191,13 +165,8 @@ def capture(
     controller: _TuiController,
     *,
     strict: bool = True,
-    defer_views: bool = False,
 ) -> dict[str, object]:
     """Capture all idle conversations, drafts, queue transactions and navigation.
-
-    Deferred views retain their owners, not snapshots; plugin values are also
-    borrowed until serialization. The caller must consume them synchronously
-    before the frontend, workers or plugin resources can change.
 
     Returns
     -------
@@ -217,35 +186,27 @@ def capture(
         message = "This persistence backend has no process writer handoff."
         raise ValueError(message)
     snapshot = (
-        (stream_snapshot(root) if defer_views else checkpoint_snapshot(root))
+        checkpoint_snapshot(root)
         if root is not None
         else store.snapshot()
         if store is not None
         else {"history": [], "state": copy.deepcopy(resources.runtime.state)}
     )
     try:
-        plugins: object = (
-            PluginFragment(lambda: stream_plugins(resources.runtime), strict)
-            if defer_views
-            else export_plugins(resources.runtime)
-        )
+        plugins: object = export_plugins(resources.runtime)
     except Exception as error:
         if strict:
             raise
         plugins = {"unavailable": str(error)}
     picker = controller.picker
     live = resources.live
-    # Deferred views create containers on access so the transport can release
-    # one before the next. Borrowed plugin values are serialized without mutation.
     return {
         "version": VERSION,
         "session": snapshot,
         "store": writer(controller),
         "plugins": plugins,
         "sources": copy.deepcopy(resources.runtime.export_sources()),
-        "views": _DeferredViews(controller.views)
-        if defer_views
-        else {
+        "views": {
             key: capture_view(value, compact_state=True)
             for key, value in controller.views.items()
         },

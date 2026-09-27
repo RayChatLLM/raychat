@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .configuration import SETTINGS
 from .filesystem import FileLock, open_journal
 from .validation import array_field, configuration_fields, text_field
 
@@ -40,8 +41,8 @@ _PAGE_MAGIC = b"RAYPAGE1"
 _COMMIT = b"PAGE-END"
 _FRAME = struct.Struct(">8sQ32s")
 _REFERENCE_RANGE = struct.Struct(">QQQQ")
-_CHUNK_BYTES = 64 * 1024
-_MAX_PAGE_BYTES = 1024 * 1024
+_CHUNK_BYTES = SETTINGS.memory.text_page_read_chunk_bytes
+_MAX_PAGE_BYTES = SETTINGS.memory.text_page_max_bytes
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -231,7 +232,7 @@ class TextPageStore:
             message = "Text page names must be simple local filenames."
             raise ValueError(message)
         if not 0 < _integer(max_page_bytes) <= _MAX_PAGE_BYTES:
-            message = "Text page bound must be between 1 byte and 1 MiB."
+            message = f"Text page bound must be between 1 and {_MAX_PAGE_BYTES} bytes."
             raise ValueError(message)
         if directory.is_symlink():
             message = "Text page directory cannot be a symbolic link."
@@ -269,7 +270,10 @@ class TextPageStore:
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 message = "Text page lock must be a private regular file."
                 raise ValueError(message)
-        return FileLock(self._lock_path, timeout=1)
+        return FileLock(
+            self._lock_path,
+            timeout=SETTINGS.memory.text_page_lock_timeout_seconds,
+        )
 
     def _open(self) -> BinaryIO:
         try:
@@ -407,7 +411,7 @@ class TextPageStore:
             raise ValueError(message)
 
     def read_range(self, reference: TextPageRef, start: int, length: int) -> bytes:
-        """Return at most 64 KiB after verifying the entire referenced page.
+        """Return at most the configured chunk size after verifying the entire page.
 
         Byte offsets may split a UTF-8 character; use read() to decode a whole page.
         Verification streams through the page while retaining only the range.
@@ -480,7 +484,7 @@ class TextPageStore:
 
         """
         if not 0 < _integer(chunk_bytes) <= _CHUNK_BYTES:
-            message = "Text page chunks must be between 1 byte and 64 KiB."
+            message = f"Text page chunks must be between 1 and {_CHUNK_BYTES} bytes."
             raise ValueError(message)
         if reference.byte_length <= 0:
             self.read_range(reference, 0, 0)
@@ -542,7 +546,7 @@ class _DefaultOwner:
 
 
 _DEFAULT = _DefaultOwner()
-_RECENT_PAGES = 256
+_RECENT_PAGES = SETTINGS.memory.text_page_recent_refs
 
 
 def json_size(value: str | TextPageRef) -> int:

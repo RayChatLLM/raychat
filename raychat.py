@@ -23,17 +23,9 @@ class _Recovery(Protocol):
     def __call__(self) -> None: ...
 
 
-@runtime_checkable
-class _Available(Protocol):
-    def __call__(self) -> bool: ...
-
-
 def _module(*, interactive: bool) -> str:
     if not interactive:
         return "raychat.entrypoint"
-    available: object = importlib.import_module("raychat_bootstrap.guardian").available
-    if isinstance(available, _Available) and available():
-        return "raychat_bootstrap.guardian"
     return "raychat_bootstrap.supervisor"
 
 

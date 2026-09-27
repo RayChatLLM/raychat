@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import io
 import queue
-import tempfile
-import weakref
-from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
-from raychat.checkpoint_stream import JsonObject, materialize
 from raychat.core_bridge import CoreBridge
-from raychat.local_bridge import LocalBridge
 from raychat.type_support import override
 from raychat.ui import handoff
 from raychat.ui.controller import ChatView, _TuiController
@@ -25,10 +20,6 @@ from tests.tui_support import resources_fixture
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-
-class _CaptureWitness:
-    """Make a captured dictionary's lifetime observable through its owned value."""
 
 
 class DeferredViewHandoffTests(TypedTestCase):
@@ -147,80 +138,17 @@ class DeferredViewHandoffTests(TypedTestCase):
         selection.reconcile(owner.state.selection_rows(31), 31)
         self.require(selection.anchor is None)
 
-    def test_deferred_capture_reads_one_key_and_keeps_no_result(
-        self,
-    ) -> None:
-        """Iteration is cheap and a discarded captured dictionary can be collected."""
-        calls: list[ChatView] = []
-        references: list[weakref.ReferenceType[_CaptureWitness]] = []
-
-        def capture(owner: ChatView, *, compact_state: bool) -> dict[str, object]:
-            self.require(compact_state)
-            calls.append(owner)
-            witness = _CaptureWitness()
-            references.append(weakref.ref(witness))
-            return {"editor": {"text": owner.editor.text}, "witness": witness}
-
-        with mock.patch.object(handoff, "capture_view", side_effect=capture):
-            saved = handoff.capture(self.controller, defer_views=True)
-            views = configuration_fields(saved["views"], "views")
-            self.equal(list(views), ["root", "child"])
-            self.equal(len(views), 2)
-            self.equal(calls, [])
-            with self.rejected(KeyError):
-                _ = views["missing"]
-            self.equal(calls, [])
-            captured = views["child"]
-            self.equal(calls, [self.controller.views["child"]])
-            self.require(references[-1]() is not None)
-            del captured
-            self.require(references[-1]() is None)
-            _ = views["child"]
-            self.equal(len(calls), 2)
-
-    def test_deferred_values_match_complete_default_wire_values(self) -> None:
-        """Deferred views preserve transcript, drafts, queue and recall on the wire."""
-        expected = handoff.capture(self.controller)
-        actual = handoff.capture(self.controller, defer_views=True)
-        views = configuration_fields(actual["views"], "views")
-        actual["views"] = dict(views.items())
-        self.equal(materialize(JsonObject(actual.items)), decode(encode(expected)))
-
-    def test_stable_owner_index_returns_independent_view_containers(
-        self,
-    ) -> None:
-        """The owner index stays stable and each view capture owns its containers."""
-        saved = handoff.capture(self.controller, defer_views=True)
-        views = configuration_fields(saved["views"], "views")
-        original = self.controller.views["root"]
-        self.controller.views.clear()
-        self.equal(list(views), ["root", "child"])
-        captured = configuration_fields(views["root"], "view")
-        original.editor.set_text("later draft")
-        self.equal(
-            configuration_fields(captured["editor"], "editor")["text"],
-            "root draft 雪",
-        )
-        latest = configuration_fields(views["root"], "view")
-        self.equal(
-            configuration_fields(latest["editor"], "editor")["text"],
-            "later draft",
-        )
-
     def test_view_capture_failure_propagates_when_requested(self) -> None:
-        """No lazy error is hidden or converted into an apparently valid checkpoint."""
-        with mock.patch.object(
-            handoff,
-            "capture_view",
-            side_effect=ValueError("invalid view"),
+        """A view capture error prevents publication of an incomplete handoff."""
+        with (
+            mock.patch.object(
+                handoff,
+                "capture_view",
+                side_effect=ValueError("invalid view"),
+            ),
+            self.rejected(ValueError, "invalid view"),
         ):
-            saved = handoff.capture(self.controller, defer_views=True)
-            views = configuration_fields(saved["views"], "views")
-            self.equal(list(views), ["root", "child"])
-            with self.rejected(ValueError, "invalid view"):
-                _ = views["root"]
-            with self.rejected(ValueError, "invalid view"):
-                handoff.capture(self.controller)
+            handoff.capture(self.controller)
 
     def test_partial_transport_write_escapes_checkpoint_and_handoff(self) -> None:
         """A partial protocol record must stop the core rather than permit reuse."""
@@ -277,82 +205,3 @@ class DeferredViewHandoffTests(TypedTestCase):
             {"kind": "capture_failed", "error": "capture"},
         )
         self.require(self.controller.handoff_saved)
-
-    def test_local_capture_failure_and_failed_commit_preserve_durable_state(
-        self,
-    ) -> None:
-        """Deferred staging and storage failures cannot discard the prior save."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            bridge = LocalBridge(
-                io.BytesIO(),
-                io.BytesIO(),
-                directory=root,
-                release_path=root / "release",
-                release_identity="a" * 64,
-                argv=[],
-            )
-            bridge.thread.join()
-            bridge.send("ready", state={"previous": "durable"})
-            self.controller.resources.live = bridge
-            previous = bridge.latest
-            saved = (root / "recovery.json").read_bytes()
-            for target, error in (
-                ("raychat.ui.handoff.capture_view", ValueError("invalid view")),
-                ("raychat.local_bridge.os.fsync", OSError("disk")),
-            ):
-                with self.subTest(target=target), mock.patch(target, side_effect=error):
-                    self.controller.checkpoint_time = 0
-                    self.controller._checkpoint_handoff()
-                self.require(bridge.latest is previous)
-                self.equal((root / "recovery.json").read_bytes(), saved)
-            self.controller.checkpoint_time = 0
-            self.controller._checkpoint_handoff()
-            self.require(bridge.latest is not previous)
-            self.require((root / "recovery.json").read_bytes() != saved)
-            bridge.latest = None
-
-    def test_promotion_during_capture_cannot_hide_partial_transport_failure(
-        self,
-    ) -> None:
-        """A deferred local capture can become a remote send before publication."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            writer = io.BytesIO()
-            bridge = LocalBridge(
-                io.BytesIO(),
-                writer,
-                directory=root,
-                release_path=root / "release",
-                release_identity="a" * 64,
-                argv=[],
-            )
-            bridge.thread.join()
-            bridge.active = True
-            self.controller.resources.live = bridge
-            capture = handoff.capture
-            write = writer.write
-
-            def promote_before_send(
-                controller: _TuiController,
-                *,
-                strict: bool,
-                defer_views: bool,
-            ) -> dict[str, object]:
-                self.require(defer_views)
-                saved = capture(controller, strict=strict, defer_views=defer_views)
-                bridge.remote = True
-                return saved
-
-            def fail_after_prefix(data: bytes) -> int:
-                write(data[:1])
-                message = "promoted pipe write"
-                raise OSError(message)
-
-            with (
-                mock.patch.object(handoff, "capture", side_effect=promote_before_send),
-                mock.patch.object(writer, "write", side_effect=fail_after_prefix),
-                self.rejected(OSError, "promoted pipe write"),
-            ):
-                self.controller._checkpoint_handoff()
-            self.equal(writer.getvalue(), b"{")

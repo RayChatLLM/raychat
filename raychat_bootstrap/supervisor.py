@@ -39,8 +39,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from typing import BinaryIO, Literal
 
-    from typing_extensions import Self
-
 
 class CoreProcess(Protocol):
     """Expose process ownership for spawned and already-running child cores."""
@@ -144,26 +142,6 @@ class Supervisor:
         self.config = releases.directory / "configuration.json"
         self.safe_config = releases.directory / "safe-configuration.json"
 
-    @classmethod
-    def from_prepared(
-        cls,
-        releases: Releases,
-        initial: Release,
-        argv: Sequence[str],
-        terminal: TerminalSession,
-    ) -> Self:
-        """Reuse a prepared release and configuration without acquiring a writer.
-
-        Returns
-        -------
-        Self
-            The supervisor before any child or terminal ownership is adopted.
-
-        """
-        supervisor = cls.__new__(cls)
-        cls._initialize(supervisor, releases, initial, argv, terminal)
-        return supervisor
-
     def _configure(self, source: Path) -> None:
         selected = Path(os.environ.get("RAYCHAT_CONFIG", source / "raychat.json"))
         raw_configuration = read_regular(selected, MAX_MESSAGE + 1)
@@ -229,26 +207,6 @@ class Supervisor:
                 "retained checkpoints",
             ).items()
         }
-
-    def adopt(self, core: Core, saved: Mapping[str, object]) -> None:
-        """Attach a live child only after local persistence relinquishes ownership."""
-        self._restore_metadata(saved)
-        self.current = core
-        self.children.append(core)
-        core.state = self.last_state
-        core.ready.set()
-        self.routing = True
-
-    async def serve_adopted(self) -> int:
-        """Run existing request and recovery handling for an adopted terminal.
-
-        Returns
-        -------
-        int
-            The application's final exit status.
-
-        """
-        return await self._loop(launch=False)
 
     async def _record(self) -> bool:
         async with self.persistence_lock:
@@ -393,6 +351,7 @@ class Supervisor:
         environment = {
             **os.environ,
             "RAYCHAT_CONFIG": str(self.safe_config if safe else self.config),
+            "RAYCHAT_TEXT_PAGE_DIR": str(self.releases.directory / "text-pages"),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         plugin_code = await run_filesystem_task(partial(cache_identity, release))
@@ -1013,9 +972,9 @@ class Supervisor:
                 self.current.expected_exit = True
             self.exit_code = 0
 
-    async def _loop(self, *, launch: bool = True) -> int:
+    async def _loop(self) -> int:
         await self._record()
-        startup = asyncio.create_task(self._start()) if launch else None
+        startup = asyncio.create_task(self._start())
         try:
             while self.exit_code is None:
                 await self._input()
@@ -1038,10 +997,9 @@ class Supervisor:
                 await asyncio.sleep(0.01)
             return self.exit_code
         finally:
-            if startup is not None:
-                startup.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await startup
+            startup.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await startup
             if self.transition is not None:
                 self.transition.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

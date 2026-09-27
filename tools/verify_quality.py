@@ -60,17 +60,6 @@ _RUFF_FILE_RULE_EXCEPTIONS = {
     "raychat/plugin_bytecode.py": "S302",
     # Derived summary memo fields and global LRU accounting share one lock.
     "raychat/session.py": "PLC2801,PLW0603",
-    # Checkpoint backing files follow shared field ownership, and one locked
-    # router coordinates local durability, promotion and task acknowledgments.
-    "raychat/local_bridge.py": "SIM115,PLW0717,C901,PLR0913",
-    # Fixed argv exec transfers interpreter/native guardian ownership.
-    "raychat_bootstrap/guardian.py": "S606",
-    # Adoption installs signal cleanup before importing application modules.
-    "raychat_bootstrap/guardian_entry.py": "PLC0415,S606,E402",
-    # Real PTY probes explicitly own processes, descriptors and cleanup phases.
-    "tests/test_guardian_signals.py": "PLR0914,PLR0915",
-    # Standalone sessions need fragment types without importing the TUI codec.
-    "raychat/checkpoint_stream.py": "PLC0415",
     # Native Windows bindings are not needed by POSIX terminals.
     "raychat/ui/terminal_backend.py": "PLC0415",
     # HTTP implementations load only when a network operation needs them.
@@ -94,10 +83,8 @@ _RUFF_FILE_RULE_EXCEPTIONS = {
     # Regression tests inspect storage ownership and immutable row snapshots.
     "tests/test_tui_state.py": "PLR0904,SLF001",
     "tests/test_deferred_view_handoff.py": "PLC2701,SLF001",
-    "tests/test_local_bridge.py": "SLF001,PLR0904",
     # Close the process-owned page store before removing test temporary roots.
     "tests/test_paged_text.py": "SLF001",
-    "tests/test_checkpoint_stream.py": "SLF001",
     # Seeded unit fixtures reproduce oracle results; acceptance stress uses urandom.
     "tests/test_input_history.py": "S311,SLF001",
     "tests/test_paged_sessions.py": "PLC2701,SLF001,C901,S311",

@@ -21,17 +21,6 @@ ignore = ["missing-copyright-notice"]
 "raychat/plugin_bytecode.py" = ["suspicious-marshal-usage"]
 # Derived summary memo fields and global LRU accounting share one lock.
 "raychat/session.py" = ["unnecessary-dunder-call", "global-statement"]
-# Shared checkpoint files follow field ownership; one locked router coordinates
-# durability, promotion and acknowledgments with explicit inherited handles.
-"raychat/local_bridge.py" = ["open-file-with-context-handler", "too-many-statements-in-try-clause", "complex-structure", "too-many-arguments"]
-# A standalone session needs fragment types, but not the TUI transport codec.
-"raychat/checkpoint_stream.py" = ["import-outside-top-level"]
-# Guardian exec replaces its process with a fixed interpreter/script argv.
-"raychat_bootstrap/guardian.py" = ["start-process-with-no-shell"]
-# Preparation defers the supervisor; adoption installs signal cleanup before application imports.
-"raychat_bootstrap/guardian_entry.py" = ["import-outside-top-level", "start-process-with-no-shell", "module-import-not-at-top-of-file"]
-# Real PTY signal probes explicitly own each process, descriptor and cleanup phase.
-"tests/test_guardian_signals.py" = ["too-many-locals", "too-many-statements"]
 # HTTP implementations load only when a network operation needs them.
 "raychat/plugin_manager.py" = ["import-outside-top-level"]
 "plugins/chat_completions/client.py" = ["import-outside-top-level"]
@@ -52,10 +41,8 @@ ignore = ["missing-copyright-notice"]
 "tests/test_tui_state.py" = ["too-many-public-methods", "private-member-access"]
 # Regression tests inspect storage ownership and immutable row snapshots.
 "tests/test_deferred_view_handoff.py" = ["import-private-name", "private-member-access"]
-"tests/test_local_bridge.py" = ["private-member-access", "too-many-public-methods"]
 # Tests close the process-owned page store before removing their temporary roots.
 "tests/test_paged_text.py" = ["private-member-access"]
-"tests/test_checkpoint_stream.py" = ["private-member-access"]
 # Seeded unit fixtures reproduce oracle results; acceptance stress uses urandom.
 "tests/test_input_history.py" = ["suspicious-non-cryptographic-random-usage", "private-member-access"]
 "tests/test_paged_sessions.py" = ["import-private-name", "private-member-access", "complex-structure", "suspicious-non-cryptographic-random-usage"]

@@ -88,8 +88,8 @@ _ENTRY_KINDS = frozenset(
 )
 _THINKING_PREVIEW_CELLS = 100
 _MAX_FAILURE_BODY_CHARS = 500
-_PAGED_BODY_CHARS = 4096
-_MAX_PAGED_BODY_BYTES = 1024 * 1024
+_PAGED_BODY_CHARS = SETTINGS.memory.transcript_page_min_chars
+_MAX_PAGED_BODY_BYTES = SETTINGS.memory.text_page_max_bytes
 
 
 def _is_bool(value: object) -> TypeGuard[bool]:
@@ -1309,7 +1309,9 @@ def _store_entry(
         return entry
     raw = entry.body.encode("utf-8")
     if len(raw) > _MAX_PAGED_BODY_BYTES:
-        message = "Transcript body exceeds the 1 MiB paging limit."
+        message = (
+            f"Transcript body exceeds the {_MAX_PAGED_BODY_BYTES}-byte paging limit."
+        )
         raise ValueError(message)
     reference = (
         prepared

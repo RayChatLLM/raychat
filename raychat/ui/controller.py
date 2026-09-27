@@ -2936,28 +2936,12 @@ class _TuiController:
         if not self.handoff_quiescent():
             return
         self.checkpoint_time = time.monotonic()
-        live.release_checkpoint_snapshot()
         try:
-            saved = handoff.capture(
-                self,
-                strict=False,
-                defer_views=live.stream_checkpoint_views,
-            )
+            saved = handoff.capture(self, strict=False)
         except Exception:
-            live.restore_checkpoint_snapshot()
             _LOGGER.debug("Core recovery checkpoint failed", exc_info=True)
             return
-        try:
-            # handoff.capture returns freshly owned containers; the local bridge
-            # can release decoded fields as it freezes the checkpoint to bytes.
-            live.send("checkpoint", state=saved, _owned_state=True)
-        except Exception:
-            # Local staging is atomic. A transport failure can leave a partial
-            # message, including if promotion happened after capture began.
-            if not live.stream_checkpoint_views:
-                raise
-            live.restore_checkpoint_snapshot()
-            _LOGGER.debug("Core recovery checkpoint failed", exc_info=True)
+        live.send("checkpoint", state=saved)
 
     def _process_handoff(self) -> bool:
         live = self.resources.live
