@@ -351,7 +351,9 @@ class Supervisor:
         environment = {
             **os.environ,
             "RAYCHAT_CONFIG": str(self.safe_config if safe else self.config),
-            "RAYCHAT_TEXT_PAGE_DIR": str(self.releases.directory / "text-pages"),
+            # External recovery creates a new supervisor directory, but the
+            # verified launch release still identifies the original page owner.
+            "RAYCHAT_TEXT_PAGE_DIR": str(self.initial.path.parent / "text-pages"),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         plugin_code = await run_filesystem_task(partial(cache_identity, release))

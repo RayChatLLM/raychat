@@ -917,32 +917,27 @@ class BootstrapPathTests(TypedTestCase):
             f"environment/{name}.env": b"RAYCHAT_MODEL='fixed-template'\n"
             for name in ("linux", "macos", "windows")
         }
-        for cold in (False, True):
-            with self.subTest(cold=cold), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                source = root / "source"
-                (source / "raychat").mkdir(parents=True)
-                (source / "raychat" / "__init__.py").write_bytes(b"")
-                (source / "environment").mkdir()
-                (source / "environment" / ".env").write_bytes(b"private settings")
-                for name, data in expected.items():
-                    (source / name).write_bytes(data)
-                (source / "raychat.json").write_bytes(
-                    encode({"release": {"source_files": list(expected)}}),
-                )
-                if cold:
-                    manager, initial = Releases.cold(source, root / "releases")
-                    captured = initial.path
-                else:
-                    manager = Releases(source, root / "releases")
-                    captured = manager.capture(source)
-                with mock.patch.object(build_portable, "SOURCE_FILES", tuple(expected)):
-                    self.equal(build_portable.source_data(captured), expected)
-                    self.require(not (captured / "environment" / ".env").exists())
-                    for name in expected:
-                        (source / name).write_bytes(b"changed candidate template\n")
-                    later = manager.capture(source)
-                    self.equal(build_portable.source_data(later), expected)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            (source / "raychat").mkdir(parents=True)
+            (source / "raychat" / "__init__.py").write_bytes(b"")
+            (source / "environment").mkdir()
+            (source / "environment" / ".env").write_bytes(b"private settings")
+            for name, data in expected.items():
+                (source / name).write_bytes(data)
+            (source / "raychat.json").write_bytes(
+                encode({"release": {"source_files": list(expected)}}),
+            )
+            manager = Releases(source, root / "releases")
+            captured = manager.capture(source)
+            with mock.patch.object(build_portable, "SOURCE_FILES", tuple(expected)):
+                self.equal(build_portable.source_data(captured), expected)
+                self.require(not (captured / "environment" / ".env").exists())
+                for name in expected:
+                    (source / name).write_bytes(b"changed candidate template\n")
+                later = manager.capture(source)
+                self.equal(build_portable.source_data(later), expected)
 
     def test_live_update_fixture_includes_environment_templates(self) -> None:
         """Real-TUI update sources retain the portable environment directory."""

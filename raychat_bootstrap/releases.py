@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import compileall
 import hashlib
 import logging
 import os
-import py_compile
 import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -28,7 +25,6 @@ from raychat.filesystem import (
     remove_tree,
     run_filesystem_task,
 )
-from raychat.plugin_bytecode import build_cache
 
 from .wire import MAX_MESSAGE, decode, encode, fields
 
@@ -359,33 +355,6 @@ def _run_compiler(directories: list[str]) -> None:
     asyncio.run(_compile_paths(directories))
 
 
-def _compile_cold_runtime(root: Path) -> None:
-    """Build authenticated bytecode before exec discards compiler allocations.
-
-    Raises
-    ------
-    RuntimeError
-        A plugin bytecode cache cannot be built.
-
-    """
-    build_cache(root)
-    for name in ("raychat", "raychat_bootstrap"):
-        directory = root / name
-        if not directory.is_dir():
-            continue
-        for path, info in reversed(_entries(directory)):
-            if path.name == "__pycache__" and stat.S_ISDIR(info.st_mode):
-                remove_tree(path)
-        if not compileall.compile_dir(
-            directory,
-            force=True,
-            quiet=1,
-            invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
-        ):
-            message = "Runtime bytecode compilation failed."
-            raise RuntimeError(message)
-
-
 async def _compile_paths(directories: list[str]) -> None:
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -501,71 +470,6 @@ class Releases:
         _copy(self.config, self.trusted / "raychat.json")
         seal(self.trusted)
 
-    @classmethod
-    def cold(cls, source: Path, directory: Path) -> tuple[Releases, Release]:
-        """Prepare one verified release that also freezes the launch evaluator.
-
-        The caller must exec after preparation so compiler allocations do not
-        remain in the long-lived core. Later captures retain this first release
-        as their fixed evaluator, independently of mutable or updated sources.
-
-        Returns
-        -------
-        tuple[Releases, Release]
-            The manager and its verified initial release.
-
-        """
-        manager = cls.__new__(cls)
-        manager.source = source.resolve(strict=True)
-        environment_python = manager.source / ".venv" / "bin" / "python"
-        manager.python = (
-            str(environment_python) if environment_python.is_file() else sys.executable
-        )
-        manager.directory = directory.resolve()
-        manager.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # No candidate code executes while capture reads the original evaluator.
-        manager.trusted = manager.source
-        manager.config = manager.source / "raychat.json"
-        root = manager.capture(manager.source)
-        try:
-            _compile_cold_runtime(root)
-            release = Release(root, seal(root))
-            release.verify()
-        except BaseException:
-            with suppress(OSError, ValueError):
-                for path, info in _entries(root):
-                    path.chmod(0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
-            cleanup_tree(root)
-            raise
-        manager.trusted = root
-        manager.config = root / "raychat.json"
-        return manager, release
-
-    @classmethod
-    def prepared(
-        cls,
-        source: Path,
-        directory: Path,
-        evaluator: Release,
-        python: str,
-    ) -> Releases:
-        """Adopt an independently identified evaluator without capturing it again.
-
-        Returns
-        -------
-        Releases
-            The release manager retaining the original launch toolchain.
-
-        """
-        evaluator.verify()
-        manager = cls.__new__(cls)
-        manager.source = source.resolve()
-        manager.directory = directory.resolve(strict=True)
-        manager.trusted = evaluator.path.resolve(strict=True)
-        manager.python = python
-        manager.config = manager.trusted / "raychat.json"
-        return manager
-
     def capture(self, source: Path, changes: Mapping[str, bytes] | None = None) -> Path:
         """Copy candidate runtime files while retaining the fixed evaluator.
 
@@ -620,8 +524,12 @@ class Releases:
 
         """
         root = self.capture(self.source)
-        _compile_runtime(root)
-        return Release(root, seal(root))
+        try:
+            _compile_runtime(root)
+            return Release(root, seal(root))
+        except BaseException:
+            cleanup_tree(root)
+            raise
 
     @staticmethod
     async def validate(root: Path, log: Path, *, python: str | None = None) -> Release:

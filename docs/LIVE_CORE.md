@@ -135,6 +135,8 @@ not a fixed maximum for total process memory.
 Interactive pages live in `~/.raychat/live/LAUNCH_ID/text-pages/` under the
 configured storage home. Keep the entire launch directory for recovery: a
 checkpoint containing page references is not a standalone copy of its text.
+After external recovery creates a new supervisor directory, pages remain owned
+by the original known-good launch. Keep that original directory as well.
 Closing a child chat, replacing a core, or closing a page store does not delete
 referenced pages. Standalone sessions create a private `raychat-text-pages-*`
 temporary directory when no owning page directory was supplied. Those files are
