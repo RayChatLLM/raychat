@@ -180,6 +180,11 @@ def _packaging_inventory(root: Path) -> None:
             directory.lstat()
         except FileNotFoundError:
             continue
+        if name == "plugin_catalog":
+            current = _current_catalog_inventory(root, directory)
+            if current is not None:
+                names.update(current)
+                continue
         names.update(
             item.relative_to(root).as_posix()
             for item, entry in _release_entries(directory)
@@ -187,6 +192,79 @@ def _packaging_inventory(root: Path) -> None:
         )
     metadata["source_files"] = sorted(names)
     (root / "raychat.json").write_bytes(encode(configuration))
+
+
+def _current_catalog_inventory(root: Path, directory: Path) -> set[str] | None:
+    """Select the active immutable catalog generation without deleting old files.
+
+    Returns
+    -------
+    set[str] | None
+        The captured profile, convenience catalog, pinned catalog, and its
+        referenced package archives; ``None`` when a generic fixture has no
+        profile and should retain the complete runtime-root inventory.
+
+    Raises
+    ------
+    ValueError
+        The captured profile or catalog references a missing or unsafe member.
+    TypeError
+        A profile or catalog has fields of the wrong type.
+
+    """
+    entries = _release_entries(directory)
+    captured = {
+        item.relative_to(root).as_posix(): (item, info)
+        for item, info in entries
+        if stat.S_ISREG(info.st_mode)
+    }
+    profile_path = "plugin_catalog/profile.json"
+    profile_entry = captured.get(profile_path)
+    if profile_entry is None:
+        return None
+
+    def document(path: str) -> dict[str, object]:
+        entry = captured.get(path)
+        if entry is None:
+            message = "Active plugin catalog member is missing: " + path
+            raise ValueError(message)
+        return fields(decode(_read_source(*entry).rstrip() + b"\n"))
+
+    def member(value: object, *, prefix: str, suffix: str) -> str:
+        if not isinstance(value, str):
+            message = "Active plugin catalog member name must be text."
+            raise TypeError(message)
+        relative = portable_relative_path("plugin_catalog/" + value)
+        if (
+            relative.parts != ("plugin_catalog", value)
+            or not value.startswith(prefix)
+            or not value.endswith(suffix)
+        ):
+            message = "Active plugin catalog member name is invalid."
+            raise ValueError(message)
+        return "plugin_catalog/" + value
+
+    profile = document(profile_path)
+    catalog_path = member(profile.get("catalog"), prefix="catalog-", suffix=".json")
+    catalog = document(catalog_path)
+    document("plugin_catalog/catalog.json")
+    records = catalog.get("plugins")
+    if not isinstance(records, list):
+        message = "Active plugin catalog requires a package list."
+        raise TypeError(message)
+    selected = {profile_path, "plugin_catalog/catalog.json", catalog_path}
+    for record in records:
+        package = fields(record)
+        selected.add(
+            member(package.get("url"), prefix="package-", suffix=".zip"),
+        )
+    missing = selected - captured.keys()
+    if missing:
+        raise ValueError(
+            "Active plugin catalog references missing members: "
+            + ", ".join(sorted(missing)),
+        )
+    return selected
 
 
 def _quality_diagnostics(root: Path, output: BinaryIO) -> None:

@@ -30,7 +30,7 @@ from raychat.workers import AgentWorker, WorkerExecution
 from raychat_bootstrap.recovery import retained_state
 from raychat_bootstrap.releases import Release, Releases, seal
 from raychat_bootstrap.supervisor import Supervisor
-from raychat_bootstrap.wire import decode, encode
+from raychat_bootstrap.wire import decode, encode, fields
 from tests.assertions import TypedTestCase
 from tests.plugin_support import create_runtime, plugin_module, require_agent_sessions
 from tests.test_agent_sessions import ControlledChat
@@ -611,6 +611,122 @@ class ReleaseTests(TypedTestCase):
                     metadata["source_files"],
                     ["raychat/nested/example.py", "tests/test_fixed.py"],
                 )
+            finally:
+                for path in releases.trusted.rglob("*"):
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+                releases.trusted.chmod(0o700)
+
+    def test_candidate_inventory_selects_current_catalog_generation(self) -> None:
+        """Keep old published URLs on disk without shipping them in the build."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            catalog = source / "plugin_catalog"
+            catalog.mkdir(parents=True)
+            (source / "release-version.txt").write_text("0.1.0\n")
+            (catalog / "profile.json").write_bytes(
+                encode({
+                    "schema": 1,
+                    "id": "standard",
+                    "catalog": "catalog-current.json",
+                    "packages": ["sample@1.0.0"],
+                }),
+            )
+            active = encode({
+                "schema": 1,
+                "plugins": [{"url": "package-current.zip", "sha256": "a" * 64}],
+            })
+            (catalog / "catalog-current.json").write_bytes(active)
+            (catalog / "catalog.json").write_bytes(active)
+            (catalog / "package-current.zip").write_bytes(b"current archive")
+            (catalog / "catalog-old.json").write_bytes(b"old catalog")
+            (catalog / "package-old.zip").write_bytes(b"old archive")
+            (source / "raychat.json").write_bytes(
+                encode({
+                    "release": {
+                        "source_files": [
+                            "release-version.txt",
+                            "plugin_catalog/catalog-old.json",
+                            "plugin_catalog/package-old.zip",
+                        ],
+                    },
+                }),
+            )
+            releases = Releases(source, root / "releases")
+            try:
+                candidate = releases.capture(source)
+                configuration = decode((candidate / "raychat.json").read_bytes())
+                metadata = fields(configuration["release"])
+                self.equal(
+                    metadata["source_files"],
+                    [
+                        "plugin_catalog/catalog-current.json",
+                        "plugin_catalog/catalog.json",
+                        "plugin_catalog/package-current.zip",
+                        "plugin_catalog/profile.json",
+                        "release-version.txt",
+                    ],
+                )
+                self.equal(
+                    (candidate / "plugin_catalog" / "package-old.zip").read_bytes(),
+                    b"old archive",
+                )
+            finally:
+                for path in releases.trusted.rglob("*"):
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+                releases.trusted.chmod(0o700)
+
+    def test_candidate_inventory_rejects_missing_catalog_archive(self) -> None:
+        """Do not silently omit a package referenced by the active catalog."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            catalog = source / "plugin_catalog"
+            catalog.mkdir(parents=True)
+            (catalog / "profile.json").write_bytes(
+                encode({
+                    "catalog": "catalog-current.json",
+                }),
+            )
+            active = encode({"plugins": [{"url": "package-missing.zip"}]})
+            (catalog / "catalog-current.json").write_bytes(active)
+            (catalog / "catalog.json").write_bytes(active)
+            (source / "raychat.json").write_bytes(
+                encode({
+                    "release": {"source_files": []},
+                }),
+            )
+            releases = Releases(source, root / "releases")
+            try:
+                with self.rejected(ValueError, "missing"):
+                    releases.capture(source)
+            finally:
+                for path in releases.trusted.rglob("*"):
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+                releases.trusted.chmod(0o700)
+
+    def test_candidate_inventory_rejects_catalog_path_traversal(self) -> None:
+        """Catalog references resolve only to filenames in the captured tree."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            catalog = source / "plugin_catalog"
+            catalog.mkdir(parents=True)
+            (catalog / "profile.json").write_bytes(
+                encode({
+                    "catalog": "../../outside.json",
+                }),
+            )
+            (catalog / "catalog.json").write_bytes(encode({"plugins": []}))
+            (source / "raychat.json").write_bytes(
+                encode({
+                    "release": {"source_files": []},
+                }),
+            )
+            releases = Releases(source, root / "releases")
+            try:
+                with self.rejected(ValueError):
+                    releases.capture(source)
             finally:
                 for path in releases.trusted.rglob("*"):
                     path.chmod(0o700 if path.is_dir() else 0o600)

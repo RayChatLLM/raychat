@@ -120,6 +120,12 @@ character budget permits, before spending remaining space on completed history
 or dynamic memory. `--keep-recent` limits raw pairs from completed tasks, not
 inputs still needed by the active task. Older summaries keep complete factual
 groups and never replace the active user prompt.
+Compaction is lossy: the provider may not receive every retained detail. Disk-backed
+history preserves the original stored messages; the bounded summary cache only
+reuses the existing context policy's summaries. See the
+[memory and recovery storage contract](LIVE_CORE.md#memory-disk-backed-history-and-configuration)
+for page ownership and cache bounds. Those bounds alone do not establish a process
+RSS or startup-time guarantee.
 
 ## Coverage limits
 

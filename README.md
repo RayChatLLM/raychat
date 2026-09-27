@@ -57,6 +57,8 @@ configuration. Provider values belong in the selected environment file;
 `storage.home_directory` controls the default location of that file.
 Configuration rejects duplicate keys, invalid types and ranges, non-finite values,
 unsupported versions, and oversized files.
+See [memory and recovery storage](docs/LIVE_CORE.md#memory-disk-backed-history-and-configuration)
+for disk-backed history, fixed cache budgets, and private runtime variables.
 
 ### Environment files
 
