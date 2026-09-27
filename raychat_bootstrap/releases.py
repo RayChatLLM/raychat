@@ -129,6 +129,13 @@ def _copy(source: Path, target: Path) -> None:
     except FileNotFoundError:
         return
     entries = _entries(source, ignore_scratch=True)
+    if stat.S_ISDIR(entries[0][1].st_mode):
+        portable = PortablePathIndex()
+        for path, info in entries[1:]:
+            portable.add(
+                path.relative_to(source).as_posix(),
+                directory=stat.S_ISDIR(info.st_mode),
+            )
     for path, info in entries:
         destination = target / path.relative_to(source)
         if stat.S_ISDIR(info.st_mode):

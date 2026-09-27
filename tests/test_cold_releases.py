@@ -7,6 +7,7 @@ import py_compile
 import subprocess
 import sys
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
@@ -156,7 +157,17 @@ class ColdReleaseTests(TypedTestCase):
                     alias.write_bytes(b"")
                     self.require(not alias.samefile(module))
                 try:
-                    with self.rejected(ValueError):
+                    before_copy = (
+                        mock.patch(
+                            "raychat_bootstrap.releases._read_source",
+                            side_effect=AssertionError(
+                                "Portable names must be checked before copying.",
+                            ),
+                        )
+                        if malformed == "collision"
+                        else nullcontext()
+                    )
+                    with before_copy, self.rejected(ValueError):
                         Releases.cold(source, root / "releases")
                 finally:
                     if alias is not None:
