@@ -15,7 +15,6 @@ from http import HTTPStatus
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, TypedDict
 from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunparse
-from urllib.request import getproxies, proxy_bypass
 
 from raychat.event_types import CONFIGURE, Lifecycle
 
@@ -25,7 +24,6 @@ from .filesystem import (
     read_regular,
     write_bytes,
 )
-from .http_debug import HTTPConnection, HTTPSConnection
 from .package_transactions import PackageTransaction
 from .packages import (
     MAX_BYTES,
@@ -431,6 +429,35 @@ class _HTTPRoute:
     headers: dict[str, str]
 
 
+def getproxies() -> dict[str, str]:
+    """Read proxy settings when a remote package request needs them.
+
+    Returns
+    -------
+    dict[str, str]
+        The operating system and environment proxy configuration.
+
+    """
+    from urllib.request import getproxies as discover_proxies
+
+    return discover_proxies()
+
+
+def proxy_bypass(host: str) -> object:
+    """Query the operating system bypass policy at the request boundary.
+
+    Returns
+    -------
+    object
+        The operating system bypass decision, validated by the request route.
+
+    """
+    from urllib.request import proxy_bypass as bypass
+
+    result: object = bypass(host)
+    return result
+
+
 def _proxy_location(parsed: ParseResult) -> str | None:
     proxy = getproxies().get(parsed.scheme)
     if proxy is None:
@@ -456,6 +483,8 @@ def _request_target(parsed: ParseResult) -> str:
 
 
 def _proxy_route(parsed: ParseResult, proxy: str) -> _HTTPRoute:
+    from .http_debug import HTTPConnection, HTTPSConnection
+
     address = urlparse(proxy if "://" in proxy else parsed.scheme + "://" + proxy)
     hostname = address.hostname
     if address.scheme not in {"http", "https"} or hostname is None:
@@ -497,6 +526,8 @@ def _proxy_route(parsed: ParseResult, proxy: str) -> _HTTPRoute:
 
 
 def _http_route(url: str) -> _HTTPRoute:
+    from .http_debug import HTTPConnection, HTTPSConnection
+
     parsed = _validate_url(url)
     host = parsed.hostname
     if host is None:

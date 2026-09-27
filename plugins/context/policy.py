@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from raychat.sdk import (
         ContextSession,
+        HistoryMessage,
         Messages,
         PluginContext,
-        SessionMessage,
     )
 
 from raychat.configuration import SETTINGS
+from raychat.sdk import HistorySource
 from raychat.service_contracts import (
     CHAT,
     INSTRUCTIONS,
@@ -74,7 +75,57 @@ def digest_header(message_count: int) -> str:
     )
 
 
-def session_digest(messages: list[SessionMessage], limit: int) -> str:
+_SUMMARY_KEY = __name__ + ":semantic-summary"
+
+
+@runtime_checkable
+class _CachedSummary(Protocol):
+    def cached_summary(self, key: str, render: Callable[[str], str]) -> str: ...
+
+
+@runtime_checkable
+class _CachedSummaryLength(Protocol):
+    def cached_summary_length(
+        self,
+        key: str,
+        render: Callable[[str], str],
+    ) -> int: ...
+
+
+def _summary(message: HistoryMessage) -> str:
+    return (
+        message.cached_summary(_SUMMARY_KEY, _summary_renderer(message))
+        if isinstance(message, _CachedSummary)
+        else _summary_renderer(message)(message.content)
+    )
+
+
+def _summary_length(message: HistoryMessage) -> int:
+    """Measure a summary without retaining its text for every history item.
+
+    Returns
+    -------
+    int
+        The exact character count used by the context budget.
+
+    """
+    if isinstance(message, _CachedSummaryLength):
+        return message.cached_summary_length(_SUMMARY_KEY, _summary_renderer(message))
+    return len(_summary(message))
+
+
+def _summary_renderer(message: HistoryMessage) -> Callable[[str], str]:
+    def render(content: str) -> str:
+        return (
+            "User request: " + clip(content)
+            if message.kind == "prompt"
+            else (summary_line({"role": message.role, "content": content}))
+        )
+
+    return render
+
+
+def session_digest(messages: Sequence[HistoryMessage], limit: int) -> str:
     """Summarize session history without mistaking user text for host traffic.
 
     Returns
@@ -93,41 +144,33 @@ def session_digest(messages: list[SessionMessage], limit: int) -> str:
     if limit < len(header):
         error_message = "Context budget is too small for a compaction digest."
         raise ValueError(error_message)
-    groups: list[list[str]] = []
-    index = 0
-    while index < len(messages):
+    selected_groups: list[tuple[HistoryMessage, ...]] = []
+    used = len(header)
+    index = len(messages) - 1
+    while index >= 0:
         message = messages[index]
-        if message.kind == "prompt":
-            groups.append(["User request: " + clip(message.content)])
-            index += 1
-            continue
-
-        line = summary_line(message.as_message())
+        group: tuple[HistoryMessage, ...]
         if (
-            message.kind == "assistant"
-            and index + 1 < len(messages)
-            and messages[index + 1].kind == "host_result"
-            and messages[index + 1].prompt_id == message.prompt_id
+            message.kind == "host_result"
+            and index > 0
+            and messages[index - 1].kind == "assistant"
+            and messages[index - 1].prompt_id == message.prompt_id
         ):
-            groups.append([line, summary_line(messages[index + 1].as_message())])
-            index += 2
+            group = (messages[index - 1], message)
+            extra = sum(_summary_length(item) + 3 for item in group)
+            index -= 2
         else:
             # Session history never stores host compaction messages. Do not let
             # model text that mimics the marker acquire trusted-looking status.
-            groups.append([line])
-            index += 1
-
-    selected_groups: list[list[str]] = []
-    used = len(header)
-    for group in reversed(groups):
-        extra = sum(len(line) + 3 for line in group)
+            group = (message,)
+            extra = _summary_length(message) + 3
+            index -= 1
         if used + extra <= limit:
             selected_groups.append(group)
             used += extra
     selected_groups.reverse()
-    selected = [line for group in selected_groups for line in group]
-    line_count = sum(len(group) for group in groups)
-    omitted = line_count - len(selected)
+    selected = [_summary(message) for group in selected_groups for message in group]
+    omitted = len(messages) - len(selected)
     if omitted:
         omission = f"{omitted} older summary lines omitted."
         if used + len(omission) + 3 <= limit:
@@ -144,7 +187,11 @@ class ContextPolicy:
         """Retain the semantic history and session inputs used by this policy."""
         self.session = session
         self.ctx = ctx
-        self.history = session.history_snapshot()
+        self.history: list[HistoryMessage] = (
+            session.history_index()
+            if isinstance(session, HistorySource)
+            else list(session.history_snapshot())
+        )
 
     def instruction_prompt(self, limit: int) -> str:
         """Render typed instruction contributions for the given memory budget.
@@ -263,6 +310,28 @@ class ContextPolicy:
             error_message,
         )
 
+    def _full_size(self, instructions: str) -> int:
+        # Each record contributes the fixed object syntax, role and quoted content.
+        total = 2 + max(0, len(self.history) - 1)
+        total += sum(
+            len(item.role) + len('{"role":"","content":}') + item.json_length
+            for item in self.history
+        )
+        if self.session.instruction_role == "user":
+            prefix = instructions + "\n\n--- USER TASK ---\n"
+            return (
+                total
+                + messages_size([{"role": "user", "content": prefix}])
+                - messages_size([{"role": "user", "content": ""}])
+            )
+        extra = (
+            messages_size([
+                {"role": self.session.instruction_role, "content": instructions},
+            ])
+            - 2
+        )
+        return total + extra + bool(self.history)
+
     def _full_messages(self, instructions: str) -> Messages:
         result = [message.as_message() for message in self.history]
         if self.session.instruction_role == "user":
@@ -310,9 +379,8 @@ class ContextPolicy:
             raise RuntimeError(error_message)
         active = self.history[active_index]
         instructions = self.select_instruction(active.content)
-        full = self._full_messages(instructions)
-        if messages_size(full) <= self.session.context_chars:
-            return full
+        if self._full_size(instructions) <= self.session.context_chars:
+            return self._full_messages(instructions)
         return self._compacted_messages(instructions, active_index)
 
 
@@ -321,13 +389,13 @@ _PAIR_SIZE = 2
 
 @dataclass(frozen=True)
 class _CompactionParts:
-    old_prior: list[SessionMessage]
-    raw_prior: list[SessionMessage]
-    old_active: list[SessionMessage]
-    raw_active: list[SessionMessage]
+    old_prior: list[HistoryMessage]
+    raw_prior: list[HistoryMessage]
+    old_active: list[HistoryMessage]
+    raw_active: list[HistoryMessage]
 
 
-def _minimum_digest(items: list[SessionMessage]) -> str | None:
+def _minimum_digest(items: list[HistoryMessage]) -> str | None:
     if not items:
         return None
     header = digest_header(len(items))
@@ -335,10 +403,10 @@ def _minimum_digest(items: list[SessionMessage]) -> str | None:
 
 
 def _after_blocks(
-    after: list[SessionMessage],
+    after: list[HistoryMessage],
     prompt_id: int,
-) -> list[list[SessionMessage]]:
-    after_blocks: list[list[SessionMessage]] = []
+) -> list[list[HistoryMessage]]:
+    after_blocks: list[list[HistoryMessage]] = []
     for index in range(0, len(after), 2):
         block = after[index : index + 2]
         if (
@@ -357,7 +425,7 @@ def _after_blocks(
     return after_blocks
 
 
-def _before_pair_starts(before: list[SessionMessage]) -> list[int]:
+def _before_pair_starts(before: list[HistoryMessage]) -> list[int]:
     before_pair_starts: list[int] = []
     index = 0
     while index < len(before):
@@ -433,9 +501,9 @@ class _Compaction:
     def build_candidate(
         self,
         prior_digest: str | None,
-        raw_prior: list[SessionMessage],
+        raw_prior: list[HistoryMessage],
         active_digest: str | None,
-        raw_active: list[SessionMessage],
+        raw_active: list[HistoryMessage],
     ) -> Messages:
         active_content = self.active.content
         if active_digest is not None:
@@ -503,7 +571,7 @@ class _Compaction:
 
     def model_digest(
         self,
-        items: list[SessionMessage],
+        items: list[HistoryMessage],
         candidate_with: Callable[[str], Messages],
     ) -> str | None:
         """Ask the configured model to write the compaction brief.
@@ -554,7 +622,7 @@ class _Compaction:
 
     def enrich_digest(
         self,
-        items: list[SessionMessage],
+        items: list[HistoryMessage],
         minimum: str | None,
         candidate_with: Callable[[str], Messages],
     ) -> str | None:
@@ -600,8 +668,8 @@ class _Compaction:
                 digest: str,
                 *,
                 prior_digest: str | None = prior_digest,
-                raw_prior: list[SessionMessage] = raw_prior,
-                raw_active: list[SessionMessage] = raw_active,
+                raw_prior: list[HistoryMessage] = raw_prior,
+                raw_active: list[HistoryMessage] = raw_active,
             ) -> Messages:
                 """With active digest.
 
@@ -622,9 +690,9 @@ class _Compaction:
             def with_prior_digest(
                 digest: str,
                 *,
-                raw_prior: list[SessionMessage] = raw_prior,
+                raw_prior: list[HistoryMessage] = raw_prior,
                 active_digest: str | None = active_digest,
-                raw_active: list[SessionMessage] = raw_active,
+                raw_active: list[HistoryMessage] = raw_active,
             ) -> Messages:
                 """With prior digest.
 
@@ -663,7 +731,7 @@ class _InstructionSearch:
     policy: ContextPolicy
     active_prompt: str
     active_index: int
-    active_tail: list[SessionMessage]
+    active_tail: list[HistoryMessage]
     recent_count: int
 
     def fits(self, memory_limit: int) -> tuple[bool, str]:

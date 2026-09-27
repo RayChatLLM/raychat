@@ -18,7 +18,7 @@ from .filesystem import (
     portable_relative_path,
     read_regular,
 )
-from .sdk import API_VERSION, PluginError
+from .plugin_contract import API_VERSION, PluginError
 from .validation import (
     ConfigurationError,
     array_field,
@@ -504,7 +504,12 @@ def _read_member(item: Path, remaining: int, expected: os.stat_result) -> bytes:
     if not stat.S_ISREG(expected.st_mode):
         message = "Package members must be regular files."
         raise PluginError(message)
-    data = read_regular(item, remaining + 1, follow_symlinks=False)
+    data = read_regular(
+        item,
+        remaining + 1,
+        follow_symlinks=False,
+        metadata=expected,
+    )
     if len(data) > remaining:
         message = "Package exceeds its byte limit."
         raise PluginError(message)

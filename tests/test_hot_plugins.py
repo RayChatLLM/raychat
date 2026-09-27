@@ -168,6 +168,17 @@ class SourceCaptureTests(_HotPluginFixture):
 class HotPluginTests(_HotPluginFixture):
     """Check live plugin replacement and concurrent runtime ownership."""
 
+    def test_watch_detects_edit_between_load_and_watch(self) -> None:
+        """Use captured bytes as baseline when a plugin changed before watch."""
+        path = self.plugin()
+        runtime = self.runtime(path)
+        self.plugin(version=2)
+
+        with mock.patch("raychat.plugins._source_fingerprint") as fingerprint:
+            runtime.watch()
+        fingerprint.assert_not_called()
+        self.equal(runtime.command("/counter"), "2")
+
     def test_status_reads_do_not_scan_source_but_commands_still_refresh(self) -> None:
         """Check status reads do not scan source but commands still refresh."""
         path = self.plugin()

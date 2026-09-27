@@ -1092,6 +1092,24 @@ class FilesystemBoundaryTests(TypedTestCase):
                 replace_completed(path, Path(directory) / "destination")
             self.equal(replace.call_count, 1)
 
+    def test_regular_read_reuses_captured_nofollow_identity(self) -> None:
+        """The descriptor is checked without repeating a pathname observation."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "member"
+            path.write_bytes(b"contents")
+            metadata = path.lstat()
+            with mock.patch.object(
+                Path,
+                "lstat",
+                side_effect=AssertionError("Unexpected repeated path lookup"),
+            ):
+                self.equal(
+                    read_regular(path, 100, follow_symlinks=False, metadata=metadata),
+                    b"contents",
+                )
+            with self.rejected(ValueError, "no-follow"):
+                read_regular(path, 100, metadata=metadata)
+
 
 class AsyncPublicationTests(TypedTestCase):
     """Keep the event loop responsive without abandoning a live stage writer."""

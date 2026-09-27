@@ -121,6 +121,30 @@ class SupervisorPersistenceTests(TypedTestCase):
             self.equal(decode(target.read_bytes()), {"draft": "雪 ☃"})
             self.equal(list(target.parent.glob(".raychat-*.pending")), [])
 
+    def test_invalid_stream_discards_stage_and_preserves_manifest(self) -> None:
+        """Late JSON failures never replace a complete recovery document."""
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor = PersistenceHarness(Path(temporary))
+            target = supervisor.releases.directory / "recovery.json"
+            original = b'{"old":true}\n'
+            target.write_bytes(original)
+            invalid: tuple[object, ...] = (
+                {"prefix": "x" * 100, "bad": float("nan")},
+                {"prefix": "x" * 100, "bad": object()},
+            )
+            for value in invalid:
+                with self.rejected((ValueError, TypeError)):
+                    asyncio.run(supervisor.save(target, value))
+                self.equal(target.read_bytes(), original)
+                self.equal(list(target.parent.glob(".raychat-*.pending")), [])
+            with (
+                mock.patch("raychat_bootstrap.wire.MAX_MESSAGE", 32),
+                self.rejected(ValueError),
+            ):
+                asyncio.run(supervisor.save(target, {"oversized": "x" * 100}))
+            self.equal(target.read_bytes(), original)
+            self.equal(list(target.parent.glob(".raychat-*.pending")), [])
+
     def test_permanent_permission_error_keeps_manifest_and_recovers(self) -> None:
         """Exhaust retries while preserving the old manifest and cleaning temps."""
         with tempfile.TemporaryDirectory() as temporary:

@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import base64
 import threading
 import uuid
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from raychat.handoff import export_plugins, restore_plugins
+from raychat.packages import Manifest, dependency_order
 from raychat.plugins import Runtime
+from raychat.sdk import checkpoint_snapshot
 from raychat.service_contracts import AgentChat, SessionCatalogState
-from raychat.validation import array_field, configuration_fields, text_field
+from raychat.validation import (
+    array_field,
+    configuration_fields,
+    json_object,
+    text_field,
+)
 from raychat.workers import AgentWorker, WorkerExecution
 
 from .configuration import load as load_settings
@@ -128,6 +136,17 @@ class ProcessConversation:
         """
         return self._session.export_snapshot()
 
+    def export_checkpoint(self) -> dict[str, object]:
+        """Capture internal child state without materializing historical pages.
+
+        Returns
+        -------
+        dict[str, object]
+            The compact child checkpoint.
+
+        """
+        return self._session.export_checkpoint()
+
     def restore_snapshot(self, snapshot: Mapping[str, object]) -> None:
         """Restore checked history and plugin state into the local owner."""
         self._session.restore_snapshot(snapshot)
@@ -190,7 +209,7 @@ class ProcessConversation:
                 "keep_recent_turns": self._session.keep_recent_turns,
                 "instruction_role": self._session.instruction_role,
                 "protocol": self._session.protocol,
-                "snapshot": self.export_snapshot(),
+                "snapshot": self.export_checkpoint(),
                 "max_steps": max_steps,
                 **(
                     {"plugin_source": coordinator.plugin_source}
@@ -325,7 +344,7 @@ class AgentSessions:
                 "profile": entry.profile,
                 "task": entry.task,
                 "status": entry.status,
-                "snapshot": None if session is None else session.export_snapshot(),
+                "snapshot": None if session is None else checkpoint_snapshot(session),
                 "resources": export_plugins(runtime)
                 if isinstance(runtime, Runtime)
                 else None,
@@ -424,7 +443,7 @@ class AgentSessions:
                 )
                 if session is None:
                     return None
-                saved = session.export_snapshot()
+                saved = checkpoint_snapshot(session)
                 replacement = self.create_conversation(profile, coordinator)
                 try:
                     replacement.restore_snapshot(saved)
@@ -547,6 +566,31 @@ def _isolated_chat(_messages: Messages) -> str:
     )
 
 
+def _child_sources(source: PluginSources | None) -> PluginSources | None:
+    """Select child dependencies from the already validated root generation.
+
+    Returns
+    -------
+    PluginSources | None
+        Only captured packages required by a local child, or discovery mode.
+
+    """
+    if source is None:
+        return None
+    available = {}
+    manifests = {}
+    for snapshot in source["packages"]:
+        manifest = Manifest.parse(
+            json_object(
+                base64.b64decode(snapshot["files"]["plugin.json"], validate=True),
+            ),
+        )
+        available[manifest.id] = snapshot
+        manifests[manifest.id] = manifest
+    selected = dependency_order(manifests, _PLUGIN_SETTINGS.child_plugins)
+    return {"packages": [available[name] for name in selected]}
+
+
 def _local_session(
     profile: ModelProfile,
     coordinator: SessionCoordinator,
@@ -554,7 +598,7 @@ def _local_session(
     runtime = create_runtime(
         coordinator.workspace,
         plugins=_PLUGIN_SETTINGS.child_plugins,
-        source=coordinator.plugin_source,
+        source=_child_sources(coordinator.plugin_source),
     )
     try:
         session = create_session(

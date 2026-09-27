@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import hashlib
+import os
+import tempfile
 import threading
 import time
 import unittest
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
 import raychat.ui.state as tui_state
+from raychat.paged_text import TextPageStore, export_ref, read_ref
+from raychat.type_support import override
+from raychat.ui.selection import TextSelection
+from raychat.validation import array_field, configuration_fields
+from raychat_bootstrap.wire import decode, encode
 from tests.assertions import TypedTestCase
 from tests.transport_support import captured
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
 _C0_END = 0x1F
 _C1_START = 0x7F
@@ -502,23 +512,25 @@ class StateTests(TypedTestCase):
     def test_restore_keeps_update_notices_distinct_from_model_claims(self) -> None:
         """Keep host attribution and hide internal feedback payloads after resume."""
         state = tui_state.TuiState()
-        state.restore([
-            {"kind": "prompt", "content": "Change the core"},
-            {
-                "kind": "assistant",
-                "content": '{"action":"done","pending":true,'
-                '"message":"Validation pending"}',
-            },
-            {
-                "kind": "prompt",
-                "content": 'CORE_UPDATE_RESULT: {"status":"rejected",'
-                '"screen":"internal frame"}',
-            },
-            {
-                "kind": "assistant",
-                "content": '{"action":"done","message":"The update failed"}',
-            },
-        ])
+        state.restore(
+            [
+                {"kind": "prompt", "content": "Change the core"},
+                {
+                    "kind": "assistant",
+                    "content": '{"action":"done","pending":true,'
+                    '"message":"Validation pending"}',
+                },
+                {
+                    "kind": "prompt",
+                    "content": 'CORE_UPDATE_RESULT: {"status":"rejected",'
+                    '"screen":"internal frame"}',
+                },
+                {
+                    "kind": "assistant",
+                    "content": '{"action":"done","message":"The update failed"}',
+                },
+            ],
+        )
         self.equal(
             [entry.kind for entry in state.entries],
             ["user", "system", "system", "assistant"],
@@ -947,6 +959,66 @@ class StateTests(TypedTestCase):
 class TranscriptViewportTests(TypedTestCase):
     """Check TranscriptViewport behavior and failure boundaries."""
 
+    def test_selection_row_access_materializes_only_its_entry(self) -> None:
+        """Lazy global row access caches a single selected transcript entry."""
+        state = tui_state.TuiState()
+        state.notice("First", "first body " * 20)
+        state.notice("Second", "second body " * 20)
+        rows = state.selection_rows(24)
+        second_start = state._transcript_row_ends[0]
+        with mock.patch.object(
+            state,
+            "_display_entry",
+            wraps=state._display_entry,
+        ) as display:
+            self.require(rows[second_start].startswith("SYSTEM"))
+            self.equal(display.call_count, 1)
+            _ = rows[second_start + 1]
+            self.equal(display.call_count, 1)
+            _ = rows[0]
+            self.equal(display.call_count, 2)
+
+    def test_lazy_selection_rows_freeze_thinking_expansion(self) -> None:
+        """Old row sources keep their coordinates stable across Ctrl+T toggles."""
+        state = tui_state.TuiState()
+        state._append(
+            "thinking",
+            "Reasoning",
+            "first line\nsecond line\nthird line\nfourth line\nfifth line",
+        )
+        collapsed = state.selection_rows(40)
+        collapsed_count = len(collapsed)
+        collapsed_body = collapsed[1]
+        unread = state.selection_rows(40)
+
+        state.toggle_thinking()
+        expanded = state.selection_rows(40)
+        self.require(len(expanded) > collapsed_count)
+        self.equal(len(collapsed), collapsed_count)
+        self.equal(collapsed[1], collapsed_body)
+        self.equal(unread[1], collapsed_body)
+        self.require(expanded[-1].endswith("fifth line"))
+
+        selection = TextSelection()
+        selection.begin(0, 0, collapsed, 40)
+        selection.move(0, 1, released=True)
+        selection.reconcile(expanded, 40)
+        self.require(selection.anchor is None)
+
+    def test_fast_row_count_matches_wrapped_rows(self) -> None:
+        """Count ASCII prompt rows exactly while preserving the general renderer."""
+        entries = [
+            tui_state.TranscriptEntry(1, "user", "You", "aB39" * 4096),
+            tui_state.TranscriptEntry(2, "assistant", "Agent", "Z" * 127),
+            tui_state.TranscriptEntry(3, "user", "You", "two words 界\nnext"),
+        ]
+        for entry in entries:
+            for width in (1, 2, 12, 80, 120):
+                self.equal(
+                    tui_state._entry_line_count(entry, width),
+                    len(tui_state.entry_lines(entry, width)),
+                )
+
     @staticmethod
     def make_entries() -> tuple[tui_state.TranscriptEntry, ...]:
         """Create the six ordered entries used by viewport checks.
@@ -1020,22 +1092,22 @@ class TranscriptViewportTests(TypedTestCase):
             )
             third = state.viewport(20, 3)
 
-            self.equal(render.call_count, 1)
+            self.equal(render.call_count, 0)
             self.equal(first.total, third.total)
             self.equal(second.scroll_offset, 1)
 
             state.apply_worker_event("done", {"message": "first response"})
             updated = state.viewport(20, 3)
-            self.equal(render.call_count, 1)
+            self.equal(render.call_count, 0)
             self.require((updated.total) > (first.total))
 
             state.viewport(21, 3)
             state.viewport(20, 3)
-            self.equal(render.call_count, 3)
+            self.equal(render.call_count, 0)
 
             state.reset()
             empty = state.viewport(20, 3)
-            self.equal(render.call_count, 4)
+            self.equal(render.call_count, 0)
             self.equal(empty.lines, ())
 
         # Validation must not be bypassed merely because bool compares equal to
@@ -1043,6 +1115,101 @@ class TranscriptViewportTests(TypedTestCase):
         state.viewport(1, 1)
         with self.rejected(ValueError):
             state.viewport(width=True, height=1)
+
+    def test_virtual_viewports_match_complete_rows_across_mutations(self) -> None:
+        """Scrolling, reflow, eviction and handoff retain complete-row geometry."""
+        state = tui_state.TuiState(max_entries=5)
+        bodies = [
+            "words and spaces " * 6,
+            "界🙂e\u0301 " * 11,
+            "first\n\nlast\r\nline",
+            "\x1b[31mred\x1b[0m and \u202eevil",
+            "longword" * 14,
+            "tail",
+        ]
+        for index, body in enumerate(bodies):
+            state.notice(str(index), body)
+            for width in (1, 7, 21, 80, 7):
+                rows = state.transcript_rows(width)
+                # Deterministic pseudo-random offsets include overscroll and
+                # positions crossing headers, entries and wide Unicode glyphs.
+                offsets = [0, 1, len(rows), len(rows) + 100]
+                offsets += [
+                    (step * 7919 + index * 17) % (len(rows) + 1) for step in range(9)
+                ]
+                for height in (0, 1, 5, len(rows) + 1):
+                    for offset in offsets:
+                        expected = tui_state.viewport_lines(rows, height, offset)
+                        self.equal(state.viewport(width, height, offset), expected)
+        saved = state.handoff
+        state.reset()
+        state.handoff = saved
+        self.equal(
+            state.viewport(21, 5, 2),
+            tui_state.viewport_lines(state.transcript_rows(21), 5, 2),
+        )
+        state.start("thinking")
+        state.apply_worker_event("thinking", {"text": "deep\nthoughts " * 12})
+        for _ in range(3):
+            self.equal(
+                state.viewport(21, 5, 3),
+                tui_state.viewport_lines(state.transcript_rows(21), 5, 3),
+            )
+            state.toggle_thinking()
+
+    def test_large_history_retains_only_visible_rows_and_linear_metadata(self) -> None:
+        """Eight MiB of source text does not retain a second fully wrapped copy."""
+        state = tui_state.TuiState(max_entries=500)
+        for index in range(500):
+            state.notice(str(index), f"{index:04d}" + "x" * (16 * 1024 - 4))
+
+        def live_rows() -> int:
+            tracked: object = gc.get_objects()
+            return sum(
+                isinstance(item, tui_state.TranscriptLine)
+                for item in array_field(tracked, "tracked objects")
+            )
+
+        baseline = live_rows()
+        viewport = state.viewport(80, 20)
+        self.equal(len(viewport.lines), 20)
+        self.equal(live_rows() - baseline, 20)
+        fields: object = vars(state)
+        metadata = configuration_fields(fields, "state")
+        # Persistent row indexing is at most one integer per transcript entry;
+        # no hidden full-row text or per-character index survives a viewport.
+        integer_lists = [
+            value
+            for value in metadata.values()
+            if isinstance(value, list) and value and isinstance(value[0], int)
+        ]
+        self.equal(sum(len(value) for value in integer_lists), 500)
+        self.require(state.viewport(80, 20) is viewport)
+
+        with mock.patch("raychat.ui.state.read_ref", wraps=read_ref) as read:
+            for index in range(20):
+                state.notice("new", f"{index:04d}" + "y" * (16 * 1024 - 4))
+                state.viewport(80, 20)
+            self.equal(read.call_count, 20)
+
+    def test_printable_ascii_reuses_immutable_text_without_weakening_sanitizing(
+        self,
+    ) -> None:
+        """Ordinary prompt bodies share text; controls and Unicode stay sanitized."""
+        text = "unique printable prompt " * 100
+        self.require(tui_state.sanitize_text(text) is text)
+        entry = tui_state.TranscriptEntry(1, "user", "You", text)
+        self.require(entry.body is text)
+        line = tui_state.TranscriptLine(1, "user", text, continuation=False, ok=None)
+        self.require(line.text is text)
+        state = tui_state.TuiState()
+        state.start(text)
+        self.require(state.entries[0].body is text)
+        self.equal(tui_state.sanitize_text(text, max_chars=5), "uniqu…")
+        self.equal(tui_state.sanitize_text("x\x1b[31my\x1b[0m"), "xy")
+        self.equal(tui_state.sanitize_text("界e\u0301"), "界e\u0301")
+        self.require("\r" not in tui_state.sanitize_text("a\rb"))
+        self.require("\n" not in tui_state.sanitize_text("a\nb"))
 
     def test_repeated_long_chat_viewports_fit_an_animation_frame_budget(self) -> None:
         """Check repeated long chat viewports fit an animation frame budget."""
@@ -1064,6 +1231,157 @@ class TranscriptViewportTests(TypedTestCase):
         # Three hundred cached reads should cost far less than one 60 Hz frame
         # apiece, even on deliberately slow CI workers.
         self.require((elapsed) < _MAX_CACHED_READ_SECONDS)
+
+
+@contextlib.contextmanager
+def transcript_pages() -> Iterator[TextPageStore]:
+    """Own an isolated UI page store and its runtime configuration.
+
+    Yields
+    ------
+    TextPageStore
+        The live store, closed before temporary files are removed.
+
+    """
+    with (
+        tempfile.TemporaryDirectory() as temporary,
+        TextPageStore(Path(temporary), "ui.pages") as store,
+        mock.patch.dict(os.environ, dict[str, str](RAYCHAT_TEXT_PAGE_DIR=temporary)),
+        mock.patch("raychat.ui.state.store_text", side_effect=store.append),
+    ):
+        yield store
+
+
+class PagedTranscriptTests(TypedTestCase):
+    """Retain exact public history while checkpointing only durable body refs."""
+
+    @override
+    def setUp(self) -> None:
+        """Use an explicitly owned page file which closes before cleanup."""
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        self.store = stack.enter_context(transcript_pages())
+        self.directory = self.store.path.parent
+
+    def test_reference_handoff_and_public_snapshot_preserve_full_unicode(self) -> None:
+        """Restoring a page preserves complete safe text and every scroll position."""
+        state = tui_state.TuiState()
+        raw = "界🙂long text\n\x1b[31mred\x1b[0m\r\n" * 500
+        state.notice("paged", raw)
+        state.notice("paged again", raw)
+        original = state.entries[0].body
+        saved = state.handoff
+        entries = array_field(saved["entries"], "entries")
+        first = configuration_fields(entries[0], "entry")
+        self.require("body" not in first)
+        reference = configuration_fields(first["body_ref"], "reference")
+        self.equal(reference["$raychat_text_page"], 1)
+        self.equal(len(configuration_fields(saved["page_stores"], "stores")), 1)
+        restored = tui_state.TuiState()
+        restored.handoff = saved
+        self.equal(restored.snapshot().entries[0].body, original)
+        self.equal(restored.handoff, saved)
+        for width in (8, 80):
+            rows = state.transcript_rows(width)
+            for offset in (0, 9, 999999):
+                self.equal(
+                    restored.viewport(width, 20, offset),
+                    tui_state.viewport_lines(rows, 20, offset),
+                )
+
+    def test_compact_checkpoint_rows_restore_exact_order_and_body_refs(self) -> None:
+        """Durable checkpoints use positional rows without losing scrollback."""
+        state = tui_state.TuiState()
+        state.notice("short", "small body")
+        raw = "界🙂large text\n" * 500
+        state.notice("paged", raw)
+        saved = decode(encode(state.compact_handoff()))
+        entries = array_field(saved["entries"], "entries")
+        self.require(all(isinstance(entry, list) for entry in entries))
+        self.equal(len(array_field(entries[0], "first entry")), 7)
+        self.require(isinstance(array_field(entries[1], "second entry")[3], dict))
+        restored = tui_state.TuiState()
+        restored.handoff = saved
+        self.equal(restored.snapshot(), state.snapshot())
+        for width in (8, 80):
+            self.equal(
+                restored.viewport(width, 20, 999999),
+                state.viewport(width, 20, 999999),
+            )
+
+    def test_literal_legacy_import_remains_supported(self) -> None:
+        """Older snapshots import as exact text and become compact durable refs."""
+        literal = "legacy " * 1000
+        state = tui_state.TuiState()
+        state.notice("small", "old")
+        saved = state.handoff
+        entries = array_field(saved["entries"], "entries")
+        entry = dict(configuration_fields(entries[0], "entry"))
+        entry["body"] = literal
+        saved["entries"] = [entry]
+        state.handoff = saved
+        self.equal(state.entries[0].body, literal)
+        exported = array_field(state.handoff["entries"], "entries")
+        self.require("body_ref" in configuration_fields(exported[0], "entry"))
+
+    def test_semantic_checkpoint_ref_table_restores_visible_prompt(self) -> None:
+        """Cold history restoration resolves the session's shared store table."""
+        text = "semantic prompt " * 1000
+        stores: dict[str, object] = {}
+        reference = export_ref(self.store.append(text), stores=stores)
+        state = tui_state.TuiState()
+        history: list[Mapping[str, object]] = [
+            {"kind": "prompt", "content_ref": reference},
+        ]
+        state.restore(history, page_stores=stores)
+        self.equal(state.entries[0].body, text)
+
+    def test_failed_page_does_not_mutate_task_or_fall_back_inline(self) -> None:
+        """Disk failure fails before a task becomes running or history advances."""
+        state = tui_state.TuiState()
+        previous = state.handoff
+        with (
+            mock.patch("raychat.ui.state.store_text", side_effect=OSError("disk full")),
+            self.rejected(OSError, "disk full"),
+        ):
+            state.start("large" * 1000)
+        self.equal(state.handoff, previous)
+        self.equal(state.phase, tui_state.Phase.IDLE)
+        with self.rejected(ValueError, "paging limit"):
+            state.start("x" * (1024 * 1024 + 1))
+        self.equal(state.handoff, previous)
+
+    def test_preflight_reuses_durable_body_before_task_dispatch(self) -> None:
+        """A prepared page is reused without a second fallible write after ACK."""
+        state = tui_state.TuiState()
+        text = "prepared " * 1000
+        state.prepare_submission(text)
+        before = self.store.path.stat().st_size
+        with mock.patch(
+            "raychat.ui.state.store_text",
+            side_effect=OSError("late write"),
+        ):
+            state.start(text)
+        self.equal(self.store.path.stat().st_size, before)
+        self.equal(state.entries[0].body, text)
+
+    def test_corrupt_reference_is_rejected_before_replacing_old_ui(self) -> None:
+        """Invalid reference metadata cannot partially install another transcript."""
+        state = tui_state.TuiState()
+        state.notice("old", "old")
+        previous = state.handoff
+        candidate = tui_state.TuiState()
+        candidate.notice("large", "x" * 8000)
+        saved = candidate.handoff
+        entries = array_field(saved["entries"], "entries")
+        entry = dict(configuration_fields(entries[0], "entry"))
+        reference = dict(configuration_fields(entry["body_ref"], "reference"))
+        reference["sha256"] = "0" * 64
+        entry["body_ref"] = reference
+        saved["entries"] = [entry]
+        with self.rejected(ValueError):
+            state.handoff = saved
+        self.equal(state.handoff, previous)
 
 
 class LayoutTests(TypedTestCase):

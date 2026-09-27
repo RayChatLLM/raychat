@@ -9,7 +9,6 @@ durability of a rename, transactions across files, or coordination with editors.
 
 from __future__ import annotations
 
-import asyncio
 import errno
 import hashlib
 import logging
@@ -33,7 +32,8 @@ from typing import TYPE_CHECKING, Protocol, TypeVar
 from .type_support import override
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    import asyncio
+    from collections.abc import Callable, Iterable, Iterator
     from types import TracebackType
     from typing import BinaryIO, TextIO
 
@@ -607,6 +607,7 @@ def read_regular(
     *,
     follow_symlinks: bool = True,
     from_end: bool = False,
+    metadata: os.stat_result | None = None,
 ) -> bytes:
     """Read at most limit bytes and close before returning a regular-file snapshot.
 
@@ -614,6 +615,8 @@ def read_regular(
     nonblocking open lets fstat reject FIFOs without waiting for a writer. With
     follow_symlinks=False, reject linked/nonregular inputs and verify the opened
     descriptor has the lstat identity, including on platforms without O_NOFOLLOW.
+    A previously captured no-follow ``metadata`` identity can be reused only
+    with ``follow_symlinks=False``; the opened descriptor must still match it.
     from_end selects a bounded suffix. This is not a coordinated read: callers
     needing serialization hold a sidecar.
 
@@ -634,7 +637,12 @@ def read_regular(
         message = "A bounded read requires a nonnegative limit."
         raise ValueError(message)
     flags = os.O_RDONLY | _file_flag("O_BINARY") | _file_flag("O_NONBLOCK")
-    expected = None if follow_symlinks else path.lstat()
+    if metadata is not None and follow_symlinks:
+        message = "Captured metadata requires a no-follow read."
+        raise ValueError(message)
+    expected = (
+        None if follow_symlinks else (path.lstat() if metadata is None else metadata)
+    )
     if expected is not None:
         if not stat.S_ISREG(expected.st_mode) or _linked_metadata(expected):
             message = "Expected a regular, nonlinked file."
@@ -832,6 +840,8 @@ async def _retry_async(
     operation: str,
     policy: RetryPolicy,
 ) -> None:
+    import asyncio
+
     budget = _Budget(policy)
     while True:
         budget.attempts += 1
@@ -862,7 +872,21 @@ async def write_bytes_async(
     by the retry budget. Publication and cleanup sleeps are cooperative. A second
     cancellation during cleanup leaves a diagnosed, owned orphan.
     """
-    temporary = await _prepare_stage_async(destination, data)
+    await write_chunks_async(destination, (data,), policy=policy)
+
+
+async def write_chunks_async(
+    destination: Path,
+    chunks: Iterable[bytes],
+    *,
+    policy: RetryPolicy = DEFAULT_RETRY,
+) -> None:
+    """Stage immutable chunks in a worker with the byte writer's ownership rules.
+
+    The caller must freeze all data used by the iterable before awaiting. Iteration
+    failures discard the private stage; no partial document is published.
+    """
+    temporary = await _prepare_stage_async(destination, chunks)
     try:
         await _retry_async(
             lambda: temporary.replace(destination),
@@ -875,10 +899,12 @@ async def write_bytes_async(
         raise
 
 
-def _prepare_stage(destination: Path, data: bytes) -> Path:
+def _prepare_stage(destination: Path, chunks: Iterable[bytes]) -> Path:
     stream, temporary = _open_stage(destination)
     try:
-        _finish_write(stream, data)
+        for chunk in chunks:
+            stream.write(chunk)
+        _finish_write(stream, b"")
     except BaseException:
         _close_after_failure(stream)
         _cleanup_stage(temporary)
@@ -886,12 +912,14 @@ def _prepare_stage(destination: Path, data: bytes) -> Path:
     return temporary
 
 
-async def _prepare_stage_async(destination: Path, data: bytes) -> Path:
+async def _prepare_stage_async(destination: Path, chunks: Iterable[bytes]) -> Path:
+    import asyncio
+
     worker = asyncio.get_running_loop().run_in_executor(
         None,
         _prepare_stage,
         destination,
-        data,
+        chunks,
     )
     try:
         return await asyncio.shield(worker)
@@ -913,6 +941,8 @@ async def _join_worker(
     cancellation: asyncio.CancelledError,
 ) -> _Result:
     # Join the same operation, including repeated cancellation; never replay it.
+    import asyncio
+
     try:
         while not worker.done():
             with suppress(asyncio.CancelledError):
@@ -942,6 +972,8 @@ async def run_filesystem_task(action: Callable[[], _Result]) -> _Result:
         After a cancelled caller's worker has finished owning its resources.
 
     """
+    import asyncio
+
     worker = asyncio.get_running_loop().run_in_executor(None, action)
     try:
         return await asyncio.shield(worker)
@@ -951,6 +983,8 @@ async def run_filesystem_task(action: Callable[[], _Result]) -> _Result:
 
 
 async def _cleanup_stage_async(temporary: Path) -> None:
+    import asyncio
+
     try:
         await _retry_async(
             lambda: temporary.unlink(missing_ok=True),

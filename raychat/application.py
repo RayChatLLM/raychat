@@ -362,7 +362,7 @@ def _fork(
 ) -> str:
     target = argument.strip()
     proposed = store.snapshot(at=target)
-    previous_snapshot = session.export_snapshot()
+    previous_snapshot = session.export_checkpoint()
     # Validate restore hooks before changing the durable branch selection.
     session.restore_snapshot(proposed)
     try:

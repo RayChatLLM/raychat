@@ -51,14 +51,45 @@ _RUFF_RULE_EXCEPTIONS = {
 }
 
 _RUFF_FILE_RULE_EXCEPTIONS = {
+    # Release capture regression exercises its private inode-bound reader.
+    "tests/test_bootstrap_filesystem.py": "SLF001",
+    # Page constructors mirror the wire format; the store owns reference creation.
+    # Frozen references and message records require object.__setattr__ internally.
+    "raychat/paged_text.py": "PLR0913,PLR0917,PLC2801,SLF001",
+    # Only independently authenticated, sealed payloads reach marshal.loads.
+    "raychat/plugin_bytecode.py": "S302",
+    # Derived summary memo fields and global LRU accounting share one lock.
+    "raychat/session.py": "PLC2801,PLW0603",
+    # Native Windows bindings are not needed by POSIX terminals.
+    "raychat/ui/terminal_backend.py": "PLC0415",
+    # HTTP implementations load only when a network operation needs them.
+    "raychat/plugin_manager.py": "PLC0415",
+    "plugins/chat_completions/client.py": "PLC0415",
+    "plugins/chat_completions/__init__.py": "PLC0415",
+    # Async dependencies load only when a filesystem, process or clipboard
+    # operation needs them, keeping ordinary interactive startup smaller.
+    "raychat/filesystem.py": "PLC0415",
+    "raychat/transport.py": "PLC0415",
+    "raychat/ui/clipboard.py": "PLC0415",
+    "plugins/process/runner.py": "PLC0415",
     "plugins/optimization/gepa/batch_sampler.py": "S311",
     "plugins/optimization/gepa/candidate_selector.py": "S311",
     "plugins/optimization/gepa/merge.py": "S311",
     "plugins/optimization/gepa/optimize_anything.py": "S311",
     # One method per user-visible transcript concern; the reasoning-visibility
     # toggle pushed the facade one past the default budget (mirrors pyproject).
-    "raychat/ui/state.py": "PLR0904",
-    "tests/test_tui_state.py": "PLR0904",
+    # The private prefix protocol is consumed by sibling selection/handoff modules.
+    "raychat/ui/state.py": "PLR0904,SLF001,PYI046",
+    # Regression tests inspect storage ownership and immutable row snapshots.
+    "tests/test_tui_state.py": "PLR0904,SLF001",
+    "tests/test_deferred_view_handoff.py": "PLC2701,SLF001",
+    # Close the process-owned page store before removing test temporary roots.
+    "tests/test_paged_text.py": "SLF001",
+    # Seeded unit fixtures reproduce oracle results; acceptance stress uses urandom.
+    "tests/test_input_history.py": "S311,SLF001",
+    "tests/test_paged_sessions.py": "PLC2701,SLF001,C901,S311",
+    # The fixed fixture subprocess proves supplied poisoned bytecode is discarded.
+    "tests/test_cold_releases.py": "S404,S603",
     # Fixed CI-owned argv, no shell: explicit Popen handle isolation prevents
     # detached test supervisors from retaining the Actions step's output pipes.
     "tools/windows_ci_supervisor.py": "S404,S603",

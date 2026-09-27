@@ -20,7 +20,11 @@ from raychat_bootstrap.releases import Release, Releases
 from raychat_bootstrap.wire import decode, encode
 from tests.assertions import TypedTestCase
 from tests.test_live_recovery_qa import RecordingCore, RecoveryHarness
+from tools import build_portable
 from tools.smoke_process import SmokeCommand, run_checked
+
+if os.name == "posix":
+    from tools import live_core_tui
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -373,6 +377,7 @@ class BootstrapFilesystemTests(TypedTestCase):
             *,
             follow_symlinks: bool = True,
             from_end: bool = False,
+            metadata: os.stat_result | None = None,
         ) -> bytes:
             if path == source and phase == "capture":
                 with path.open("rb"):
@@ -382,6 +387,7 @@ class BootstrapFilesystemTests(TypedTestCase):
                 limit,
                 follow_symlinks=follow_symlinks,
                 from_end=from_end,
+                metadata=metadata,
             )
 
         def write_text(
@@ -733,10 +739,16 @@ class BootstrapPathTests(TypedTestCase):
                     limit: int,
                     *,
                     follow_symlinks: bool = True,
-                    selected: Path = source,
-                    operation: str = change,
+                    metadata: os.stat_result | None = None,
+                    scenario: tuple[Path, str] = (source, change),
                 ) -> bytes:
-                    data = read_regular(path, limit, follow_symlinks=follow_symlinks)
+                    selected, operation = scenario
+                    data = read_regular(
+                        path,
+                        limit,
+                        follow_symlinks=follow_symlinks,
+                        metadata=metadata,
+                    )
                     if path == selected:
                         if operation == "edit":
                             path.write_bytes(b"intervening edit")
@@ -768,8 +780,19 @@ class BootstrapPathTests(TypedTestCase):
         selected.write_bytes(b"original")
         added = source / "added.py"
 
-        def read(path: Path, limit: int, *, follow_symlinks: bool = True) -> bytes:
-            data = read_regular(path, limit, follow_symlinks=follow_symlinks)
+        def read(
+            path: Path,
+            limit: int,
+            *,
+            follow_symlinks: bool = True,
+            metadata: os.stat_result | None = None,
+        ) -> bytes:
+            data = read_regular(
+                path,
+                limit,
+                follow_symlinks=follow_symlinks,
+                metadata=metadata,
+            )
             if path == selected:
                 before = source.stat()
                 added.write_bytes(b"late addition")
@@ -849,3 +872,88 @@ class BootstrapPathTests(TypedTestCase):
                 self.equal(sentinel.read_bytes(), b"external")
             finally:
                 junction.rmdir()
+
+    def test_source_read_rejects_a_different_inode_between_capture_and_open(
+        self,
+    ) -> None:
+        """Returning the original pathname cannot hide bytes read from a replacement."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path, saved = root / "member.py", root / "original.py"
+            path.write_bytes(b"original")
+            expected = path.lstat()
+            path.rename(saved)
+            path.write_bytes(b"replaced")
+            original_read = read_regular
+
+            def restoring_read(
+                selected: Path,
+                limit: int,
+                *,
+                follow_symlinks: bool = True,
+                metadata: os.stat_result | None = None,
+            ) -> bytes:
+                try:
+                    return original_read(
+                        selected,
+                        limit,
+                        follow_symlinks=follow_symlinks,
+                        metadata=metadata,
+                    )
+                finally:
+                    path.unlink()
+                    saved.rename(path)
+
+            with (
+                mock.patch.object(releases, "read_regular", new=restoring_read),
+                self.rejected(ValueError, "changed while opening"),
+            ):
+                releases._read_source(path, expected)
+            self.equal(path.read_bytes(), b"original")
+
+    def test_environment_templates_remain_fixed_and_portably_readable(self) -> None:
+        """Retain allowlisted environment templates in initial and later captures."""
+        expected = {
+            f"environment/{name}.env": b"RAYCHAT_MODEL='fixed-template'\n"
+            for name in ("linux", "macos", "windows")
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            (source / "raychat").mkdir(parents=True)
+            (source / "raychat" / "__init__.py").write_bytes(b"")
+            (source / "environment").mkdir()
+            (source / "environment" / ".env").write_bytes(b"private settings")
+            for name, data in expected.items():
+                (source / name).write_bytes(data)
+            (source / "raychat.json").write_bytes(
+                encode({"release": {"source_files": list(expected)}}),
+            )
+            manager = Releases(source, root / "releases")
+            captured = manager.capture(source)
+            with mock.patch.object(build_portable, "SOURCE_FILES", tuple(expected)):
+                self.equal(build_portable.source_data(captured), expected)
+                self.require(not (captured / "environment" / ".env").exists())
+                for name in expected:
+                    (source / name).write_bytes(b"changed candidate template\n")
+                later = manager.capture(source)
+                self.equal(build_portable.source_data(later), expected)
+
+    def test_live_update_fixture_includes_environment_templates(self) -> None:
+        """Real-TUI update sources retain the portable environment directory."""
+        if os.name != "posix":
+            self.skipTest("The real-TUI fixture uses the POSIX PTY driver.")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("raychat", "plugins", "plugin_catalog", "environment"):
+                (root / name).mkdir()
+            template = root / "environment" / "macos.env"
+            template.write_bytes(b"RAYCHAT_MODEL='fixture-template'\n")
+            (root / "environment" / ".env").write_bytes(b"private settings")
+            target = root / "fixture"
+            live_core_tui._source(root, target)
+            self.require(not (target / "environment" / ".env").exists())
+            self.equal(
+                (target / "environment" / "macos.env").read_bytes(),
+                template.read_bytes(),
+            )

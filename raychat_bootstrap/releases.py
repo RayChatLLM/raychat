@@ -8,6 +8,7 @@ import logging
 import os
 import stat
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -25,14 +26,21 @@ from raychat.filesystem import (
     run_filesystem_task,
 )
 
-from .wire import decode, encode, fields
+from .wire import MAX_MESSAGE, decode, encode, fields
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Mapping
     from typing import BinaryIO
 
 _RUNTIME_ROOTS = ("raychat", "plugins", "plugin_catalog")
-_FIXED_ROOTS = ("raychat_bootstrap", "tests", "tools", "examples", "docs", ".github")
+_FIXED_ROOTS = (
+    "raychat_bootstrap",
+    "tests",
+    "tools",
+    "examples",
+    "docs",
+    ".github",
+)
 _FIXED_FILES = (
     "raychat.py",
     "pyproject.toml",
@@ -43,6 +51,9 @@ _FIXED_FILES = (
     "LICENSE",
     ".gitattributes",
     ".gitignore",
+    "environment/linux.env",
+    "environment/macos.env",
+    "environment/windows.env",
 )
 _IGNORED = {"__pycache__", ".git", ".venv", ".mypy_cache", ".ruff_cache", ".DS_Store"}
 
@@ -94,7 +105,12 @@ def _version(info: os.stat_result) -> tuple[int, ...]:
 
 
 def _read_source(path: Path, expected: os.stat_result) -> bytes:
-    data = read_regular(path, expected.st_size + 1, follow_symlinks=False)
+    data = read_regular(
+        path,
+        expected.st_size + 1,
+        follow_symlinks=False,
+        metadata=expected,
+    )
     if _version(path.lstat()) != _version(expected) or len(data) != expected.st_size:
         message = f"Release source changed while reading: {path}"
         raise ValueError(message)
@@ -109,6 +125,13 @@ def _copy(source: Path, target: Path) -> None:
     except FileNotFoundError:
         return
     entries = _entries(source, ignore_scratch=True)
+    if stat.S_ISDIR(entries[0][1].st_mode):
+        portable = PortablePathIndex()
+        for path, info in entries[1:]:
+            portable.add(
+                path.relative_to(source).as_posix(),
+                directory=stat.S_ISDIR(info.st_mode),
+            )
     for path, info in entries:
         destination = target / path.relative_to(source)
         if stat.S_ISDIR(info.st_mode):
@@ -160,6 +183,11 @@ def _packaging_inventory(root: Path) -> None:
             directory.lstat()
         except FileNotFoundError:
             continue
+        if name == "plugin_catalog":
+            current = _current_catalog_inventory(root, directory)
+            if current is not None:
+                names.update(current)
+                continue
         names.update(
             item.relative_to(root).as_posix()
             for item, entry in _release_entries(directory)
@@ -167,6 +195,79 @@ def _packaging_inventory(root: Path) -> None:
         )
     metadata["source_files"] = sorted(names)
     (root / "raychat.json").write_bytes(encode(configuration))
+
+
+def _current_catalog_inventory(root: Path, directory: Path) -> set[str] | None:
+    """Select the active immutable catalog generation without deleting old files.
+
+    Returns
+    -------
+    set[str] | None
+        The captured profile, convenience catalog, pinned catalog, and its
+        referenced package archives; ``None`` when a generic fixture has no
+        profile and should retain the complete runtime-root inventory.
+
+    Raises
+    ------
+    ValueError
+        The captured profile or catalog references a missing or unsafe member.
+    TypeError
+        A profile or catalog has fields of the wrong type.
+
+    """
+    entries = _release_entries(directory)
+    captured = {
+        item.relative_to(root).as_posix(): (item, info)
+        for item, info in entries
+        if stat.S_ISREG(info.st_mode)
+    }
+    profile_path = "plugin_catalog/profile.json"
+    profile_entry = captured.get(profile_path)
+    if profile_entry is None:
+        return None
+
+    def document(path: str) -> dict[str, object]:
+        entry = captured.get(path)
+        if entry is None:
+            message = "Active plugin catalog member is missing: " + path
+            raise ValueError(message)
+        return fields(decode(_read_source(*entry).rstrip() + b"\n"))
+
+    def member(value: object, *, prefix: str, suffix: str) -> str:
+        if not isinstance(value, str):
+            message = "Active plugin catalog member name must be text."
+            raise TypeError(message)
+        relative = portable_relative_path("plugin_catalog/" + value)
+        if (
+            relative.parts != ("plugin_catalog", value)
+            or not value.startswith(prefix)
+            or not value.endswith(suffix)
+        ):
+            message = "Active plugin catalog member name is invalid."
+            raise ValueError(message)
+        return "plugin_catalog/" + value
+
+    profile = document(profile_path)
+    catalog_path = member(profile.get("catalog"), prefix="catalog-", suffix=".json")
+    catalog = document(catalog_path)
+    document("plugin_catalog/catalog.json")
+    records = catalog.get("plugins")
+    if not isinstance(records, list):
+        message = "Active plugin catalog requires a package list."
+        raise TypeError(message)
+    selected = {profile_path, "plugin_catalog/catalog.json", catalog_path}
+    for record in records:
+        package = fields(record)
+        selected.add(
+            member(package.get("url"), prefix="package-", suffix=".zip"),
+        )
+    missing = selected - captured.keys()
+    if missing:
+        raise ValueError(
+            "Active plugin catalog references missing members: "
+            + ", ".join(sorted(missing)),
+        )
+    return selected
 
 
 def _quality_diagnostics(root: Path, output: BinaryIO) -> None:
@@ -234,6 +335,61 @@ def seal(root: Path) -> str:
     return identity
 
 
+def _compile_runtime(root: Path) -> None:
+    """Create source-checked bytecode before sealing, outside the supervisor heap."""
+    directories = [
+        str(root / name)
+        for name in ("raychat", "raychat_bootstrap")
+        if (root / name).is_dir()
+    ]
+    if directories:
+        for directory in directories:
+            for path, info in reversed(_entries(Path(directory))):
+                if path.name == "__pycache__" and stat.S_ISDIR(info.st_mode):
+                    remove_tree(path)
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            worker.submit(_run_compiler, directories).result()
+
+
+def _run_compiler(directories: list[str]) -> None:
+    asyncio.run(_compile_paths(directories))
+
+
+async def _compile_paths(directories: list[str]) -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-S",
+        "-B",
+        "-m",
+        "compileall",
+        "--invalidation-mode",
+        "checked-hash",
+        "-q",
+        "-f",
+        *directories,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        communication: Awaitable[tuple[bytes, bytes]] = process.communicate()
+        bounded: Awaitable[tuple[bytes, bytes]] = asyncio.wait_for(
+            communication,
+            timeout=60,
+        )
+        output, _error = await bounded
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    if process.returncode:
+        message = "Runtime bytecode compilation failed: " + output.decode(
+            "utf-8",
+            errors="replace",
+        )
+        raise RuntimeError(message)
+
+
 @dataclass(frozen=True)
 class Release:
     """Identify immutable code independently of its activation state."""
@@ -253,6 +409,31 @@ class Release:
         if digest(self.path) != self.identity:
             message = "Release integrity changed after validation."
             raise ValueError(message)
+
+
+def cache_identity(release: Release) -> str:
+    """Identify the plugin registry after its containing release was verified.
+
+    Returns
+    -------
+    str
+        The registry digest, or an empty string for older releases without one.
+
+    Raises
+    ------
+    ValueError
+        The registry exceeds the bounded transport size.
+
+    """
+    registry = release.path / "raychat" / "_plugin_code_registry.json"
+    try:
+        data = read_regular(registry, MAX_MESSAGE + 1, follow_symlinks=False)
+    except FileNotFoundError:
+        return ""
+    if len(data) > MAX_MESSAGE:
+        message = "Plugin code registry exceeds the transport limit."
+        raise ValueError(message)
+    return hashlib.sha256(data).hexdigest()
 
 
 def _proposal_paths(changes: Mapping[str, bytes]) -> dict[str, bytes]:
@@ -343,7 +524,12 @@ class Releases:
 
         """
         root = self.capture(self.source)
-        return Release(root, seal(root))
+        try:
+            _compile_runtime(root)
+            return Release(root, seal(root))
+        except BaseException:
+            cleanup_tree(root)
+            raise
 
     @staticmethod
     async def validate(root: Path, log: Path, *, python: str | None = None) -> Release:
@@ -468,4 +654,5 @@ def _finish_validation(root: Path) -> Release:
     """
     for name in ("build", ".mypy_cache", ".ruff_cache"):
         remove_tree(root / name)
+    _compile_runtime(root)
     return Release(root, seal(root))

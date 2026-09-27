@@ -22,7 +22,7 @@ from raychat.configuration import SETTINGS
 
 from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
-from .http_debug import DEBUG_DIRECTORY_ENV
+from .http_settings import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
 from .provider_environment import add_provider_arguments
 from .provider_settings import provider_settings

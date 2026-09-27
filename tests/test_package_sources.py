@@ -81,8 +81,14 @@ class PackageSourceTests(TypedTestCase):
             limit: int,
             *,
             follow_symlinks: bool = True,
+            metadata: os.stat_result | None = None,
         ) -> bytes:
-            data = read_regular(path, limit, follow_symlinks=follow_symlinks)
+            data = read_regular(
+                path,
+                limit,
+                follow_symlinks=follow_symlinks,
+                metadata=metadata,
+            )
             if path == trigger:
                 if operation == "remove":
                     selected.unlink()
@@ -111,8 +117,19 @@ class PackageSourceTests(TypedTestCase):
             manifest = source / "plugin.json"
             raw = manifest.read_bytes()
 
-            def read(path: Path, limit: int, *, follow_symlinks: bool = True) -> bytes:
-                data = read_regular(path, limit, follow_symlinks=follow_symlinks)
+            def read(
+                path: Path,
+                limit: int,
+                *,
+                follow_symlinks: bool = True,
+                metadata: os.stat_result | None = None,
+            ) -> bytes:
+                data = read_regular(
+                    path,
+                    limit,
+                    follow_symlinks=follow_symlinks,
+                    metadata=metadata,
+                )
                 path.write_bytes(raw + b" ")
                 return data
 
@@ -131,6 +148,50 @@ class PackageSourceTests(TypedTestCase):
             with self.rejected(PluginError, "links or reparse"):
                 packages.read_manifest(source)
             self.equal(external.read_bytes(), raw)
+
+    def test_restored_path_cannot_hide_reading_a_different_inode(self) -> None:
+        """Bind each opened member to the identity captured by the initial walk."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = package(root / "source", "original").resolve()
+            selected = source / "__init__.py"
+            saved = root / "saved.py"
+
+            def read(
+                path: Path,
+                limit: int,
+                *,
+                follow_symlinks: bool = True,
+                metadata: os.stat_result | None = None,
+            ) -> bytes:
+                if path != selected:
+                    return read_regular(
+                        path,
+                        limit,
+                        follow_symlinks=follow_symlinks,
+                        metadata=metadata,
+                    )
+                before = source.stat()
+                path.rename(saved)
+                path.write_bytes(b"replaced")
+                try:
+                    return read_regular(
+                        path,
+                        limit,
+                        follow_symlinks=follow_symlinks,
+                        metadata=metadata,
+                    )
+                finally:
+                    path.unlink()
+                    saved.rename(path)
+                    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+            with (
+                mock.patch.object(packages, "read_regular", read),
+                self.rejected(PluginError, "Cannot capture package source"),
+            ):
+                packages.files(source)
+            self.equal(selected.read_bytes(), b"original")
 
     def test_directory_inventory_is_bounded_even_without_files(self) -> None:
         """Empty directories cannot bypass the package traversal budget."""

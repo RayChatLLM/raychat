@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
-from typing import TypeGuard
+from typing import TYPE_CHECKING, TypeGuard
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 VERSION = 1
 MAX_MESSAGE = 64 * 1024 * 1024
@@ -41,17 +45,36 @@ def encode(value: object) -> bytes:
     bytes
         A newline terminated UTF-8 message.
 
+    """
+    with io.BytesIO() as stream:
+        for chunk in encoded_chunks(value):
+            stream.write(chunk)
+        return stream.getvalue()
+
+
+def encoded_chunks(value: object) -> Iterator[bytes]:
+    """Yield finite JSON bytes with the same framing and size bound as encode.
+
+    Yields
+    ------
+    bytes
+        A bounded message, including its final newline.
+
     Raises
     ------
     ValueError
-        The message exceeds the transport limit.
+        The complete message exceeds the transport limit.
 
     """
-    data = json.dumps(value, ensure_ascii=True, allow_nan=False).encode() + b"\n"
-    if len(data) > MAX_MESSAGE:
-        message = "Core handoff exceeds the transport limit."
-        raise ValueError(message)
-    return data
+    encoder = json.JSONEncoder(ensure_ascii=True, allow_nan=False)
+    size = 1  # Include the newline in the transport limit.
+    for chunk in encoder.iterencode(value):
+        size += len(chunk)
+        if size > MAX_MESSAGE:
+            message = "Core handoff exceeds the transport limit."
+            raise ValueError(message)
+        yield chunk.encode("ascii")
+    yield b"\n"
 
 
 def decode(data: bytes) -> dict[str, object]:

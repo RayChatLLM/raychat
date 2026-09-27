@@ -508,6 +508,106 @@ class LimitsSettings:
 
 
 @dataclass(frozen=True, kw_only=True)
+class MemorySettings:
+    """Validated paging, retention, and cache budgets; not a process RSS cap."""
+
+    message_page_min_chars: int
+    transcript_page_min_chars: int
+    input_history_page_min_chars: int
+    input_history_max_items: int
+    input_history_max_bytes: int
+    text_page_max_bytes: int
+    text_page_recent_refs: int
+    text_page_read_chunk_bytes: int
+    text_page_lock_timeout_seconds: float
+    summary_max_chars: int
+    summary_cache_max_bytes: int
+    summary_cache_max_items: int
+
+    @classmethod
+    def parse(cls, value: object, path: str = "memory") -> MemorySettings:
+        """Read every budget without implicit defaults or unknown fields.
+
+        Returns
+        -------
+        MemorySettings
+            Positive resource bounds and nonnegative optional-cache budgets.
+
+        """
+        fields = settings_fields(
+            value,
+            path,
+            required=(
+                "message_page_min_chars",
+                "transcript_page_min_chars",
+                "input_history_page_min_chars",
+                "input_history_max_items",
+                "input_history_max_bytes",
+                "text_page_max_bytes",
+                "text_page_recent_refs",
+                "text_page_read_chunk_bytes",
+                "text_page_lock_timeout_seconds",
+                "summary_max_chars",
+                "summary_cache_max_bytes",
+                "summary_cache_max_items",
+            ),
+        )
+        return cls(
+            message_page_min_chars=integer_field(
+                fields["message_page_min_chars"],
+                f"{path}.message_page_min_chars",
+            ),
+            transcript_page_min_chars=integer_field(
+                fields["transcript_page_min_chars"],
+                f"{path}.transcript_page_min_chars",
+            ),
+            input_history_page_min_chars=integer_field(
+                fields["input_history_page_min_chars"],
+                f"{path}.input_history_page_min_chars",
+            ),
+            input_history_max_items=integer_field(
+                fields["input_history_max_items"],
+                f"{path}.input_history_max_items",
+            ),
+            input_history_max_bytes=integer_field(
+                fields["input_history_max_bytes"],
+                f"{path}.input_history_max_bytes",
+            ),
+            text_page_max_bytes=integer_field(
+                fields["text_page_max_bytes"],
+                f"{path}.text_page_max_bytes",
+            ),
+            text_page_recent_refs=integer_field(
+                fields["text_page_recent_refs"],
+                f"{path}.text_page_recent_refs",
+                minimum=0,
+            ),
+            text_page_read_chunk_bytes=integer_field(
+                fields["text_page_read_chunk_bytes"],
+                f"{path}.text_page_read_chunk_bytes",
+            ),
+            text_page_lock_timeout_seconds=number_field(
+                fields["text_page_lock_timeout_seconds"],
+                f"{path}.text_page_lock_timeout_seconds",
+            ),
+            summary_max_chars=integer_field(
+                fields["summary_max_chars"],
+                f"{path}.summary_max_chars",
+            ),
+            summary_cache_max_bytes=integer_field(
+                fields["summary_cache_max_bytes"],
+                f"{path}.summary_cache_max_bytes",
+                minimum=0,
+            ),
+            summary_cache_max_items=integer_field(
+                fields["summary_cache_max_items"],
+                f"{path}.summary_cache_max_items",
+                minimum=0,
+            ),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class TuiAdaptiveQualitySettings:
     """Validated tui.adaptive_quality configuration."""
 
@@ -1390,6 +1490,7 @@ class HostSettings:
     plugins: PluginsSettings
     storage: StorageSettings
     limits: LimitsSettings
+    memory: MemorySettings
     tui: TuiSettings
     release: ReleaseSettings
     terminal: TerminalSettings
@@ -1415,6 +1516,7 @@ class HostSettings:
             plugins=PluginsSettings.parse(fields.get("plugins"), f"{path}.plugins"),
             storage=StorageSettings.parse(fields.get("storage"), f"{path}.storage"),
             limits=LimitsSettings.parse(fields.get("limits"), f"{path}.limits"),
+            memory=MemorySettings.parse(fields.get("memory"), f"{path}.memory"),
             tui=TuiSettings.parse(fields.get("tui"), f"{path}.tui"),
             release=ReleaseSettings.parse(fields.get("release"), f"{path}.release"),
             terminal=TerminalSettings.parse(fields.get("terminal"), f"{path}.terminal"),

@@ -21,6 +21,7 @@ from unittest import mock
 
 from raychat import transport as process_runtime
 from raychat.configuration import SETTINGS
+from raychat.plugin_sources import SourceTree
 from raychat.provider_settings import provider_settings
 from raychat.sdk import ProviderError
 from raychat.type_support import override
@@ -255,6 +256,36 @@ class SubagentCoordinatorTests(PackageTestCase):
             self.source_runtime.close()
         finally:
             self.temporary.cleanup()
+
+    def test_local_child_captures_only_its_selected_packages(self) -> None:
+        """A child stays isolated without compiling unrelated root plugins again."""
+        child = ScriptedChat(['{"action":"done","message":"checked"}'])
+        profile = models.ModelProfile("reviewer", "model/reviewer", lambda: child)
+        coordinator = coordination.SubagentCoordinator(
+            models.ModelRouter([profile]),
+            self.root,
+        )
+        coordinator.plugin_source = self.plugin_sources
+        captured: list[str] = []
+        from_snapshot = SourceTree.from_snapshot
+
+        def capture(snapshot: object) -> SourceTree:
+            tree = from_snapshot(snapshot)
+            captured.append(tree.manifest.id)
+            return tree
+
+        with mock.patch.object(SourceTree, "from_snapshot", capture):
+            result = _workflow(
+                coordinator,
+                {
+                    "action": "delegate",
+                    "agent": "child",
+                    "purpose": "review",
+                    "task": "Review.",
+                },
+            )
+        require(result["ok"], result)
+        equal(set(captured), {"filesystem", "context"})
 
     def test_completed_provider_timeout_is_reported_without_repeated_waits(
         self,

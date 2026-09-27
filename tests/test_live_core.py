@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import importlib.util
 import io
+import json
+import os
+import py_compile
 import sys
 import tempfile
 import threading
@@ -15,21 +20,27 @@ from unittest import mock
 from raychat.core_bridge import CoreBridge
 from raychat.handoff import document, editor_parts, editor_state, export_plugins
 from raychat.plugins import Runtime
+from raychat.resources import AgentResources
+from raychat.ui.controller import run_tui
 from raychat.ui.message_queue import MessageQueue
 from raychat.ui.state import TuiState
 from raychat.ui.terminal import KeyDecoder, LineEditor
+from raychat.validation import configuration_fields
 from raychat.workers import AgentWorker, WorkerExecution
 from raychat_bootstrap.recovery import retained_state
 from raychat_bootstrap.releases import Release, Releases, seal
 from raychat_bootstrap.supervisor import Supervisor
-from raychat_bootstrap.wire import decode, encode
+from raychat_bootstrap.wire import decode, encode, fields
 from tests.assertions import TypedTestCase
 from tests.plugin_support import create_runtime, plugin_module, require_agent_sessions
 from tests.test_agent_sessions import ControlledChat
+from tests.test_tui_sessions import Terminal
+from tests.tui_support import arguments
 
 if TYPE_CHECKING:
     from plugins.subagents import coordinator as coordination
     from plugins.subagents import models
+    from raychat.plugin_sources import PluginSources
     from raychat.sdk import CancelCheck, EventCallback
 else:
     coordination = plugin_module("subagents.coordinator")
@@ -42,6 +53,53 @@ def _roundtrip(value: object) -> dict[str, object]:
 
 class HandoffTests(TypedTestCase):
     """Preserve semantic input transactions across actual JSON serialization."""
+
+    def test_ready_snapshot_detaches_nested_plugin_sources(self) -> None:
+        """Later exporter mutations cannot change a captured process handoff."""
+        sources: PluginSources = {
+            "packages": [
+                {
+                    "path": "fixture",
+                    "module": "__init__",
+                    "settings": {"values": ["original"]},
+                    "files": {"plugin.json": "e30="},
+                },
+            ],
+        }
+        expected = copy.deepcopy(sources)
+        bridge = CoreBridge(io.BytesIO(), io.BytesIO())
+        resources = AgentResources(Runtime("."), lambda _messages: "", live=bridge)
+
+        def capture_ready(_bridge: CoreBridge, kind: str, **values: object) -> None:
+            self.equal(kind, "ready")
+            saved = configuration_fields(values["state"], "handoff")
+            sources["packages"][0]["files"]["plugin.json"] = "changed"
+            sources["packages"][0]["settings"]["values"] = ["changed"]
+            self.equal(saved["sources"], expected)
+            message = "Captured ready state"
+            raise RuntimeError(message)
+
+        with (
+            mock.patch.object(Runtime, "export_sources", return_value=sources),
+            mock.patch.object(CoreBridge, "send", capture_ready),
+            self.rejected(RuntimeError, "Captured ready state"),
+        ):
+            run_tui(arguments(), resources, Terminal(lambda: b""))
+
+    def test_streamed_wire_preserves_bytes_and_counts_escaped_unicode(self) -> None:
+        """Keep the existing framing and reject at the exact encoded byte limit."""
+        value = {"text": "雪🙂\n" * 100, "nested": [True, None, {"value": 3.5}]}
+        expected = (
+            json.dumps(value, ensure_ascii=True, allow_nan=False).encode() + b"\n"
+        )
+        self.equal(encode(value), expected)
+        with mock.patch("raychat_bootstrap.wire.MAX_MESSAGE", len(expected)):
+            self.equal(decode(encode(value)), value)
+        with (
+            mock.patch("raychat_bootstrap.wire.MAX_MESSAGE", len(expected) - 1),
+            self.rejected(ValueError, "transport limit"),
+        ):
+            encode(value)
 
     def test_queue_edits_and_suspended_unicode_draft(self) -> None:
         """Restore temporary edits without accidentally committing or dispatching."""
@@ -363,6 +421,48 @@ class CoreProcessTests(TypedTestCase):
 class ReleaseTests(TypedTestCase):
     """Candidate edits cannot replace the evaluator or retained release bytes."""
 
+    def test_initial_bytecode_is_generated_from_source_and_sealed(self) -> None:
+        """Discard supplied caches and protect generated, source-checked bytecode."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            package = source / "raychat"
+            cache = package / "__pycache__"
+            cache.mkdir(parents=True)
+            contents = b"VALUE = 1\n"
+            (package / "__init__.py").write_bytes(contents)
+            cache_name = f"__init__.{sys.implementation.cache_tag}.pyc"
+            (cache / cache_name).write_bytes(b"untrusted supplied bytecode")
+            (source / "raychat.json").write_bytes(
+                encode({"release": {"source_files": []}}),
+            )
+            releases = Releases(source, root / "releases")
+            candidate = releases.capture(source)
+            staged_source = candidate / "raychat" / "__init__.py"
+            staged_source.write_bytes(b"VALUE = 2\n")
+            stamp = staged_source.stat()
+            py_compile.compile(
+                str(staged_source),
+                doraise=True,
+                invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+            )
+            staged_source.write_bytes(contents)
+            os.utime(staged_source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            unexpected = staged_source.parent / "__pycache__" / "unexpected.pyc"
+            unexpected.write_bytes(b"unvalidated cache")
+            with mock.patch.object(releases, "capture", return_value=candidate):
+                release = releases.initial()
+            self.require(not unexpected.exists())
+            compiled = release.path / "raychat" / "__pycache__" / cache_name
+            data = compiled.read_bytes()
+            self.equal(int.from_bytes(data[4:8], "little"), 3)
+            self.equal(data[8:16], importlib.util.source_hash(contents))
+            release.verify()
+            compiled.chmod(0o600)
+            compiled.write_bytes(data + b"tampered")
+            with self.rejected(ValueError, "integrity"):
+                release.verify()
+
     def test_release_integrity_detects_changed_code(self) -> None:
         """Even a deliberate chmod and edit invalidates the sealed release identity."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -511,6 +611,122 @@ class ReleaseTests(TypedTestCase):
                     metadata["source_files"],
                     ["raychat/nested/example.py", "tests/test_fixed.py"],
                 )
+            finally:
+                for path in releases.trusted.rglob("*"):
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+                releases.trusted.chmod(0o700)
+
+    def test_candidate_inventory_selects_current_catalog_generation(self) -> None:
+        """Keep old published URLs on disk without shipping them in the build."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            catalog = source / "plugin_catalog"
+            catalog.mkdir(parents=True)
+            (source / "release-version.txt").write_text("0.1.0\n")
+            (catalog / "profile.json").write_bytes(
+                encode({
+                    "schema": 1,
+                    "id": "standard",
+                    "catalog": "catalog-current.json",
+                    "packages": ["sample@1.0.0"],
+                }),
+            )
+            active = encode({
+                "schema": 1,
+                "plugins": [{"url": "package-current.zip", "sha256": "a" * 64}],
+            })
+            (catalog / "catalog-current.json").write_bytes(active)
+            (catalog / "catalog.json").write_bytes(active)
+            (catalog / "package-current.zip").write_bytes(b"current archive")
+            (catalog / "catalog-old.json").write_bytes(b"old catalog")
+            (catalog / "package-old.zip").write_bytes(b"old archive")
+            (source / "raychat.json").write_bytes(
+                encode({
+                    "release": {
+                        "source_files": [
+                            "release-version.txt",
+                            "plugin_catalog/catalog-old.json",
+                            "plugin_catalog/package-old.zip",
+                        ],
+                    },
+                }),
+            )
+            releases = Releases(source, root / "releases")
+            try:
+                candidate = releases.capture(source)
+                configuration = decode((candidate / "raychat.json").read_bytes())
+                metadata = fields(configuration["release"])
+                self.equal(
+                    metadata["source_files"],
+                    [
+                        "plugin_catalog/catalog-current.json",
+                        "plugin_catalog/catalog.json",
+                        "plugin_catalog/package-current.zip",
+                        "plugin_catalog/profile.json",
+                        "release-version.txt",
+                    ],
+                )
+                self.equal(
+                    (candidate / "plugin_catalog" / "package-old.zip").read_bytes(),
+                    b"old archive",
+                )
+            finally:
+                for path in releases.trusted.rglob("*"):
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+                releases.trusted.chmod(0o700)
+
+    def test_candidate_inventory_rejects_missing_catalog_archive(self) -> None:
+        """Do not silently omit a package referenced by the active catalog."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            catalog = source / "plugin_catalog"
+            catalog.mkdir(parents=True)
+            (catalog / "profile.json").write_bytes(
+                encode({
+                    "catalog": "catalog-current.json",
+                }),
+            )
+            active = encode({"plugins": [{"url": "package-missing.zip"}]})
+            (catalog / "catalog-current.json").write_bytes(active)
+            (catalog / "catalog.json").write_bytes(active)
+            (source / "raychat.json").write_bytes(
+                encode({
+                    "release": {"source_files": []},
+                }),
+            )
+            releases = Releases(source, root / "releases")
+            try:
+                with self.rejected(ValueError, "missing"):
+                    releases.capture(source)
+            finally:
+                for path in releases.trusted.rglob("*"):
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+                releases.trusted.chmod(0o700)
+
+    def test_candidate_inventory_rejects_catalog_path_traversal(self) -> None:
+        """Catalog references resolve only to filenames in the captured tree."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            catalog = source / "plugin_catalog"
+            catalog.mkdir(parents=True)
+            (catalog / "profile.json").write_bytes(
+                encode({
+                    "catalog": "../../outside.json",
+                }),
+            )
+            (catalog / "catalog.json").write_bytes(encode({"plugins": []}))
+            (source / "raychat.json").write_bytes(
+                encode({
+                    "release": {"source_files": []},
+                }),
+            )
+            releases = Releases(source, root / "releases")
+            try:
+                with self.rejected(ValueError):
+                    releases.capture(source)
             finally:
                 for path in releases.trusted.rglob("*"):
                     path.chmod(0o700 if path.is_dir() else 0o600)

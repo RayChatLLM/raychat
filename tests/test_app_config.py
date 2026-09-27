@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +16,8 @@ import raychat.ui.renderer as ray_renderer
 import raychat.ui.terminal as terminal_runtime
 from raychat import configuration, sdk
 from raychat.filesystem import read_regular
+from raychat.host_settings import MemorySettings
+from raychat.paged_text import TextPageStore
 from raychat.ui import controller as ray_chat_tui
 from raychat.validation import array_field, json_object, object_field
 from tests.assertions import TypedTestCase
@@ -52,6 +54,211 @@ def _changed(
 
 class AppConfigurationTests(TypedTestCase):
     """Check AppConfiguration behavior and failure boundaries."""
+
+    def test_memory_budgets_require_exact_fields_and_valid_numbers(self) -> None:
+        """Reject typos, implicit defaults and booleans at the typed boundary."""
+        source = Path(configuration.__file__).resolve().parents[1] / "raychat.json"
+        original = object_field(json_object(source.read_bytes()), "configuration")
+        memory = object_field(original["memory"], "memory")
+        optional_caches = {
+            "text_page_recent_refs",
+            "summary_cache_max_bytes",
+            "summary_cache_max_items",
+        }
+        for name in memory:
+            invalid: list[object] = [True, False, None, "1", -1]
+            if name not in optional_caches:
+                invalid.append(0)
+            if name == "text_page_lock_timeout_seconds":
+                invalid.extend((float("nan"), float("inf"), 10**400))
+            else:
+                invalid.append(1.5)
+            for value in invalid:
+                with self.subTest(name=name, value=value), self.rejected(RuntimeError):
+                    MemorySettings.parse({**memory, name: value})
+            missing = dict(memory)
+            del missing[name]
+            with self.subTest(missing=name), self.rejected(RuntimeError, name):
+                MemorySettings.parse(missing)
+        with self.rejected(RuntimeError, "unexpected_budget"):
+            MemorySettings.parse({**memory, "unexpected_budget": 1})
+        with self.rejected(RuntimeError):
+            MemorySettings.parse([])
+        disabled = {**memory, **dict.fromkeys(optional_caches, 0)}
+        parsed: object = asdict(MemorySettings.parse(disabled))
+        self.equal(parsed, disabled)
+
+    def test_memory_budgets_load_custom_values_and_are_immutable(self) -> None:
+        """Complete custom configuration replaces every default budget."""
+        source = Path(configuration.__file__).resolve().parents[1] / "raychat.json"
+        original = object_field(json_object(source.read_bytes()), "configuration")
+        memory = object_field(original["memory"], "memory")
+        overrides = {name: index for index, name in enumerate(memory, start=17)}
+        overrides["text_page_max_bytes"] = 2 * 1024 * 1024
+        configured = {**original, "memory": overrides}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.json"
+            path.write_text(json.dumps(configured), encoding="utf-8")
+            settings = configuration.load_config(path, expand_plugins=False)
+            loaded: object = asdict(settings.memory)
+            self.equal(loaded, overrides)
+
+            def mutate(name: str) -> None:
+                setattr(settings.memory, name, 19)
+
+            self.reject_unchecked_call(
+                FrozenInstanceError,
+                mutate,
+                "text_page_max_bytes",
+            )
+            del configured["memory"]
+            path.write_text(json.dumps(configured), encoding="utf-8")
+            with self.rejected(RuntimeError, "memory"):
+                configuration.load_config(path, expand_plugins=False)
+
+    def test_page_budget_covers_unicode_input_and_reply_limits(self) -> None:
+        """Reject undersized pages while accepting smaller consistent text budgets."""
+        source = Path(configuration.__file__).resolve().parents[1] / "raychat.json"
+        original = object_field(json_object(source.read_bytes()), "configuration")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "memory.json"
+            for input_chars, reply_chars in ((8, 4), (4, 8)):
+                configured = _changed(original, ("tui", "input_max_chars"), input_chars)
+                configured = _changed(
+                    configured,
+                    ("limits", "max_reply_chars"),
+                    reply_chars,
+                )
+                configured = _changed(configured, ("memory", "text_page_max_bytes"), 31)
+                path.write_text(json.dumps(configured), encoding="utf-8")
+                with self.subTest(input_chars=input_chars, reply_chars=reply_chars):
+                    with self.rejected(RuntimeError, "memory.text_page_max_bytes"):
+                        configuration.load_config(path, expand_plugins=False)
+                    configured = _changed(
+                        configured,
+                        ("memory", "text_page_max_bytes"),
+                        32,
+                    )
+                    path.write_text(json.dumps(configured), encoding="utf-8")
+                    settings = configuration.load_config(path, expand_plugins=False)
+                    with TextPageStore(
+                        root / "pages",
+                        "unicode.pages",
+                        max_page_bytes=settings.memory.text_page_max_bytes,
+                    ) as store:
+                        for text in ("🙂" * input_chars, "雪🙂" * (reply_chars // 2)):
+                            self.equal(store.read(store.append(text)), text)
+
+    def test_config_argument_sets_memory_budgets_before_runtime_import(self) -> None:
+        """A fresh launcher process imports custom settings selected by --config."""
+        root = Path(configuration.__file__).resolve().parents[1]
+        original = object_field(
+            json_object((root / "raychat.json").read_bytes()),
+            "configuration",
+        )
+        memory = object_field(original["memory"], "memory")
+        overrides = {name: index for index, name in enumerate(memory, start=23)}
+        overrides["text_page_max_bytes"] = 2 * 1024 * 1024
+        original["memory"] = overrides
+        object_field(original["plugins"], "plugins")["profile"] = None
+        script = """
+import json
+import os
+import runpy
+import sys
+from dataclasses import asdict
+from pathlib import Path
+selected = Path(sys.argv[1])
+expected = json.loads(selected.read_text(encoding='utf-8'))['memory']
+sys.argv = ['raychat.py', '--config', str(selected), '--help']
+try:
+    runpy.run_path('raychat.py', run_name='__main__')
+except SystemExit as error:
+    if error.code != 0:
+        raise
+from raychat.configuration import SETTINGS
+if asdict(SETTINGS.memory) != expected:
+    raise AssertionError('Custom memory configuration was not imported')
+from raychat import paged_text, session
+from raychat.ui import input_history, state
+consumed = {
+    'message_page_min_chars': session._PAGE_MIN_CHARS,
+    'transcript_page_min_chars': state._PAGED_BODY_CHARS,
+    'input_history_page_min_chars': input_history._PAGE_MIN_CHARS,
+    'input_history_max_items': input_history._MAX_ITEMS,
+    'input_history_max_bytes': input_history._MAX_BYTES,
+    'text_page_max_bytes': paged_text._MAX_PAGE_BYTES,
+    'text_page_recent_refs': paged_text._RECENT_PAGES,
+    'text_page_read_chunk_bytes': paged_text._CHUNK_BYTES,
+    'summary_max_chars': session._SUMMARY_MAX_CHARS,
+    'summary_cache_max_bytes': session._SUMMARY_CACHE_MAX_BYTES,
+    'summary_cache_max_items': session._SUMMARY_CACHE_MAX_ITEMS,
+}
+for name, value in consumed.items():
+    if value != expected[name]:
+        raise AssertionError(f'Runtime ignored custom memory budget: {name}')
+calls = []
+def summarize(content):
+    calls.append(content)
+    return ''
+message = session._StoredMessage('user', 'retained original', 'prompt', 1)
+message.cached_summary('zero-budget-probe', summarize)
+message.cached_summary('zero-budget-probe', summarize)
+summary_disabled = (
+    expected['summary_cache_max_bytes'] == 0
+    or expected['summary_cache_max_items'] == 0
+)
+if len(calls) != (2 if summary_disabled else 1):
+    raise AssertionError('Summary cache did not honor its zero budget')
+if summary_disabled and session._SUMMARY_CACHE:
+    raise AssertionError('Disabled summary cache retained an empty summary')
+os.environ['RAYCHAT_TEXT_PAGE_DIR'] = str(selected.parent / 'pages')
+try:
+    first = paged_text.store_text('retained original')
+    second = paged_text.store_text('retained original')
+    if (first == second) != (expected['text_page_recent_refs'] > 0):
+        raise AssertionError('Page deduplication did not honor its budget')
+    if expected['text_page_recent_refs'] == 0 and paged_text._DEFAULT.recent:
+        raise AssertionError('Disabled deduplication retained page references')
+    if any(paged_text.read_ref(ref) != 'retained original' for ref in (first, second)):
+        raise AssertionError('Cache eviction lost original text')
+finally:
+    paged_text._close_default()
+selected.with_suffix('.observed.json').write_text(
+    json.dumps(asdict(SETTINGS.memory)), encoding='utf-8')
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            selected = Path(directory) / "memory.json"
+            environment = dict(os.environ)
+            environment.pop("RAYCHAT_RECOVERY", None)
+            environment.pop("RAYCHAT_RECOVERY_VERSION", None)
+            environment["RAYCHAT_CONFIG"] = str(root / "raychat.json")
+            for disabled in (
+                None,
+                "text_page_recent_refs",
+                "summary_cache_max_bytes",
+                "summary_cache_max_items",
+            ):
+                values = overrides if disabled is None else {**overrides, disabled: 0}
+                original["memory"] = values
+                selected.write_text(json.dumps(original), encoding="utf-8")
+                with self.subTest(disabled=disabled):
+                    run_checked(
+                        SmokeCommand(
+                            (sys.executable, "-B", "-S", "-c", script, str(selected)),
+                            root,
+                            environment,
+                            10,
+                            4000,
+                        ),
+                    )
+                    self.equal(
+                        json_object(
+                            selected.with_suffix(".observed.json").read_bytes(),
+                        ),
+                        values,
+                    )
 
     def test_configuration_capture_closes_before_parsing(self) -> None:
         """A parser can replace the selected input after the snapshot is closed."""

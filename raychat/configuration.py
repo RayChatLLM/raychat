@@ -33,12 +33,14 @@ _ROOT_KEYS = frozenset({
     "plugins",
     "storage",
     "limits",
+    "memory",
     "tui",
     "release",
     "terminal",
     "renderer",
 })
 _HALF_BLOCK_SAMPLES = 2
+_UTF8_MAX_BYTES = 4
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -69,6 +71,14 @@ def _require(*, condition: bool, message: str) -> None:
 
 def _validate_configuration(settings: HostSettings, raw_size: int) -> None:
     limits, chat, storage = settings.limits, settings.chat, settings.storage
+    _require(
+        condition=settings.memory.text_page_max_bytes
+        >= _UTF8_MAX_BYTES * max(settings.tui.input_max_chars, limits.max_reply_chars),
+        message=(
+            "memory.text_page_max_bytes must be at least four times the larger of "
+            "tui.input_max_chars and limits.max_reply_chars to preserve UTF-8 text."
+        ),
+    )
     _require(
         condition=raw_size <= limits.max_config_bytes,
         message=(

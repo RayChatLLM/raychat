@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import queue
 import threading
@@ -11,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from raychat_bootstrap.wire import MAX_MESSAGE, decode, encode
+from raychat_bootstrap.wire import MAX_MESSAGE, decode, encode, encoded_chunks
 
 from .core_review import completion
 from .validation import configuration_fields, integer_field, text_field
@@ -71,15 +72,28 @@ class CoreBridge:
         try:
             while data := self.reader.readline(MAX_MESSAGE + 1):
                 self.messages.put(decode(data))
+                del data
         finally:
             self.messages.put({"kind": "disconnected"})
 
     def send(self, kind: str, **values: object) -> None:
         """Send one complete message, retaining order across worker threads."""
-        data = encode({"kind": kind, **values})
-        with self.write_lock:
-            self.writer.write(data)
-            self.writer.flush()
+        message = {"kind": kind, **values}
+        if kind in {"checkpoint", "handoff", "ready"}:
+            # Freeze before validation: the second pass must encode the same values.
+            snapshot = copy.deepcopy(message)
+            for _chunk in encoded_chunks(snapshot):
+                pass
+            with self.write_lock:
+                for chunk in encoded_chunks(snapshot):
+                    self.writer.write(chunk)
+                self.writer.flush()
+
+        else:
+            data = encode(message)
+            with self.write_lock:
+                self.writer.write(data)
+                self.writer.flush()
 
     def poll(self) -> None:
         """Apply all received controls without dispatching application work."""
@@ -147,11 +161,13 @@ class CoreBridge:
         if status != self.status:
             self.status_time = time.monotonic()
         self.status = status
-        if self.status.startswith((
-            "Update rejected:",
-            "Core updated",
-            "Update failed",
-        )):
+        if self.status.startswith(
+            (
+                "Update rejected:",
+                "Core updated",
+                "Update failed",
+            ),
+        ):
             self.notices.append(self.status)
 
     @property

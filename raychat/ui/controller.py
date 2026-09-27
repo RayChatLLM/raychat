@@ -26,6 +26,7 @@ from raychat.configuration import SETTINGS
 from raychat.navigation import Navigation
 from raychat.plugins import Runtime
 from raychat.resources import AgentResources, create_worker
+from raychat.sdk import checkpoint_snapshot
 from raychat.session import AgentSession
 from raychat.status import StatusItem, StatusRecord, StatusStore, decode_update
 from raychat.storage import SessionStore
@@ -155,6 +156,13 @@ def _history_records(value: object) -> list[Mapping[str, object]]:
         configuration_fields(item, "session history entry")
         for item in array_field(value, "session history")
     ]
+
+
+def _restore_history(state: TuiState, saved: Mapping[str, object]) -> None:
+    state.restore(
+        _history_records(saved["history"]),
+        page_stores=configuration_fields(saved.get("page_stores", {}), "page stores"),
+    )
 
 
 def _model_name(service: object) -> str | None:
@@ -859,13 +867,13 @@ def _paint_transcript(
     inner_width = max(1, rect.width - 4)
     inner_height = max(0, rect.height - 2)
     viewport = state.viewport(inner_width, inner_height, composition.scroll_offset)
-    if composition.selection is not None:
+    if composition.selection is not None and composition.selection.anchor is not None:
         composition.selection.reconcile(
-            tuple(line.text for line in state.transcript_rows(inner_width)),
+            state.selection_rows(inner_width),
             inner_width,
         )
     title = "CHAT"
-    if composition.selection is not None and composition.selection.text():
+    if composition.selection is not None and composition.selection.has_text:
         title += "  SELECTED"
     if viewport.can_scroll_up:
         title += "  ^ OLDER" if composition.ascii_only else "  ↑ OLDER"
@@ -1485,11 +1493,13 @@ class InterfaceBenchmarkOptions:
         if (
             not _is_integer(self.quality)
             or self.quality < 1
-            or not _boolean_modes((
-                self.include_ansi,
-                self.ascii_only,
-                self.truecolor,
-            ))
+            or not _boolean_modes(
+                (
+                    self.include_ansi,
+                    self.ascii_only,
+                    self.truecolor,
+                ),
+            )
         ):
             message = "Benchmark quality and modes must be valid."
             raise ValueError(message)
@@ -1745,9 +1755,9 @@ class _TuiController:
         self.create_root_worker = create_root_worker
         self.view = ChatView(self.create_root_worker())
         if self.resources.store is not None:
-            self.snapshot: object = self.resources.store.snapshot()
-            self.stored = configuration_fields(self.snapshot, "session snapshot")
-            self.view.state.restore(_history_records(self.stored["history"]))
+            snapshot: object = self.resources.store.snapshot()
+            stored = configuration_fields(snapshot, "session snapshot")
+            _restore_history(self.view.state, stored)
         self.decoder = KeyDecoder(max_paste_bytes=SETTINGS.tui.paste_max_bytes)
         self.tracer = RayTracer()
         self.scheduler = FrameScheduler(
@@ -1823,11 +1833,13 @@ class _TuiController:
                     (record.plugin, record.key, record.scope): record
                     for record in runtime.status_items()
                 }
-                records.update({
-                    (record.plugin, record.key, record.scope): record
-                    for record in owner.remote_status.snapshot()
-                    if record.plugin in runtime.plugins
-                })
+                records.update(
+                    {
+                        (record.plugin, record.key, record.scope): record
+                        for record in owner.remote_status.snapshot()
+                        if record.plugin in runtime.plugins
+                    },
+                )
                 result.extend(
                     record
                     for record in records.values()
@@ -1930,16 +1942,27 @@ class _TuiController:
             )
             live.authorize_dispatch(
                 identifier,
-                handoff.capture_view(self.view),
+                handoff.capture_view(self.view, include_state=False),
                 handoff.writer(self),
                 update_result=update_result,
             )
         return live is None or not live.paused
 
+    def _prepare_submission(self, text: str, *, trim: bool = True) -> bool:
+        try:
+            self.view.state.prepare_submission(text.strip() if trim else text)
+        except (OSError, ValueError) as error:
+            self.view.editor.set_text(text)
+            self._feedback("Could not store transcript: " + str(error))
+            return False
+        return True
+
     def _submit_task(self, text: str) -> int | None:
         live = self.resources.live
         if live is not None and live.paused:
             self.view.message_queue.append(text)
+            return None
+        if not self._prepare_submission(text):
             return None
         if not self._authorize_dispatch():
             self.view.message_queue.append(text)
@@ -2200,6 +2223,8 @@ class _TuiController:
                 execution=WorkerExecution(task=run_command),
             )
             self.command_workers.append(self.view.command_worker)
+        if not self._prepare_submission(text, trim=False):
+            return
         if not self._authorize_dispatch():
             self.view.message_queue.append(text)
             return
@@ -2394,7 +2419,7 @@ class _TuiController:
             self.pending_ui.append((kind, payload))
             return
         if kind == "session_restored":
-            self.view.state.restore(_history_records(payload["history"]))
+            _restore_history(self.view.state, payload)
             self.view.input_history = InputHistory()
             self.view.scroll_offset = 0
             return
@@ -2460,10 +2485,17 @@ class _TuiController:
         if (
             self.picker is None
             and event.kind in {"copy", "interrupt"}
-            and self.view.selection.text()
+            and self.view.selection.has_text
         ):
-            self.clipboard_jobs.put((self.view, self.view.selection.text()))
-            return True
+            if self.view.selection.needs_rebind:
+                self.view.selection.reconcile(
+                    self.view.state.selection_rows(self.view.selection.width),
+                    self.view.selection.width,
+                )
+            copied = self.view.selection.text()
+            if copied:
+                self.clipboard_jobs.put((self.view, copied))
+                return True
         if event.kind == "control" and event.text == "\x14":  # Ctrl+T
             expanded = self.view.state.toggle_thinking()
             self._feedback(
@@ -2698,7 +2730,7 @@ class _TuiController:
             max(0, rect.height - 2),
             self.view.scroll_offset,
         )
-        rows = tuple(line.text for line in self.view.state.transcript_rows(inner_width))
+        rows = self.view.state.selection_rows(inner_width)
         self.view.selection.reconcile(rows, inner_width)
         self.view.scroll_offset = viewport.scroll_offset
         return SelectionViewport(
@@ -2728,8 +2760,14 @@ class _TuiController:
                 viewport,
                 released=event.kind == "release",
             )
-            if event.kind == "release" and was_dragging and self.view.selection.text():
-                self.clipboard_jobs.put((self.view, self.view.selection.text()))
+            if (
+                event.kind == "release"
+                and was_dragging
+                and self.view.selection.has_text
+            ):
+                copied = self.view.selection.text()
+                if copied:
+                    self.clipboard_jobs.put((self.view, copied))
         return True
 
     def _advance_selection(self) -> None:
@@ -2902,8 +2940,8 @@ class _TuiController:
             saved = handoff.capture(self, strict=False)
         except Exception:
             _LOGGER.debug("Core recovery checkpoint failed", exc_info=True)
-        else:
-            live.send("checkpoint", state=saved)
+            return
+        live.send("checkpoint", state=saved)
 
     def _process_handoff(self) -> bool:
         live = self.resources.live
@@ -3268,9 +3306,7 @@ class _TuiController:
                         root = self.views[self.root_id]
                         session = root.worker.session
                         if session is not None:
-                            root.state.restore(
-                                _history_records(session.export_snapshot()["history"]),
-                            )
+                            _restore_history(root.state, checkpoint_snapshot(session))
                     self.args.initial_prompt = None
                 live.send(
                     "ready",

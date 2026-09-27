@@ -15,6 +15,7 @@ from .core_bridge import CoreBridge
 from .core_tools import install
 from .entrypoint import build_parser, prepare_interactive
 from .handoff import document
+from .plugin_bytecode import authorize_cache
 from .plugin_sources import SourceTree
 from .resources import create_resources
 from .storage import SessionStore
@@ -131,6 +132,10 @@ def main() -> int:
         Zero for a clean retirement or exit, one for a startup failure.
 
     """
+    authorize_cache(
+        Path(__file__).resolve().parents[1],
+        os.environ.pop("RAYCHAT_PLUGIN_CODE_SHA256", ""),
+    )
     reader = io.BufferedReader(io.FileIO(0, "rb", closefd=False))
     writer = io.BufferedWriter(io.FileIO(1, "wb", closefd=False))
     launch = decode(reader.readline(MAX_MESSAGE + 1))

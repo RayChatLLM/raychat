@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import importlib
 import logging
 import os
@@ -337,6 +336,8 @@ class NativeWindowsConsole:
 
     def __init__(self, kernel: object) -> None:
         """Bind pointer-sized handles and checked integer mode results."""
+        import ctypes
+
         handle_arguments: list[object] = [ctypes.c_ulong]
         query_arguments: list[object] = [
             ctypes.c_void_p,
@@ -372,6 +373,8 @@ class NativeWindowsConsole:
             The current Windows error code, or zero for cross-platform binding tests.
 
         """
+        import ctypes
+
         reader: object = getattr(ctypes, "get_last_error", None)
         return reader() if isinstance(reader, _ErrorCode) else 0
 
@@ -409,6 +412,8 @@ class NativeWindowsConsole:
             The native mode query fails.
 
         """
+        import ctypes
+
         mode = ctypes.c_ulong()
         pointer: object = ctypes.byref(mode)
         if not self._get_mode(handle, pointer):
@@ -675,6 +680,8 @@ def native_backend() -> TerminalBackend | None:
     if os.name == "posix":
         return PosixBackend(NativePosixCalls())
     if os.name == "nt":
+        import ctypes
+
         libraries: object = getattr(ctypes, "windll", None)
         kernel: object = getattr(libraries, "kernel32", None)
         if kernel is None:

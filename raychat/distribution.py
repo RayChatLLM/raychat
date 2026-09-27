@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .filesystem import read_regular
 from .packages import NAME, Manifest
-from .sdk import PluginError
+from .plugin_contract import PluginError
 from .validation import (
     ConfigurationError,
     array_field,

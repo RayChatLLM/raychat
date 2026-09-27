@@ -1001,9 +1001,12 @@ class _RuntimeRegistry:
         """
         module = self.modules[name]
         tree = _captured_tree(module)
+        snapshot = self.source_snapshots[str(tree.path)]
         return {
-            **self.source_snapshots[str(tree.path)],
+            "path": snapshot["path"],
+            "settings": plain(snapshot["settings"]),
             "module": module.__name__.partition(".")[2],
+            "files": dict(snapshot["files"]),
         }
 
 
@@ -1163,7 +1166,9 @@ class Runtime(_RuntimeRegistry):
         self.modules[tree.manifest.id] = module
         if tree not in self.source_trees:
             self.source_trees.append(tree)
-        self.source_snapshots.setdefault(str(tree.path), tree.snapshot())
+        source_path = str(tree.path)
+        if source_path not in self.source_snapshots:
+            self.source_snapshots[source_path] = tree.snapshot()
         register: object = getattr(module, "register", None)
         self._register_module(register, api)
         self._apply_registrations(api.pending)
@@ -1535,8 +1540,13 @@ class Runtime(_RuntimeRegistry):
         with self.source_read():
             return self._watch_sources()
 
-    def _watch_sources(self) -> dict[str, str]:
-        paths = {str(_captured_tree(module).path) for module in self.modules.values()}
+    def _watch_sources(self, *, use_captured_loaded: bool = False) -> dict[str, str]:
+        loaded: dict[str, str] = {}
+        for module in self.modules.values():
+            tree = _captured_tree(module)
+            filename = str(tree.path)
+            loaded[filename] = tree.digest
+        paths = set(loaded)
         for directory in self.watch_directories:
             for path in discover(directory):
                 try:
@@ -1545,7 +1555,14 @@ class Runtime(_RuntimeRegistry):
                     disabled = False
                 if not disabled:
                     paths.add(str(path.resolve()))
-        return {filename: _source_fingerprint(filename) for filename in sorted(paths)}
+        return {
+            filename: (
+                loaded[filename]
+                if use_captured_loaded and filename in loaded
+                else _source_fingerprint(filename)
+            )
+            for filename in sorted(paths)
+        }
 
     def watch(
         self,
@@ -1554,12 +1571,16 @@ class Runtime(_RuntimeRegistry):
         enabled: bool = True,
     ) -> None:
         """Select source directories and capture their initial fingerprints."""
-        self.watch_directories = [
-            Path(path).expanduser().resolve() for path in directories
-        ]
-        self.auto_reload = enabled
-        # Captured workers disable watching and need no installed-source locks.
-        self._fingerprints = self._watched() if enabled else {}
+        with self._lock:
+            self.watch_directories = [
+                Path(path).expanduser().resolve() for path in directories
+            ]
+            self.auto_reload = enabled
+            # Captured workers do not acquire installed-source locks.
+            self._fingerprints = {}
+            if enabled:
+                with self.source_read():
+                    self._fingerprints = self._watch_sources(use_captured_loaded=True)
 
     def refresh(self, *, notify: EventCallback | None = None) -> None:
         """Activate changed plugin sources when the runtime is idle."""

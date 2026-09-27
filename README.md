@@ -57,6 +57,8 @@ configuration. Provider values belong in the selected environment file;
 `storage.home_directory` controls the default location of that file.
 Configuration rejects duplicate keys, invalid types and ranges, non-finite values,
 unsupported versions, and oversized files.
+See [memory and recovery storage](docs/LIVE_CORE.md#memory-disk-backed-history-and-configuration)
+for disk-backed history, `memory` settings, and private runtime variables.
 
 ### Environment files
 
@@ -498,8 +500,10 @@ clears selection because wrapped cell coordinates change.
 Up/Down recalls messages and commands submitted in the current chat during this
 run, including queued messages. Down past the newest entry restores your unfinished
 draft and cursor. Recalled text can be edited and resubmitted without changing the
-original history. Recall retains up to 256 recent inputs and 256 KiB of UTF-8 text
-per chat, always keeping at least one input. Older entries are discarded.
+original history. By default, recall retains up to 256 recent inputs and 256 KiB
+of UTF-8 text per chat, always keeping at least one input. Configure these budgets
+with `memory.input_history_max_items` and `memory.input_history_max_bytes` in
+`raychat.json`. Older recall entries are discarded.
 Menus retain their arrow navigation; Page Up/Down and the mouse
 wheel scroll the transcript. Shift+Up/Down continues to edit queued messages.
 Ctrl+A moves to the start of the text, Ctrl+E to the end of the entire text
