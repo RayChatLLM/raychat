@@ -9,23 +9,30 @@ import sys
 import threading
 import uuid
 import weakref
+from collections.abc import Mapping
 from importlib import import_module
 from importlib.machinery import ModuleSpec
 from pathlib import Path
-from types import ModuleType
+from types import CodeType, MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, TypedDict
 
 from raychat.filesystem import OwnedTemporaryDirectory
 from raychat.packages import MAX_BYTES, MAX_FILES, Manifest, safe_name
 from raychat.packages import digest as _digest
 from raychat.packages import files as source_files
+from raychat.plugin_bytecode import (
+    CachedPackage,
+    borrowed_directory,
+    cached_package,
+    compile_source,
+    load_code,
+)
 from raychat.sdk import PluginError
 from raychat.type_support import override
 from raychat.validation import ConfigurationError, json_object, object_field, plain
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-    from types import CodeType
+    from collections.abc import Iterator, Sequence
 
 
 class SourceSnapshot(TypedDict):
@@ -145,6 +152,200 @@ _FINDER = _Finder()
 sys.meta_path.insert(0, _FINDER)
 
 
+def _rebind_code(code: CodeType, filename: str) -> CodeType:
+    """Restore inspect/traceback paths for every nested captured code object.
+
+    Returns
+    -------
+    CodeType
+        A code tree whose filenames name the current captured generation.
+
+    """
+    constants: tuple[object, ...] = code.co_consts
+    return code.replace(
+        co_filename=filename,
+        co_consts=tuple(
+            _rebind_code(value, filename) if isinstance(value, CodeType) else value
+            for value in constants
+        ),
+    )
+
+
+def _check_code_filename(code: CodeType, filename: str) -> None:
+    if code.co_filename != filename:
+        message = "Sealed plugin bytecode filename changed."
+        raise ValueError(message)
+    constants: tuple[object, ...] = code.co_consts
+    for value in constants:
+        if isinstance(value, CodeType):
+            _check_code_filename(value, filename)
+
+
+class _LazyCode(Mapping[str, CodeType]):
+    """Validate all source syntax, then retain compiled modules only on import."""
+
+    def __init__(
+        self,
+        sources: Mapping[str, bytes],
+        directory: Path,
+        package: CachedPackage | None,
+        *,
+        borrowed: bool,
+    ) -> None:
+        self.sources: Mapping[str, bytes] = sources
+        self.directory = directory
+        self.borrowed = borrowed
+        self.cache: dict[str, CodeType] = {}
+        self.lock = threading.RLock()
+        self.prevalidated = package
+        if package is None:
+            # Custom and changed sources fail before publishing a reusable tree.
+            for name, source in sources.items():
+                compile_source(source, str(directory / name))
+
+    @override
+    def __getitem__(self, name: str) -> CodeType:
+        with self.lock:
+            if name not in self.cache:
+                source = self.sources[name]
+                filename = str(self.directory / name)
+                if self.prevalidated is None:
+                    code = compile_source(source, filename)
+                else:
+                    code = load_code(self.prevalidated, name)
+                    if self.borrowed:
+                        _check_code_filename(code, filename)
+                    else:
+                        code = _rebind_code(code, filename)
+                self.cache[name] = code
+            return self.cache[name]
+
+    @override
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.sources)
+
+    @override
+    def __len__(self) -> int:
+        return len(self.sources)
+
+    @override
+    def __contains__(self, name: object) -> bool:
+        # Finder membership probes must not compile unimported modules.
+        return name in self.sources
+
+
+class _SharedGeneration:
+    """Own immutable source/code and files while any isolated tree uses them."""
+
+    def __init__(self, sources: Mapping[str, bytes], package_digest: str) -> None:
+        self.sources = MappingProxyType(dict(sources))
+        self._encoded_sources: Mapping[str, str] | None = None
+        compiled = {
+            name: data for name, data in sources.items() if name.endswith(".py")
+        }
+        compiled.setdefault("__init__.py", b"")
+        package = cached_package(package_digest, compiled)
+        borrowed = borrowed_directory(package, sources)
+        self.borrowed = borrowed is not None
+        self.temporary: OwnedTemporaryDirectory | None = None
+        if borrowed is None:
+            self.temporary = OwnedTemporaryDirectory(prefix="raychat-generation-")
+            self.directory = Path(self.temporary.name).resolve()
+        else:
+            self.directory = borrowed
+        self.users = 0
+        self.retained = False
+        self.members: tuple[Path, ...] = ()
+        try:
+            self._materialize()
+            self.code = _LazyCode(
+                MappingProxyType(compiled),
+                self.directory,
+                package,
+                borrowed=self.borrowed,
+            )
+            self._seal()
+        except BaseException:
+            self.cleanup()
+            raise
+
+    def encoded_sources(self) -> Mapping[str, str]:
+        """Share immutable transport strings for this live source generation.
+
+        Returns
+        -------
+        Mapping[str, str]
+            Read-only encoded bytes; snapshot owners copy the surrounding mapping.
+
+        """
+        with _GENERATION_LOCK:
+            if self._encoded_sources is None:
+                self._encoded_sources = MappingProxyType({
+                    name: base64.b64encode(source).decode("ascii")
+                    for name, source in self.sources.items()
+                })
+            return self._encoded_sources
+
+    def _materialize(self) -> None:
+        if not self.borrowed:
+            for name, data in self.sources.items():
+                target = self.directory.joinpath(*safe_name(name).parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+
+    def _seal(self) -> None:
+        if not self.borrowed:
+            self.members = (*self.directory.rglob("*"), self.directory)
+            for member in self.members:
+                member.chmod(0o500 if member.is_dir() else 0o400)
+
+    def cleanup(self) -> None:
+        if self.retained or self.borrowed:
+            return
+        # Every registered tree released ownership before modes become writable.
+        for member in self.members:
+            if member.exists() and not member.is_symlink():
+                member.chmod(0o700 if member.is_dir() else 0o600)
+        if self.temporary is not None:
+            self.temporary.cleanup()
+
+    def retain(self, reason: str) -> None:
+        self.retained = True
+        if self.temporary is not None:
+            self.temporary.retain(reason=reason)
+
+
+_GENERATIONS: weakref.WeakValueDictionary[str, _SharedGeneration] = (
+    weakref.WeakValueDictionary()
+)
+_GENERATION_LOCK = threading.RLock()
+
+
+def _acquire_generation(digest: str, sources: Mapping[str, bytes]) -> _SharedGeneration:
+    with _GENERATION_LOCK:
+        generation = _GENERATIONS.get(digest)
+        if (
+            generation is None
+            or generation.retained
+            or not generation.directory.is_dir()
+        ):
+            # Failed validation or compilation never publishes a reusable entry.
+            generation = _SharedGeneration(sources, digest)
+            _GENERATIONS[digest] = generation
+        generation.users += 1
+        return generation
+
+
+def _release_generation(digest: str, generation: _SharedGeneration) -> None:
+    with _GENERATION_LOCK:
+        generation.users -= 1
+        if generation.users:
+            return
+        if _GENERATIONS.get(digest) is generation:
+            del _GENERATIONS[digest]
+    generation.cleanup()
+
+
 class SourceTree:
     """Own a compiled, isolated generation of one plugin and its temporary files."""
 
@@ -166,7 +367,7 @@ class SourceTree:
         self.path = Path(path).resolve()
         self.prefix = "_raychat_plugin_" + uuid.uuid4().hex
         sources = source_files(self.path) if sources is None else dict(sources)
-        self.sources = sources
+        self.sources: Mapping[str, bytes] = sources
         self.manifest = Manifest.parse(json_object(sources.get("plugin.json", b"{}")))
         self.overrides = plain(settings or {})
         self.settings = {**self.manifest.defaults, **self.overrides}
@@ -175,32 +376,24 @@ class SourceTree:
         if len(sources) > MAX_FILES or sum(map(len, sources.values())) > MAX_BYTES:
             error_message = "Plugin source exceeds the configured size limit."
             raise ValueError(error_message)
-        self._temporary = OwnedTemporaryDirectory(prefix="raychat-generation-")
         self._retained = False
-        self.directory = Path(self._temporary.name).resolve()
         try:
-            self.code = self._compile_sources(sources)
-        except BaseException as exc:
-            self._temporary.cleanup()
-            if isinstance(exc, Exception):
-                error_message = "compile"
-                raise self.failure(error_message, exc) from exc
-            raise
+            generation = _acquire_generation(self.digest, sources)
+        except Exception as exc:
+            operation = "compile"
+            raise self.failure(operation, exc) from exc
+        self._generation = generation
+        self.sources = generation.sources
+        self.code = generation.code
+        self.directory = generation.directory
+        self._release = weakref.finalize(
+            self,
+            _release_generation,
+            self.digest,
+            generation,
+        )
         with _FINDER.lock:
             _FINDER.trees[self.prefix] = self
-
-    def _compile_sources(self, sources: Mapping[str, bytes]) -> dict[str, CodeType]:
-        for name, data in sources.items():
-            target = self.directory.joinpath(*safe_name(name).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-        if "__init__.py" not in sources:
-            sources = {**sources, "__init__.py": b""}
-        return {
-            name: compile(source, str(self.directory / name), "exec")
-            for name, source in sources.items()
-            if name.endswith(".py")
-        }
 
     def failure(self, operation: str, error: Exception) -> PluginError:
         """Attach package identity and repair guidance to a loading failure.
@@ -229,10 +422,7 @@ class SourceTree:
             "path": str(self.path),
             "settings": plain(self.overrides),
             "module": suffix,
-            "files": {
-                name: base64.b64encode(source).decode("ascii")
-                for name, source in self.sources.items()
-            },
+            "files": dict(self._generation.encoded_sources()),
         }
 
     @classmethod
@@ -311,7 +501,7 @@ class SourceTree:
 
         """
         self._retained = True
-        self._temporary.retain(reason=reason)
+        self._generation.retain(reason)
 
     def retire(self) -> None:
         """Remove generation modules, unregister its finder and release files."""
@@ -322,7 +512,7 @@ class SourceTree:
                 sys.modules.pop(name, None)
         with _FINDER.lock:
             _FINDER.trees.pop(self.prefix, None)
-        self._temporary.cleanup()
+        self._release()
 
 
 def _snapshot_text(value: object) -> str:

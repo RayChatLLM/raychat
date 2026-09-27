@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING
 
 from raychat_bootstrap.wire import VERSION, decode, encode
 
+from .checkpoint_stream import HandoffExporter, JsonObject
 from .validation import array_field, configuration_fields, integer_field, text_field
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
     from .plugins import Runtime
 
@@ -32,17 +33,20 @@ def document(value: object) -> dict[str, object]:
     if result.get("version") != VERSION:
         message = "Unsupported core handoff version."
         raise ValueError(message)
-    encode(result)
     return decode(encode(result))
 
 
-def export_plugins(runtime: Runtime) -> dict[str, object]:
+def export_plugins(runtime: Runtime, *, detach: bool = True) -> dict[str, object]:
     """Capture resources using JSON handlers; reject in-process-only reloads.
+
+    With ``detach=False``, resource values remain owned by their callbacks. The
+    caller must synchronously validate and encode them without mutating them or
+    allowing their owners to change. Nested exports retain their own defaults.
 
     Returns
     -------
     dict[str, object]
-        Plugin identities and detached resource snapshots.
+        Plugin identities and resource snapshots, detached by default.
 
     Raises
     ------
@@ -62,8 +66,49 @@ def export_plugins(runtime: Runtime) -> dict[str, object]:
         for name, callbacks in runtime.handoff_handlers.items()
     }
     result: dict[str, object] = {"plugins": list(runtime.plugins), "resources": values}
-    encode(result)
-    return decode(encode(result))
+    return decode(encode(result)) if detach else result
+
+
+def stream_plugins(runtime: Runtime) -> JsonObject:
+    """Capture one explicitly streamable plugin resource at a time.
+
+    Returns
+    -------
+    JsonObject
+        A synchronous resource capture retaining stable plugin membership.
+
+    Raises
+    ------
+    RuntimeError
+        A plugin has live resources without a process handoff contract.
+
+    """
+    resource_owners = set(runtime.reload_handlers) | {
+        item.owner for item in runtime.cleanup
+    }
+    missing = resource_owners - runtime.handoff_handlers.keys()
+    if missing:
+        message = "Plugins need process handoff handlers: " + ", ".join(sorted(missing))
+        raise RuntimeError(message)
+    handlers = tuple(runtime.handoff_handlers.items())
+    names = list(runtime.plugins)
+
+    def resources() -> Iterator[tuple[str, object]]:
+        for name, callbacks in handlers:
+            exporter = callbacks[0]
+            context = runtime.context(name)
+            yield (
+                name,
+                (
+                    exporter.checkpoint(context)
+                    if isinstance(exporter, HandoffExporter)
+                    else exporter(context)
+                ),
+            )
+
+    return JsonObject(
+        lambda: (("plugins", names), ("resources", JsonObject(resources))),
+    )
 
 
 def restore_plugins(runtime: Runtime, value: object) -> None:

@@ -457,6 +457,30 @@ class ClipboardTests(TypedTestCase):
         self.equal(selection.scroll_step(viewport, 4), 0)
         self.require(selection.pointer is None)
 
+    def test_copy_materializes_only_selected_rows_from_lazy_history(self) -> None:
+        """Copying a short span must not visit every row in a large transcript."""
+
+        class LazyRows:
+            def __init__(self) -> None:
+                self.reads: list[int] = []
+
+            def __len__(self) -> int:
+                return 100_000
+
+            def __getitem__(self, index: int) -> str:
+                self.reads.append(index)
+                return f"Row {index} 你é🙂"
+
+        rows = LazyRows()
+        selection = TextSelection()
+        selection.begin(50_000, 1, rows, 30)
+        selection.move(50_002, 3, released=True)
+        self.equal(
+            selection.text(),
+            "ow 50000 你é🙂\nRow 50001 你é🙂\nRow ",
+        )
+        self.equal(rows.reads, [50_000, 50_001, 50_002])
+
     def test_scrolled_pointer_selects_all_intermediate_unicode_rows(self) -> None:
         """Scrolling remaps the endpoint while preserving the original anchor."""
         rows = tuple(f"Row {index:03} 你é🙂" for index in range(100))

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import contextvars
 import json
@@ -23,6 +22,7 @@ from .sdk import ProviderError
 from .validation import ConfigurationError, array_field, json_object, object_field
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Awaitable, Iterator
     from types import TracebackType
 
@@ -348,6 +348,8 @@ def _kill_group(process: asyncio.subprocess.Process) -> None:
 
 
 async def _wait_process(process: asyncio.subprocess.Process, timeout: float) -> int:
+    import asyncio
+
     exit_status: Awaitable[int] = process.wait()
     bounded: Awaitable[int] = asyncio.wait_for(exit_status, timeout=timeout)
     return await bounded
@@ -378,6 +380,8 @@ async def _drain_tasks(
     writer: asyncio.Future[bool] | None,
     reader: asyncio.Future[_FailureCapture] | None,
 ) -> None:
+    import asyncio
+
     if writer is not None:
         if not writer.done():
             writer.cancel()
@@ -394,6 +398,8 @@ async def _drain_tasks(
 
 
 def _observe(process: asyncio.subprocess.Process, completion: Future[int]) -> None:
+    import asyncio
+
     callback = _CHILD_OBSERVER.get()
     if callback is None:
         return
@@ -415,6 +421,8 @@ async def _exchange(
     writer: asyncio.Future[bool],
     reader: asyncio.Future[_FailureCapture],
 ) -> str:
+    import asyncio
+
     exited_at: float | None = None
     while not writer.done() or not reader.done() or process.returncode is None:
         if request.cancel_check is not None:
@@ -444,6 +452,8 @@ async def _exchange(
 
 
 async def _run_process(request: _ChildRequest) -> str:
+    import asyncio
+
     if request.cancel_check is not None:
         request.cancel_check()
     child_path = Path(__file__).with_name("worker_entry.py").resolve()
@@ -501,6 +511,8 @@ async def _run_process(request: _ChildRequest) -> str:
 
 
 def _run_sync(request: _ChildRequest) -> str:
+    import asyncio
+
     execution: Awaitable[str] = _run_process(request)
 
     async def enter() -> str:
@@ -524,6 +536,8 @@ def run_child(
         The final result after successful process exit and complete cleanup.
 
     """
+    import asyncio
+
     encoded, secrets = _encode_request(profile, payload)
     request = _ChildRequest(
         encoded,

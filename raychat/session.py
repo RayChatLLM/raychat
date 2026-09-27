@@ -22,7 +22,7 @@ from raychat.event_types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
     from typing import NoReturn
 
     from typing_extensions import Unpack
@@ -34,11 +34,14 @@ import json
 import logging
 import sys
 import threading
+import weakref
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypedDict, runtime_checkable
 
+from raychat.checkpoint_stream import JsonArray, JsonObject
 from raychat.configuration import SETTINGS
 from raychat.service_contracts import CONTEXT_FACTORY
 
@@ -59,6 +62,14 @@ from ._common import (
     _is_valid_utf8_text,
 )
 from .event_types import Context
+from .paged_text import (
+    TextPageRef,
+    export_ref,
+    json_size,
+    parse_ref,
+    read_ref,
+    store_text,
+)
 from .protocol import action_name, decode_action
 from .sdk import (
     Action,
@@ -66,6 +77,7 @@ from .sdk import (
     CancellableChat,
     Chat,
     ContextBuilder,
+    HistoryMessage,
     ProviderError,
     SessionHost,
     SessionMessage,
@@ -127,6 +139,135 @@ class _CoreReview(Protocol):
         ...
 
 
+_PAGE_MIN_CHARS = 4096
+_SUMMARY_MAX_CHARS = 4096
+_SUMMARY_CACHE_MAX_BYTES = 256 * 1024
+_SUMMARY_CACHE_MAX_ITEMS = 512
+_SUMMARY_CACHE_LOCK = threading.RLock()
+_SUMMARY_CACHE_BYTES = 0
+_SUMMARY_CACHE: OrderedDict[
+    tuple[int, str],
+    tuple[weakref.ReferenceType[_StoredMessage], str, int],
+] = OrderedDict()
+
+
+class _WeakReferenceable:
+    __slots__ = ("__weakref__",)
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredMessage(_WeakReferenceable):
+    role: str
+    stored: str | TextPageRef
+    kind: str
+    prompt_id: int
+    _summary_key: str = ""
+    _summary_length: int | None = None
+
+    @property
+    def content(self) -> str:
+        return (
+            read_ref(self.stored)
+            if isinstance(self.stored, TextPageRef)
+            else self.stored
+        )
+
+    @property
+    def json_length(self) -> int:
+        return json_size(self.stored)
+
+    def as_message(self) -> dict[str, str]:
+        return {"role": self.role, "content": self.content}
+
+    def cached_summary(self, key: str, render: Callable[[str], str]) -> str:
+        global _SUMMARY_CACHE_BYTES
+
+        cache_key = (id(self), key)
+        with _SUMMARY_CACHE_LOCK:
+            cached = _SUMMARY_CACHE.get(cache_key)
+            if cached is not None and cached[0]() is self:
+                _SUMMARY_CACHE.move_to_end(cache_key)
+                return cached[1]
+        summary = render(self.content)
+        with _SUMMARY_CACHE_LOCK:
+            object.__setattr__(self, "_summary_key", key)
+            object.__setattr__(self, "_summary_length", len(summary))
+        if len(summary) <= _SUMMARY_MAX_CHARS:
+            size = len(summary.encode("utf-8"))
+            if size <= _SUMMARY_CACHE_MAX_BYTES:
+                with _SUMMARY_CACHE_LOCK:
+                    previous = _SUMMARY_CACHE.pop(cache_key, None)
+                    if previous is not None:
+                        _SUMMARY_CACHE_BYTES -= previous[2]
+                    _SUMMARY_CACHE[cache_key] = (weakref.ref(self), summary, size)
+                    _SUMMARY_CACHE_BYTES += size
+                    while (
+                        _SUMMARY_CACHE_BYTES > _SUMMARY_CACHE_MAX_BYTES
+                        or len(_SUMMARY_CACHE) > _SUMMARY_CACHE_MAX_ITEMS
+                    ):
+                        _, evicted = _SUMMARY_CACHE.popitem(last=False)
+                        _SUMMARY_CACHE_BYTES -= evicted[2]
+        return summary
+
+    def cached_summary_length(
+        self,
+        key: str,
+        render: Callable[[str], str],
+    ) -> int:
+        cache_key = (id(self), key)
+        with _SUMMARY_CACHE_LOCK:
+            cached = _SUMMARY_CACHE.get(cache_key)
+            if cached is not None and cached[0]() is self:
+                _SUMMARY_CACHE.move_to_end(cache_key)
+                return len(cached[1])
+            if self._summary_key == key and self._summary_length is not None:
+                return self._summary_length
+        summary_length = len(render(self.content))
+        with _SUMMARY_CACHE_LOCK:
+            object.__setattr__(self, "_summary_key", key)
+            object.__setattr__(self, "_summary_length", summary_length)
+        return summary_length
+
+
+def _store_message(message: SessionMessage) -> _StoredMessage:
+    content = message.content
+    stored: str | TextPageRef = (
+        store_text(content)
+        if len(content) >= _PAGE_MIN_CHARS
+        and len(content.encode("utf-8")) <= 1024 * 1024
+        else content
+    )
+    return _StoredMessage(message.role, stored, message.kind, message.prompt_id)
+
+
+def _checkpoint_record(
+    message: _StoredMessage,
+    stores: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "role": message.role,
+        "kind": message.kind,
+        "prompt_id": message.prompt_id,
+        **(
+            {"content_ref": export_ref(message.stored, stores=stores)}
+            if isinstance(message.stored, TextPageRef)
+            else {"content": message.stored}
+        ),
+    }
+
+
+def _same_history(first: list[_StoredMessage], second: list[_StoredMessage]) -> bool:
+    return len(first) == len(second) and all(
+        left == right
+        or (
+            (left.role, left.kind, left.prompt_id)
+            == (right.role, right.kind, right.prompt_id)
+            and left.content == right.content
+        )
+        for left, right in zip(first, second, strict=True)
+    )
+
+
 class _HistoryRecord(TypedDict):
     role: str
     content: str
@@ -134,7 +275,7 @@ class _HistoryRecord(TypedDict):
     prompt_id: int
 
 
-def _history_record(message: SessionMessage) -> _HistoryRecord:
+def _history_record(message: HistoryMessage) -> _HistoryRecord:
     return {
         "role": message.role,
         "content": message.content,
@@ -149,22 +290,31 @@ def _text(value: object) -> str:
     return value
 
 
-def _history_message(value: object) -> SessionMessage:
+def _history_message(value: object, stores: Mapping[str, object]) -> _StoredMessage:
     fields = object_field(value, "session history entry")
-    if fields.keys() != {"role", "content", "kind", "prompt_id"}:
+    reference = "content_ref" in fields
+    if fields.keys() != {
+        "role",
+        "content_ref" if reference else "content",
+        "kind",
+        "prompt_id",
+    }:
         message = "Invalid session history entry."
         raise ValueError(message)
-    return SessionMessage(
-        role=_text(fields["role"]),
-        content=_text(fields["content"]),
-        kind=_text(fields["kind"]),
-        prompt_id=integer_field(fields["prompt_id"], "history prompt identifier"),
+    role, kind = _text(fields["role"]), _text(fields["kind"])
+    prompt_id = integer_field(fields["prompt_id"], "history prompt identifier")
+    if reference:
+        page = parse_ref(fields["content_ref"], stores=stores)
+        SessionMessage(role, "", kind, prompt_id)
+        return _StoredMessage(role, page, kind, prompt_id)
+    return _store_message(
+        SessionMessage(role, _text(fields["content"]), kind, prompt_id),
     )
 
 
 def _snapshot_parts(
     value: object,
-) -> tuple[list[SessionMessage], dict[str, dict[str, object]]]:
+) -> tuple[list[_StoredMessage], dict[str, dict[str, object]]]:
     try:
         return _read_snapshot(value)
     except ConfigurationError as exc:
@@ -173,15 +323,21 @@ def _snapshot_parts(
 
 def _read_snapshot(
     value: object,
-) -> tuple[list[SessionMessage], dict[str, dict[str, object]]]:
+) -> tuple[list[_StoredMessage], dict[str, dict[str, object]]]:
     fields = object_field(value, "session snapshot")
-    if fields.keys() != {"history", "state"}:
+    if fields.keys() not in ({"history", "state"}, {"history", "state", "page_stores"}):
         _invalid("Invalid session snapshot.")
     history = array_field(fields["history"], "session history")
     state = object_field(fields["state"], "session state")
     json.dumps(fields, allow_nan=False)
     return (
-        [_history_message(item) for item in history],
+        [
+            _history_message(
+                item,
+                object_field(fields.get("page_stores", {}), "page stores"),
+            )
+            for item in history
+        ],
         {
             owner: copy.deepcopy(object_field(data, "state for " + owner))
             for owner, data in state.items()
@@ -341,7 +497,7 @@ class AgentSession:
             error_message = "Protocol must be nonempty text."
             raise ValueError(error_message)
         self._allowed_actions = _allowed_actions(self.runtime, allowed_actions)
-        self._history: list[SessionMessage] = []
+        self._history: list[_StoredMessage] = []
         self._next_prompt_id = 1
         self._sending = self._turn_open = False
         self._core_review = False
@@ -396,7 +552,62 @@ class AgentSession:
             A detached list of chronological conversation records.
 
         """
+        return [
+            SessionMessage(item.role, item.content, item.kind, item.prompt_id)
+            for item in self._history
+        ]
+
+    def history_index(self) -> list[HistoryMessage]:
+        """Return immutable metadata records without materializing stored content.
+
+        Returns
+        -------
+        list[HistoryMessage]
+            The chronological semantic index for built-in context policies.
+
+        """
         return list(self._history)
+
+    def export_checkpoint(self) -> dict[str, object]:
+        """Detach internal reference records and mutable plugin state.
+
+        Returns
+        -------
+        dict[str, object]
+            A compact checkpoint with exactly the same semantic history.
+
+        """
+        stores: dict[str, object] = {}
+        history = [_checkpoint_record(item, stores) for item in self._history]
+        return {
+            "history": history,
+            "state": copy.deepcopy(self.runtime.state),
+            "page_stores": stores,
+        }
+
+    def stream_checkpoint(self) -> JsonObject:
+        """Encode immutable records individually during an idle checkpoint.
+
+        Returns
+        -------
+        JsonObject
+            A synchronous checkpoint retaining only semantic record pointers.
+
+        """
+        history = tuple(self._history)
+
+        def members() -> Iterator[tuple[str, object]]:
+            stores: dict[str, object] = {}
+            yield (
+                "history",
+                JsonArray(
+                    lambda: (_checkpoint_record(item, stores) for item in history),
+                ),
+            )
+            yield "state", copy.deepcopy(self.runtime.state)
+            yield "page_stores", stores
+
+        return JsonObject(members)
 
     def validate_context(self) -> None:
         """Check that the current prompt fits the active context policy."""
@@ -447,7 +658,7 @@ class AgentSession:
                 if self._rollback_state is None:
                     message = "Snapshot completion requires an active turn."
                     raise RuntimeError(message)
-                if history[: len(self._history)] != self._history:
+                if not _same_history(history[: len(self._history)], self._history):
                     _invalid("Completed snapshot changed prior history.")
                 for owner in self._checkpoint_owners:
                     if owner in self._rollback_state:
@@ -656,7 +867,7 @@ class AgentSession:
             finally:
                 self._finish_turn(history_start)
 
-    def _finish_turn(self, history_start: list[SessionMessage]) -> None:
+    def _finish_turn(self, history_start: list[_StoredMessage]) -> None:
         try:
             with self._state_lock:
                 aborted = self._rollback_state is not None
@@ -729,11 +940,11 @@ class AgentSession:
         *,
         log: bool = True,
     ) -> None:
-        message = SessionMessage(role, content, kind, prompt_id)
+        message = _store_message(SessionMessage(role, content, kind, prompt_id))
         self._history.append(message)
         if self.store is not None:
             self.store.append("message", _history_record(message))
-        if log:
+        if log and self.log is not None:
             self._write_log(message.as_message())
 
     @staticmethod

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 import argparse
 import copy
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,11 +27,10 @@ from .event_bus import EventKey
 from .event_bus import PayloadT as _EventPayload
 from .event_bus import ResultT as _EventResult
 from .event_types import Block
+from .plugin_contract import API_VERSION, PluginError
 from .service_types import ServiceKey
 from .status import StatusItem, StatusScope, StatusStore, StatusUpdate
 from .validation import configuration_fields, plain
-
-API_VERSION = 4
 
 Messages = list[dict[str, str]]
 Action = dict[str, object]
@@ -115,10 +115,6 @@ class ReadOnlyNamespace:
         """
         error_message = "Launch configuration is read-only."
         raise AttributeError(error_message)
-
-
-class PluginError(RuntimeError):
-    """A plugin declaration, activation, or management operation failed."""
 
 
 _Service = TypeVar("_Service")
@@ -369,6 +365,54 @@ class SessionMessage:
         """
         return {"role": self.role, "content": self.content}
 
+    @property
+    def json_length(self) -> int:
+        """The escaped JSON character count of this materialized content."""
+        return len(json.dumps(self.content, ensure_ascii=False))
+
+
+class HistoryMessage(Protocol):
+    """Read semantic metadata while materializing content only when requested."""
+
+    @property
+    def role(self) -> str:
+        """The provider message role."""
+
+    @property
+    def content(self) -> str:
+        """The complete message text, explicitly materialized on access."""
+
+    @property
+    def kind(self) -> str:
+        """The semantic prompt, assistant or host-result category."""
+
+    @property
+    def prompt_id(self) -> int:
+        """The owning conversational prompt identifier."""
+
+    @property
+    def json_length(self) -> int:
+        """The escaped JSON content length without materializing its text."""
+
+    def as_message(self) -> dict[str, str]:
+        """Materialize this one provider message."""
+
+
+@runtime_checkable
+class HistorySource(Protocol):
+    """Optionally expose metadata-backed history to built-in context policies."""
+
+    def history_index(self) -> list[HistoryMessage]:
+        """Return immutable semantic records without reading their content."""
+
+
+@runtime_checkable
+class CheckpointSource(Protocol):
+    """Optionally expose compact internal state without changing public snapshots."""
+
+    def export_checkpoint(self) -> dict[str, object]:
+        """Return page references and plugin state for internal handoff."""
+
 
 class InstructionSession(SessionView, Protocol):
     """Expose the environment and actions used to build instructions."""
@@ -521,6 +565,22 @@ class Conversation(SessionLifecycle, Protocol):
     def restore_snapshot(self, value: Mapping[str, object]) -> None:
         """Validate and restore a detached conversation snapshot."""
         ...
+
+
+def checkpoint_snapshot(session: Conversation) -> dict[str, object]:
+    """Use compact built-in checkpoints while supporting existing conversations.
+
+    Returns
+    -------
+    dict[str, object]
+        Internal reference state, or the legacy snapshot of an external provider.
+
+    """
+    return (
+        session.export_checkpoint()
+        if isinstance(session, CheckpointSource)
+        else (session.export_snapshot())
+    )
 
 
 class Send(Protocol):
@@ -1332,6 +1392,7 @@ __all__ = [
     "CancelCheck",
     "CancellableChat",
     "Chat",
+    "CheckpointSource",
     "ChildSessionInfo",
     "CommandDefinition",
     "ContextBuilder",
@@ -1341,6 +1402,8 @@ __all__ = [
     "EmitOptions",
     "EventCallback",
     "EventKey",
+    "HistoryMessage",
+    "HistorySource",
     "InstructionContribution",
     "InstructionFactory",
     "InstructionSession",
@@ -1382,6 +1445,7 @@ __all__ = [
     "WorkerDescriptor",
     "WorkerFactory",
     "WorkerPayload",
+    "checkpoint_snapshot",
     "readonly",
     "readonly_mapping",
     "workspace_path",

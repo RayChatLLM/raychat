@@ -449,7 +449,7 @@ def _conversation(
             event_callback=_event,
             cancel_check=cancel_check,
         )
-        raw_snapshot: object = session.export_snapshot()
+        raw_snapshot: object = session.export_checkpoint()
         _emit({
             "type": "snapshot",
             "snapshot": object_field(raw_snapshot, "completed snapshot"),

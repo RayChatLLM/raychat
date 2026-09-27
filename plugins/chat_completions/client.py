@@ -2,20 +2,15 @@
 
 from __future__ import annotations
 
-import http.client
 import json
 import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request
 
 from raychat.configuration import SETTINGS
-from raychat.http_debug import build_http_opener, drain_debug_response
 from raychat.provider_settings import provider_settings
 from raychat.sdk import (
     HTTP_PROVIDER,
@@ -31,7 +26,6 @@ from raychat.sdk import (
 )
 from raychat.sdk import ProviderError as ChatAPIError
 from raychat.transport import ProviderProcessError, run_chat_profile
-from raychat.type_support import override
 from raychat.validation import (
     ConfigurationError,
     array_field,
@@ -57,6 +51,11 @@ if TYPE_CHECKING:
     from email.message import Message as EmailMessage
     from types import TracebackType
     from urllib.parse import SplitResult
+    from urllib.request import Request
+
+    from .http_transport import NoRedirects as _NoRedirects
+
+    NoRedirects = _NoRedirects
 
     from typing_extensions import Self
 
@@ -116,14 +115,25 @@ def _worker_payload(
     ).private_payload()
 
 
-class NoRedirects(HTTPRedirectHandler):
-    """Avoid forwarding credentials to a redirect target."""
+def __getattr__(name: str) -> object:
+    """Resolve the compatibility HTTP policy export only on demand.
 
-    @staticmethod
-    @override
-    def redirect_request(*_args: object, **_kwargs: object) -> None:
-        """Reject every redirect without forwarding request credentials."""
-        return
+    Returns
+    -------
+    object
+        The requested public HTTP redirect policy.
+
+    Raises
+    ------
+    AttributeError
+        The module has no requested compatibility export.
+
+    """
+    if name == "NoRedirects":
+        from .http_transport import NoRedirects
+
+        return NoRedirects
+    raise AttributeError(name)
 
 
 @runtime_checkable
@@ -158,6 +168,8 @@ def _retry_after_seconds(value: object) -> float | None:
         return min(float(MAX_TIMEOUT_SECONDS), max(0.0, seconds))
     except (OverflowError, ValueError):
         pass
+    from email.utils import parsedate_to_datetime
+
     try:
         retry_at = parsedate_to_datetime(value)
         if retry_at.tzinfo is None:
@@ -298,8 +310,11 @@ def _chat_request(url: str, body: bytes | None, headers: Mapping[str, str]) -> R
         A validated HTTP(S) request, including its original path and query.
 
     """
+    from urllib.request import Request
+
     endpoint = _validate_endpoint(url)
     location = endpoint.netloc + endpoint.path
+
     if endpoint.query:
         location += "?" + endpoint.query
     if endpoint.fragment:
@@ -577,8 +592,30 @@ class ChatAPI:
         self.api_key = api_key
         self.timeout = timeout
         self.request_options = _validated_request_options(request_options)
-        self.opener: RequestOpener = build_http_opener(NoRedirects())
+        self._opener: RequestOpener | None = None
         self.last_reasoning: str = ""
+
+    @property
+    def opener(self) -> RequestOpener:
+        """Create the HTTP transport when this process first needs it.
+
+        Returns
+        -------
+        RequestOpener
+            The cached request opener, including an operator-supplied substitute.
+
+        """
+        if self._opener is None:
+            from raychat.http_debug import build_http_opener
+
+            from .http_transport import NoRedirects
+
+            self._opener = build_http_opener(NoRedirects())
+        return self._opener
+
+    @opener.setter
+    def opener(self, value: RequestOpener) -> None:
+        self._opener = value
 
     def call_with_cancel(self, messages: Messages, cancel_check: CancelCheck) -> str:
         """Use the shared isolated transport so cancellation stops blocked HTTP.
@@ -640,6 +677,11 @@ class ChatAPI:
         )
 
     def _read(self, request: Request) -> bytes:
+        from http.client import HTTPException
+        from urllib.error import HTTPError, URLError
+
+        from raychat.http_debug import drain_debug_response
+
         try:
             opened: object = self.opener.open(request, timeout=self.timeout)
             return _read_binary(opened)
@@ -662,7 +704,7 @@ class ChatAPI:
                 retry_after=retry_after,
             ) from None
 
-        except (URLError, OSError, http.client.HTTPException) as exc:
+        except (URLError, OSError, HTTPException) as exc:
             error_message = f"Chat API connection failed ({type(exc).__name__})."
             raise ChatAPIError(error_message, retryable=True) from None
 

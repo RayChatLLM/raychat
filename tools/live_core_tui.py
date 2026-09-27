@@ -29,6 +29,11 @@ def _source(root: Path, target: Path) -> None:
     target.mkdir()
     for name in ("raychat", "plugins", "plugin_catalog"):
         shutil.copytree(root / name, target / name, ignore=ignore_bytecode)
+    for name in ("linux.env", "macos.env", "windows.env"):
+        source = root / "environment" / name
+        if source.is_file():
+            (target / "environment").mkdir(exist_ok=True)
+            shutil.copy2(source, target / "environment" / name)
 
 
 def _fixture(root: Path, output: Path) -> tuple[Path, list[str]]:

@@ -23,6 +23,20 @@ class _Recovery(Protocol):
     def __call__(self) -> None: ...
 
 
+@runtime_checkable
+class _Available(Protocol):
+    def __call__(self) -> bool: ...
+
+
+def _module(*, interactive: bool) -> str:
+    if not interactive:
+        return "raychat.entrypoint"
+    available: object = importlib.import_module("raychat_bootstrap.guardian").available
+    if isinstance(available, _Available) and available():
+        return "raychat_bootstrap.guardian"
+    return "raychat_bootstrap.supervisor"
+
+
 def main() -> int:
     """Apply the configuration path before importing the application.
 
@@ -38,15 +52,16 @@ def main() -> int:
 
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    prepare: object = importlib.import_module("raychat_bootstrap.recovery").prepare
-    if not isinstance(prepare, _Recovery):
-        message = "The RayChat recovery entrypoint is unavailable."
-        raise TypeError(message)
-    try:
-        prepare()
-    except (ValueError, TypeError, KeyError, OSError) as error:
-        sys.stderr.write("Recovery error: " + str(error) + "\n")
-        return 1
+    if "--recover-core" in sys.argv:
+        prepare: object = importlib.import_module("raychat_bootstrap.recovery").prepare
+        if not isinstance(prepare, _Recovery):
+            message = "The RayChat recovery entrypoint is unavailable."
+            raise TypeError(message)
+        try:
+            prepare()
+        except (ValueError, TypeError, KeyError, OSError) as error:
+            sys.stderr.write("Recovery error: " + str(error) + "\n")
+            return 1
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", type=Path)
     options, _ = bootstrap.parse_known_args()
@@ -78,7 +93,7 @@ def _launch(*, interactive: bool) -> int:
     status = setup(Path(__file__).resolve().parent, interactive=interactive)
     if status is not None:
         return status
-    module = "raychat_bootstrap.supervisor" if interactive else "raychat.entrypoint"
+    module = _module(interactive=interactive)
     launch: object = importlib.import_module(module).main
     if not isinstance(launch, _Launcher):
         message = "The RayChat entrypoint does not provide a callable launcher."

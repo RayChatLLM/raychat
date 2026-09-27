@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import json
 import math
@@ -24,6 +23,7 @@ from .lifecycle import FailureCapture, raise_saved_exception
 from .windows import CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, WindowsJob
 
 if TYPE_CHECKING:
+    import asyncio
     from concurrent.futures import Future
     from pathlib import Path
 
@@ -203,6 +203,8 @@ async def _poll_command(
     command: _Command,
     exit_notification: asyncio.Task[int],
 ) -> bool:
+    import asyncio
+
     deadline = time.monotonic() + command.timeout
     while True:
         if command.cancel_check is not None:
@@ -226,6 +228,8 @@ async def _poll_command(
 
 
 async def _wait_for_command(process: ManagedProcess, command: _Command) -> bool:
+    import asyncio
+
     exit_notification = asyncio.create_task(process.wait())
     primary, cleanup = FailureCapture(), FailureCapture()
     timed_out = False
@@ -352,6 +356,8 @@ async def spawn_windows_command(
         If the helper was not created and no primary exception was recorded.
 
     """
+    import asyncio
+
     job = WindowsJob()
     process: ManagedProcess | None = None
     primary = FailureCapture()
@@ -407,6 +413,8 @@ async def spawn_command(
         The child and any Windows job responsible for descendant cleanup.
 
     """
+    import asyncio
+
     if os.name == "nt":
         return await spawn_windows_command(argv, cwd, environment, cancel_check)
     process = await asyncio.create_subprocess_exec(
@@ -508,6 +516,8 @@ async def _start_owned(
     # Native creation can already have started descendants before asyncio has
     # connected its pipes. Cancelling that creation kills only the direct child
     # and can leave those descendants holding the pipes and workspace open.
+    import asyncio
+
     creation = asyncio.create_task(
         spawn_command(
             command.argv,
@@ -533,6 +543,8 @@ async def _start_owned(
 
 
 async def _run_command(command: _Command) -> CommandResult:
+    import asyncio
+
     process: ManagedProcess | None = None
     job: WindowsJob | None = None
     readers: list[asyncio.Task[FailureInfo | None]] = []
@@ -652,6 +664,8 @@ def _check_cancel_callback(value: object) -> None:
 
 
 def _run_isolated(command: _Command) -> CommandResult:
+    import asyncio
+
     return asyncio.run(_run_command(command))
 
 
@@ -666,10 +680,14 @@ def _join_command(future: Future[CommandResult]) -> CommandResult:
 def _run_in_thread(command: _Command) -> CommandResult:
     # Signal handlers run on the main thread. Keep them outside the event loop
     # that owns native creation, pipes and process-tree retirement.
+    import asyncio
+
     stopped = threading.Event()
     context = contextvars.copy_context()
 
     def check_cancelled() -> None:
+        import asyncio
+
         if command.cancel_check is not None:
             command.cancel_check()
         if stopped.is_set():

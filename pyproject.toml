@@ -12,11 +12,52 @@ select = ["ALL"]
 ignore = ["missing-copyright-notice"]
 
 [tool.ruff.lint.per-file-ignores]
+# Release capture regression exercises its private inode-bound reader.
+"tests/test_bootstrap_filesystem.py" = ["private-member-access"]
+# Page constructors mirror the wire format and frozen slots need object.__setattr__;
+# the store owns private reference construction after committing page bytes.
+"raychat/paged_text.py" = ["too-many-arguments", "too-many-positional-arguments", "unnecessary-dunder-call", "private-member-access"]
+# Only independently authenticated, sealed payloads reach marshal.loads.
+"raychat/plugin_bytecode.py" = ["suspicious-marshal-usage"]
+# Derived summary memo fields and global LRU accounting share one lock.
+"raychat/session.py" = ["unnecessary-dunder-call", "global-statement"]
+# Shared checkpoint files follow field ownership; one locked router coordinates
+# durability, promotion and acknowledgments with explicit inherited handles.
+"raychat/local_bridge.py" = ["open-file-with-context-handler", "too-many-statements-in-try-clause", "complex-structure", "too-many-arguments"]
+# A standalone session needs fragment types, but not the TUI transport codec.
+"raychat/checkpoint_stream.py" = ["import-outside-top-level"]
+# Guardian exec replaces its process with a fixed interpreter/script argv.
+"raychat_bootstrap/guardian.py" = ["start-process-with-no-shell"]
+# Preparation defers the supervisor; adoption installs signal cleanup before application imports.
+"raychat_bootstrap/guardian_entry.py" = ["import-outside-top-level", "start-process-with-no-shell", "module-import-not-at-top-of-file"]
+# Real PTY signal probes explicitly own each process, descriptor and cleanup phase.
+"tests/test_guardian_signals.py" = ["too-many-locals", "too-many-statements"]
+# HTTP implementations load only when a network operation needs them.
+"raychat/plugin_manager.py" = ["import-outside-top-level"]
+"plugins/chat_completions/client.py" = ["import-outside-top-level"]
+"plugins/chat_completions/__init__.py" = ["import-outside-top-level"]
+# Async runtimes load only when a filesystem, process or native clipboard action needs them.
+"raychat/filesystem.py" = ["import-outside-top-level"]
+"raychat/transport.py" = ["import-outside-top-level"]
+"raychat/ui/clipboard.py" = ["import-outside-top-level"]
+# Native Windows bindings are not needed by POSIX terminals.
+"raychat/ui/terminal_backend.py" = ["import-outside-top-level"]
+"plugins/process/runner.py" = ["import-outside-top-level"]
 # The transcript state façade exposes one method per user-visible concern;
 # the reasoning-visibility toggle pushed it one past the default budget.
-"raychat/ui/state.py" = ["too-many-public-methods"]
+# Its same-module row adapter snapshots private immutable transcript state.
+# Its private prefix protocol is consumed by sibling selection/handoff modules.
+"raychat/ui/state.py" = ["too-many-public-methods", "private-member-access", "unused-private-protocol"]
 # One test method per behavior; the suite grows with every UI behavior.
-"tests/test_tui_state.py" = ["too-many-public-methods"]
+"tests/test_tui_state.py" = ["too-many-public-methods", "private-member-access"]
+# Regression tests inspect storage ownership and immutable row snapshots.
+"tests/test_deferred_view_handoff.py" = ["import-private-name", "private-member-access"]
+"tests/test_local_bridge.py" = ["private-member-access", "too-many-public-methods"]
+# Seeded unit fixtures reproduce oracle results; acceptance stress uses urandom.
+"tests/test_input_history.py" = ["suspicious-non-cryptographic-random-usage", "private-member-access"]
+"tests/test_paged_sessions.py" = ["import-private-name", "private-member-access", "complex-structure", "suspicious-non-cryptographic-random-usage"]
+# The fixed fixture subprocess proves supplied poisoned bytecode is discarded.
+"tests/test_cold_releases.py" = ["suspicious-subprocess-import", "subprocess-without-shell-equals-true"]
 # Seeded optimization sampling must reproduce the existing search sequence.
 "plugins/optimization/gepa/batch_sampler.py" = ["suspicious-non-cryptographic-random-usage"]
 "plugins/optimization/gepa/candidate_selector.py" = ["suspicious-non-cryptographic-random-usage"]

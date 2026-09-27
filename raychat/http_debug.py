@@ -24,6 +24,7 @@ from raychat.http_replay import ReplayRequest, parse_sent_request, write_curl
 from raychat.type_support import override
 
 from .filesystem import append_owned
+from .http_settings import DEBUG_DIRECTORY_ENV as _DEBUG_DIRECTORY_ENV
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
     from _typeshed import ReadableBuffer, WriteableBuffer
     from typing_extensions import Unpack
 
-DEBUG_DIRECTORY_ENV = "RAYCHAT_HTTP_DEBUG_DIR"
+DEBUG_DIRECTORY_ENV = _DEBUG_DIRECTORY_ENV
 _BLOCK_BYTES = 65536
 
 

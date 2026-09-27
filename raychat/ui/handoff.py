@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import base64
-from typing import TYPE_CHECKING
+import copy
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
 
+from raychat.checkpoint_stream import PluginFragment
+from raychat.checkpoint_stream import snapshot as stream_snapshot
 from raychat.handoff import (
     document,
     editor_parts,
     editor_state,
     export_plugins,
     restore_plugins,
+    stream_plugins,
 )
+from raychat.sdk import checkpoint_snapshot
 from raychat.storage import SessionStore
+from raychat.type_support import override
 from raychat.validation import (
     array_field,
     boolean_field,
@@ -24,11 +31,33 @@ from raychat_bootstrap.wire import VERSION
 
 from .picker import Choice, Picker
 from .selection import TextSelection
+from .state import _PrefixTranscriptRows
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from .controller import ChatView, _TuiController
 
 _POINT_DIMENSIONS = 2
+
+
+class _DeferredViews(Mapping[str, object]):
+    """Capture one owned view at a time during the immediate synchronous send."""
+
+    def __init__(self, views: Mapping[str, ChatView]) -> None:
+        self._owners = dict(views)
+
+    @override
+    def __getitem__(self, key: str) -> object:
+        return capture_view(self._owners[key], compact_state=True)
+
+    @override
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._owners)
+
+    @override
+    def __len__(self) -> int:
+        return len(self._owners)
 
 
 def _point(value: object, *, minimum: int | None = 0) -> tuple[int, int] | None:
@@ -45,7 +74,12 @@ def _point(value: object, *, minimum: int | None = 0) -> tuple[int, int] | None:
     )
 
 
-def capture_view(owner: ChatView) -> dict[str, object]:
+def capture_view(
+    owner: ChatView,
+    *,
+    include_state: bool = True,
+    compact_state: bool = False,
+) -> dict[str, object]:
     """Detach one chat's frontend state before dispatch or process handoff.
 
     Returns
@@ -55,8 +89,18 @@ def capture_view(owner: ChatView) -> dict[str, object]:
 
     """
     selection = owner.selection
-    return {
-        "state": owner.state.handoff,
+    lazy_selection = selection.needs_rebind or isinstance(
+        selection.rows,
+        _PrefixTranscriptRows,
+    )
+    selection_history = (
+        selection.expected_history
+        if selection.needs_rebind
+        else cast("_PrefixTranscriptRows", selection.rows).fingerprint
+        if lazy_selection
+        else ""
+    )
+    view: dict[str, object] = {
         "editor": editor_state(owner.editor.text, owner.editor.cursor),
         "queue": owner.message_queue.export_handoff(),
         "input_history": owner.input_history.export_handoff(),
@@ -68,12 +112,19 @@ def capture_view(owner: ChatView) -> dict[str, object]:
         "selection": {
             "anchor": selection.anchor,
             "focus": selection.focus,
-            "rows": selection.rows,
+            "rows": () if lazy_selection else selection.rows,
+            "lazy": lazy_selection,
+            "history": selection_history,
             "width": selection.width,
             "dragging": selection.dragging,
             "pointer": selection.pointer,
         },
     }
+    if include_state:
+        view["state"] = (
+            owner.state.compact_handoff() if compact_state else owner.state.handoff
+        )
+    return view
 
 
 def restore_selection(value: object) -> TextSelection:
@@ -96,6 +147,12 @@ def restore_selection(value: object) -> TextSelection:
         width=integer_field(selection["width"], "width", minimum=0),
         dragging=boolean_field(selection["dragging"], "dragging"),
         pointer=_point(selection.get("pointer"), minimum=None),
+        needs_rebind=boolean_field(selection.get("lazy", False), "lazy selection"),
+        expected_history=text_field(
+            selection.get("history", ""),
+            "selection history",
+            allow_empty=True,
+        ),
     )
     if not restored.dragging:
         restored.finish()
@@ -134,8 +191,13 @@ def capture(
     controller: _TuiController,
     *,
     strict: bool = True,
+    defer_views: bool = False,
 ) -> dict[str, object]:
     """Capture all idle conversations, drafts, queue transactions and navigation.
+
+    Deferred views retain their owners, not snapshots; plugin values are also
+    borrowed until serialization. The caller must consume them synchronously
+    before the frontend, workers or plugin resources can change.
 
     Returns
     -------
@@ -155,27 +217,38 @@ def capture(
         message = "This persistence backend has no process writer handoff."
         raise ValueError(message)
     snapshot = (
-        root.export_snapshot()
+        (stream_snapshot(root) if defer_views else checkpoint_snapshot(root))
         if root is not None
         else store.snapshot()
         if store is not None
-        else {"history": [], "state": resources.runtime.state}
+        else {"history": [], "state": copy.deepcopy(resources.runtime.state)}
     )
     try:
-        plugins = export_plugins(resources.runtime)
+        plugins: object = (
+            PluginFragment(lambda: stream_plugins(resources.runtime), strict)
+            if defer_views
+            else export_plugins(resources.runtime)
+        )
     except Exception as error:
         if strict:
             raise
         plugins = {"unavailable": str(error)}
     picker = controller.picker
     live = resources.live
-    return document({
+    # Deferred views create containers on access so the transport can release
+    # one before the next. Borrowed plugin values are serialized without mutation.
+    return {
         "version": VERSION,
         "session": snapshot,
         "store": writer(controller),
         "plugins": plugins,
-        "sources": resources.runtime.export_sources(),
-        "views": {key: capture_view(value) for key, value in controller.views.items()},
+        "sources": copy.deepcopy(resources.runtime.export_sources()),
+        "views": _DeferredViews(controller.views)
+        if defer_views
+        else {
+            key: capture_view(value, compact_state=True)
+            for key, value in controller.views.items()
+        },
         "root": controller.root_id,
         "focus": controller.focused_id,
         "show_system": controller.show_system,
@@ -194,7 +267,7 @@ def capture(
             "index": picker.index,
             "offset": picker.offset,
         },
-    })
+    }
 
 
 def restore(controller: _TuiController, value: object) -> None:

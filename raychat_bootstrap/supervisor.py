@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import copy
 import logging
 import os
 import shutil
@@ -15,14 +16,14 @@ import uuid
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from raychat.configuration import SETTINGS
 from raychat.filesystem import (
     append_owned,
     read_regular,
     run_filesystem_task,
-    write_bytes_async,
+    write_chunks_async,
 )
 from raychat.provider_settings import provider_settings
 from raychat.ui.terminal import TerminalSession
@@ -31,19 +32,47 @@ from raychat.validation import configuration_fields, text_field
 
 from .recovery import release as recovery_release
 from .recovery import retained_state
-from .releases import Release, Releases, digest
-from .wire import MAX_MESSAGE, decode, encode
+from .releases import Release, Releases, cache_identity, digest
+from .wire import MAX_MESSAGE, decode, encode, encoded_chunks
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from typing import BinaryIO, Literal
+
+    from typing_extensions import Self
+
+
+class CoreProcess(Protocol):
+    """Expose process ownership for spawned and already-running child cores."""
+
+    @property
+    def pid(self) -> int:
+        """The operating-system child identity."""
+
+    @property
+    def returncode(self) -> int | None:
+        """A reaped exit status, or None while the child is alive."""
+
+    @property
+    def stdin(self) -> asyncio.StreamWriter | None:
+        """The ordered supervisor-to-core control stream."""
+
+    @property
+    def stdout(self) -> asyncio.StreamReader | None:
+        """The core-to-supervisor event stream."""
+
+    async def wait(self) -> int:
+        """Reap the child and return its exit status."""
+
+    def kill(self) -> None:
+        """Force termination of the owned child."""
 
 
 @dataclass
 class Core:
     """Own a process and its ordered control stream until it has been reaped."""
 
-    process: asyncio.subprocess.Process
+    process: CoreProcess
     release: Release
     log: BinaryIO
     events: asyncio.Queue[dict[str, object]] = field(default_factory=asyncio.Queue)
@@ -74,18 +103,22 @@ class Supervisor:
     """Keep the terminal usable through validation, activation and core failures."""
 
     def __init__(self, source: Path, argv: Sequence[str], directory: Path) -> None:
-        """Capture the evaluator and establish persistent recovery metadata.
+        """Capture the evaluator and establish persistent recovery metadata."""
+        releases = Releases(source, directory)
+        self._initialize(releases, releases.initial(), argv, TerminalSession())
+        self._configure(source)
 
-        Raises
-        ------
-        ValueError
-            If the selected configuration exceeds the bootstrap transport limit.
-
-        """
+    def _initialize(
+        self,
+        releases: Releases,
+        initial: Release,
+        argv: Sequence[str],
+        terminal: TerminalSession,
+    ) -> None:
         self.argv = list(argv)
         self.workspace = _workspace(argv)
-        self.releases = Releases(source, directory)
-        self.initial = self.releases.initial()
+        self.releases = releases
+        self.initial = initial
         self.start_release = self.initial
         self.recovering_start = False
         self.current: Core | None = None
@@ -94,12 +127,12 @@ class Supervisor:
         self.checkpoints: dict[str, str] = {}
         self.update_results: dict[str, dict[str, object]] = {}
         self.claimed_results: dict[str, dict[str, object]] = {}
-        self.terminal = TerminalSession()
+        self.terminal = terminal
         self.buffer = bytearray()
         self.routing = False
         self.transition: asyncio.Task[None] | None = None
         self.status = ""
-        self.log = directory / "updates.log"
+        self.log = releases.directory / "updates.log"
         self.children: list[Core] = []
         self.exit_code: int | None = None
         self.start_error = ""
@@ -108,7 +141,30 @@ class Supervisor:
         self.last_checkpoint = 0.0
         self.persistence_lock = asyncio.Lock()
         self.persistence_error = ""
-        self.config = directory / "configuration.json"
+        self.config = releases.directory / "configuration.json"
+        self.safe_config = releases.directory / "safe-configuration.json"
+
+    @classmethod
+    def from_prepared(
+        cls,
+        releases: Releases,
+        initial: Release,
+        argv: Sequence[str],
+        terminal: TerminalSession,
+    ) -> Self:
+        """Reuse a prepared release and configuration without acquiring a writer.
+
+        Returns
+        -------
+        Self
+            The supervisor before any child or terminal ownership is adopted.
+
+        """
+        supervisor = cls.__new__(cls)
+        cls._initialize(supervisor, releases, initial, argv, terminal)
+        return supervisor
+
+    def _configure(self, source: Path) -> None:
         selected = Path(os.environ.get("RAYCHAT_CONFIG", source / "raychat.json"))
         raw_configuration = read_regular(selected, MAX_MESSAGE + 1)
         if len(raw_configuration) > MAX_MESSAGE:
@@ -127,7 +183,6 @@ class Supervisor:
             )
         self.config.write_bytes(encode(configuration))
         self.config.chmod(0o400)
-        self.safe_config = directory / "safe-configuration.json"
         plugins.update({
             "profile": None,
             "paths": [],
@@ -144,12 +199,15 @@ class Supervisor:
         self.initial = recovery_release(saved["known_good"])
         self.previous = recovery_release(saved["previous"])
         self.start_release = self.previous if version == "previous" else self.initial
+        self._restore_metadata(saved)
+        self.recovering_start = True
+
+    def _restore_metadata(self, saved: Mapping[str, object]) -> None:
         self.last_state = (
             None
             if saved["state"] is None
             else dict(configuration_fields(saved["state"], "recovery state"))
         )
-        self.recovering_start = True
         self.update_results = {
             key: dict(configuration_fields(value, "update result"))
             for key, value in configuration_fields(
@@ -171,6 +229,26 @@ class Supervisor:
                 "retained checkpoints",
             ).items()
         }
+
+    def adopt(self, core: Core, saved: Mapping[str, object]) -> None:
+        """Attach a live child only after local persistence relinquishes ownership."""
+        self._restore_metadata(saved)
+        self.current = core
+        self.children.append(core)
+        core.state = self.last_state
+        core.ready.set()
+        self.routing = True
+
+    async def serve_adopted(self) -> int:
+        """Run existing request and recovery handling for an adopted terminal.
+
+        Returns
+        -------
+        int
+            The application's final exit status.
+
+        """
+        return await self._loop(launch=False)
 
     async def _record(self) -> bool:
         async with self.persistence_lock:
@@ -220,26 +298,25 @@ class Supervisor:
             "claimed_results": self.claimed_results,
         }
         # Freeze both documents before a replacement retry yields to another task.
-        manifest = encode(data)
-        state = encode(self.last_state)
+        manifest = copy.deepcopy(data)
         if checkpoint is not None:
-            await self._replace(checkpoint, state)
+            await self._replace(checkpoint, manifest["state"])
         await self._replace(self.releases.directory / "recovery.json", manifest)
         self.checkpoints = checkpoints
 
     async def _save(self, path: Path, data: object) -> bool:
         async with self.persistence_lock:
             try:
-                await self._replace(path, encode(data))
+                await self._replace(path, copy.deepcopy(data))
             except OSError as error:
                 self._persistence_failure(error)
                 return False
             return True
 
     @staticmethod
-    async def _replace(path: Path, data: bytes) -> None:
+    async def _replace(path: Path, data: object) -> None:
         """Flush and close before replacing; tolerate short Windows sharing locks."""
-        await write_bytes_async(path, data)
+        await write_chunks_async(path, encoded_chunks(data))
 
     def _persistence_failure(self, error: OSError) -> None:
         self.persistence_error = f"Recovery state could not be saved: {error}"
@@ -269,6 +346,7 @@ class Supervisor:
         try:
             while data := await stream.readline():
                 await core.events.put(decode(data))
+                del data
         except (ValueError, OSError) as error:
             core.error = str(error)
         finally:
@@ -317,6 +395,11 @@ class Supervisor:
             "RAYCHAT_CONFIG": str(self.safe_config if safe else self.config),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
+        plugin_code = await run_filesystem_task(partial(cache_identity, release))
+        if plugin_code:
+            environment["RAYCHAT_PLUGIN_CODE_SHA256"] = plugin_code
+        else:
+            environment.pop("RAYCHAT_PLUGIN_CODE_SHA256", None)
         overlay = release.path / "harness.txt"
         if overlay.is_file():
             environment["RAYCHAT_CORE_OVERLAY"] = str(overlay)
@@ -393,6 +476,7 @@ class Supervisor:
                 )
             raise
         else:
+            core.state = None
             core.log.close()
 
     @staticmethod
@@ -929,9 +1013,9 @@ class Supervisor:
                 self.current.expected_exit = True
             self.exit_code = 0
 
-    async def _loop(self) -> int:
+    async def _loop(self, *, launch: bool = True) -> int:
         await self._record()
-        startup = asyncio.create_task(self._start())
+        startup = asyncio.create_task(self._start()) if launch else None
         try:
             while self.exit_code is None:
                 await self._input()
@@ -954,9 +1038,10 @@ class Supervisor:
                 await asyncio.sleep(0.01)
             return self.exit_code
         finally:
-            startup.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await startup
+            if startup is not None:
+                startup.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await startup
             if self.transition is not None:
                 self.transition.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

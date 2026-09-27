@@ -1,5 +1,5 @@
 {
-  "catalog": "catalog-34fd4b4444ebefa85dda09bfa5d4cabacd310c9141b4dc8e10fe5878a2796e23.json",
+  "catalog": "catalog-3239227f352132258682ee8a62e28ead0792df431cb11508b1f3e919ccd45de6.json",
   "id": "standard",
   "packages": [
     "chat_completions@1.0.0",

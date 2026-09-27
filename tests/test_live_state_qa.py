@@ -27,6 +27,12 @@ else:
 class LiveStateQATests(TypedTestCase):
     """Keep host attribution across durable conversation restoration."""
 
+    def test_dispatch_view_omits_transcript_handoff_when_not_needed(self) -> None:
+        """Dispatches can preserve view fields without rebuilding transcript data."""
+        owner = ChatView(AgentWorker(lambda _messages: ""))
+        self.require("state" in capture_view(owner))
+        self.require("state" not in capture_view(owner, include_state=False))
+
     def test_held_selection_restores_pointer_and_resets_monotonic_pacing(self) -> None:
         """A replacement resumes the held drag and copies every selected glyph."""
         owner = ChatView(AgentWorker(lambda _messages: ""))
@@ -156,18 +162,20 @@ class LiveStateQATests(TypedTestCase):
     def test_final_host_failure_stays_a_system_notice_after_resume(self) -> None:
         """An exhausted repair budget must not become a claimed model reply."""
         state = TuiState()
-        state.restore([
-            {"kind": "prompt", "content": "Update the core"},
-            {
-                "kind": "assistant",
-                "content": '{"action":"done","host_generated":true,'
-                '"pending":false,"message":"Automatic repair limit reached"}',
-            },
-            {
-                "kind": "assistant",
-                "content": '{"action":"done","message":"Model explanation"}',
-            },
-        ])
+        state.restore(
+            [
+                {"kind": "prompt", "content": "Update the core"},
+                {
+                    "kind": "assistant",
+                    "content": '{"action":"done","host_generated":true,'
+                    '"pending":false,"message":"Automatic repair limit reached"}',
+                },
+                {
+                    "kind": "assistant",
+                    "content": '{"action":"done","message":"Model explanation"}',
+                },
+            ],
+        )
         self.equal(
             [(entry.kind, entry.title) for entry in state.entries],
             [("user", "You"), ("system", "System"), ("assistant", "Agent")],

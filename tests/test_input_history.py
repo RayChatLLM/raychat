@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import random
+import string
+import tracemalloc
+
+from raychat.paged_text import TextPageRef
 from raychat.ui.controller import ChatView
 from raychat.ui.handoff import capture_view
 from raychat.ui.input_history import InputHistory
@@ -15,6 +20,103 @@ from tests.assertions import TypedTestCase
 
 class InputHistoryTests(TypedTestCase):
     """Exercise history through submitted text and observable editor state."""
+
+    def test_repeated_large_submissions_share_storage_without_dropping_entries(
+        self,
+    ) -> None:
+        """Repeated recall retains its logical budget without repeated payloads."""
+        tracing = tracemalloc.is_tracing()
+        if not tracing:
+            tracemalloc.start()
+        try:
+            before, _ = tracemalloc.get_traced_memory()
+            histories = []
+            for _ in range(10):
+                history = InputHistory()
+                for _ in range(40):
+                    history.record(("x" * 16_384).encode().decode())
+                histories.append(history)
+            after, _ = tracemalloc.get_traced_memory()
+        finally:
+            if not tracing:
+                tracemalloc.stop()
+        self.require(after - before < 512 * 1024)
+        for history in histories:
+            self.equal(len(history.items), 16)
+            editor = LineEditor("draft")
+            editor.set_text(editor.text, 2)
+            for _ in range(16):
+                history.navigate(editor, -1)
+                self.equal(editor.text, "x" * 16_384)
+            for _ in range(16):
+                history.navigate(editor, 1)
+            self.equal((editor.text, editor.cursor), ("draft", 2))
+            history.record("different")
+            self.equal(len(history.items), 16)
+            self.equal(history.items[-1], "different")
+
+    def test_ten_histories_page_distinct_large_inputs(self) -> None:
+        """Keep distinct recalled prompts out of the heap across ten chats."""
+        histories: list[InputHistory] = []
+        tracing = tracemalloc.is_tracing()
+        if not tracing:
+            tracemalloc.start()
+        try:
+            before, _ = tracemalloc.get_traced_memory()
+            for chat in range(10):
+                history = InputHistory()
+                for number in range(16):
+                    rng = random.Random(
+                        f"input-history:{chat}:{number}",
+                    )
+                    text = "".join(
+                        rng.choices(string.ascii_letters + string.digits, k=16_384),
+                    )
+                    history.record(text)
+                histories.append(history)
+            after, _ = tracemalloc.get_traced_memory()
+        finally:
+            if not tracing:
+                tracemalloc.stop()
+        self.require(after - before < 768 * 1024)
+        for history in histories:
+            self.equal(len(history._items), 16)
+            self.require(
+                all(isinstance(item, TextPageRef) for item in history._items),
+            )
+            editor = LineEditor("")
+            history.navigate(editor, -1)
+            self.equal(len(editor.text), 16_384)
+            restored = InputHistory()
+            restored.restore_handoff(history.export_handoff())
+            self.equal(restored.items[-1], editor.text)
+
+    def test_restore_repeated_history_preserves_selection_draft_and_byte_budget(
+        self,
+    ) -> None:
+        """Restored repeated entries remain distinct navigation positions."""
+        saved = decode(
+            encode(
+                {
+                    "items": ["雪" * 4096] * 30,
+                    "selected": 0,
+                    "draft": {"text": "draft", "cursor": 2},
+                },
+            ),
+        )
+        history = InputHistory()
+        history.restore_handoff(saved)
+        self.equal(len(history.items), 21)
+        self.equal(history.selected, 0)
+        editor = LineEditor(history.items[0])
+        for _ in range(20):
+            history.navigate(editor, 1)
+            self.equal(editor.text, "雪" * 4096)
+        history.navigate(editor, 1)
+        self.equal((editor.text, editor.cursor), ("draft", 2))
+        history.record("changed")
+        self.equal(len(history.items), 22)
+        self.equal(history.items[-1], "changed")
 
     def test_retention_bounds_entries_without_losing_draft(self) -> None:
         """Old submissions expire while recall still restores the original cursor."""
@@ -52,11 +154,15 @@ class InputHistoryTests(TypedTestCase):
         items = [str(index).zfill(4) + "🙂" * 16_380 for index in range(40)]
         for selected in (None, 0, 20, 39):
             history = InputHistory()
-            history.restore_handoff({
-                "items": items,
-                "selected": selected,
-                "draft": None if selected is None else {"text": "draft", "cursor": 2},
-            })
+            history.restore_handoff(
+                {
+                    "items": items,
+                    "selected": selected,
+                    "draft": None
+                    if selected is None
+                    else {"text": "draft", "cursor": 2},
+                },
+            )
             self.equal(len(history.items), 4)
             if selected is not None:
                 self.equal(history.items[history.selected or 0], items[selected])
@@ -164,11 +270,13 @@ class InputHistoryTests(TypedTestCase):
         self.equal(editor.text, "hi")
         for selected, draft in ((1, {"text": "", "cursor": 0}), (0, None)):
             with self.rejected(ValueError):
-                history.restore_handoff({
-                    "items": ["one"],
-                    "selected": selected,
-                    "draft": draft,
-                })
+                history.restore_handoff(
+                    {
+                        "items": ["one"],
+                        "selected": selected,
+                        "draft": draft,
+                    },
+                )
         self.equal(history.export_handoff(), before)
 
 

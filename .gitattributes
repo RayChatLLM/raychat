@@ -7,6 +7,7 @@
 *.toml text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+*.zsh text eol=lf
 .gitattributes text eol=lf
 .gitignore text eol=lf
 plugins/optimization/GEPA_LICENSE text eol=lf

@@ -15,13 +15,15 @@ import json
 import math
 import threading
 import unicodedata
+from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import ClassVar, TypeGuard, cast
+from typing import ClassVar, Protocol, TypeGuard, cast, runtime_checkable
 
 from raychat.configuration import SETTINGS
 from raychat.handoff import optional_index
+from raychat.paged_text import TextPageRef, export_ref, parse_ref, read_ref, store_text
 from raychat.validation import (
     array_field,
     boolean_field,
@@ -58,6 +60,7 @@ _TRANSCRIPT_INDENT_CELLS = 2
 _MIN_STATUS_ROWS = 3
 _COMPACT_BODY_ROWS = 4
 _MIN_SIDEBAR_ROWS = 6
+_COMPACT_ENTRY_LENGTH = 7
 
 _REPLACEMENT = "�"
 _ELLIPSIS = "…"
@@ -85,6 +88,8 @@ _ENTRY_KINDS = frozenset(
 )
 _THINKING_PREVIEW_CELLS = 100
 _MAX_FAILURE_BODY_CHARS = 500
+_PAGED_BODY_CHARS = 4096
+_MAX_PAGED_BODY_BYTES = 1024 * 1024
 
 
 def _is_bool(value: object) -> TypeGuard[bool]:
@@ -257,6 +262,10 @@ def sanitize_text(text: str, *, max_chars: int = MAX_SOURCE_CHARS) -> str:
 
     clipped = len(text) > max_chars
     source = text[:max_chars]
+    # Printable ASCII has no terminal controls, bidi marks or combining glyphs.
+    # Keep its immutable storage shared by semantic and displayed history.
+    if source.isascii() and source.isprintable():
+        return source + _ELLIPSIS if clipped else source
     output: list[str] = []
     index = 0
     while index < len(source):
@@ -1157,6 +1166,267 @@ class TranscriptEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class _PagedTranscriptEntry:
+    sequence: int
+    kind: str
+    title: str
+    step: int | None
+    max_steps: int | None
+    ok: bool | None
+    reference: TextPageRef
+
+
+class _FingerprintHash(Protocol):
+    def update(self, data: bytes) -> None: ...
+
+    def copy(self) -> _FingerprintHash: ...
+
+    def hexdigest(self) -> str: ...
+
+
+def _update_transcript_fingerprint(
+    digest: _FingerprintHash,
+    stored: TranscriptEntry | _PagedTranscriptEntry,
+) -> None:
+    sequence = stored.sequence
+    kind = stored.kind
+    title = stored.title
+    step = stored.step
+    max_steps = stored.max_steps
+    ok = stored.ok
+    if isinstance(stored, _PagedTranscriptEntry):
+        body_digest = stored.reference.sha256
+    else:
+        body_digest = hashlib.sha256(stored.body.encode("utf-8")).hexdigest()
+    identity = (
+        f"{sequence}\0{kind}\0{title}\0{step}\0{max_steps}\0{ok}\0{body_digest}\n"
+    )
+    digest.update(identity.encode("utf-8"))
+
+
+class TranscriptRowSource(Protocol):
+    """A globally indexed transcript row view which may load rows lazily."""
+
+    def __len__(self) -> int: ...
+
+    def __getitem__(self, index: int) -> str: ...
+
+
+@runtime_checkable
+class _PrefixTranscriptRows(TranscriptRowSource, Protocol):
+    def is_prefix_of(self, other: TranscriptRowSource) -> bool: ...
+
+    @property
+    def fingerprint(self) -> str: ...
+
+
+class _TranscriptRows:
+    """Resolve transcript rows lazily, retaining only the current entry."""
+
+    def __init__(self, state: TuiState, width: int) -> None:
+        # This adapter deliberately snapshots TuiState's same-module internals.
+        state._index_transcript(width)
+        self.state = state
+        self.width = width
+        self.entries = tuple(state._entries)
+        self.ends = tuple(state._transcript_row_ends)
+        self.thinking_expanded = state._thinking_expanded
+        self._fingerprint = state.transcript_fingerprint
+        self._cached_index = -1
+        self._cached_rows: tuple[TranscriptLine, ...] = ()
+
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint
+
+    def __len__(self) -> int:
+        return self.ends[-1] if self.ends else 0
+
+    def __getitem__(self, index: int) -> str:
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        entry_index = bisect_right(self.ends, index)
+        if entry_index != self._cached_index:
+            self._cached_rows = entry_lines(
+                self.state._display_entry(
+                    self.entries[entry_index],
+                    thinking_expanded=self.thinking_expanded,
+                ),
+                self.width,
+            )
+            self._cached_index = entry_index
+        prior = self.ends[entry_index - 1] if entry_index else 0
+        return self._cached_rows[index - prior].text
+
+    def is_prefix_of(self, other: TranscriptRowSource) -> bool:
+        """Check transcript continuity by immutable entry identities and offsets.
+
+        Returns
+        -------
+        bool
+            Whether this row source is a prefix of the other source.
+
+        """
+        if (
+            not isinstance(other, _TranscriptRows)
+            or self.width != other.width
+            or self.thinking_expanded != other.thinking_expanded
+            or len(self.entries) > len(other.entries)
+        ):
+            return False
+        return (
+            all(
+                first is second
+                for first, second in zip(self.entries, other.entries, strict=False)
+            )
+            and self.ends == other.ends[: len(self.ends)]
+        )
+
+
+def _materialize_entry(
+    entry: TranscriptEntry | _PagedTranscriptEntry,
+) -> TranscriptEntry:
+    if isinstance(entry, _PagedTranscriptEntry):
+        return TranscriptEntry(
+            entry.sequence,
+            entry.kind,
+            entry.title,
+            read_ref(entry.reference),
+            entry.step,
+            entry.max_steps,
+            entry.ok,
+        )
+    return entry
+
+
+def _store_entry(
+    entry: TranscriptEntry,
+    prepared: TextPageRef | None = None,
+) -> TranscriptEntry | _PagedTranscriptEntry:
+    if len(entry.body) < _PAGED_BODY_CHARS:
+        return entry
+    raw = entry.body.encode("utf-8")
+    if len(raw) > _MAX_PAGED_BODY_BYTES:
+        message = "Transcript body exceeds the 1 MiB paging limit."
+        raise ValueError(message)
+    reference = (
+        prepared
+        if prepared is not None and hashlib.sha256(raw).hexdigest() == prepared.sha256
+        else store_text(entry.body)
+    )
+    return _PagedTranscriptEntry(
+        entry.sequence,
+        entry.kind,
+        entry.title,
+        entry.step,
+        entry.max_steps,
+        entry.ok,
+        reference,
+    )
+
+
+def _entry_handoff(
+    stored: TranscriptEntry | _PagedTranscriptEntry,
+    stores: dict[str, object],
+    *,
+    compact: bool = False,
+) -> dict[str, object] | list[object]:
+    sequence = stored.sequence
+    kind = stored.kind
+    title = stored.title
+    step = stored.step
+    max_steps = stored.max_steps
+    ok = stored.ok
+    if isinstance(stored, _PagedTranscriptEntry):
+        body: object = export_ref(stored.reference, stores=stores)
+    else:
+        body = stored.body
+    if compact:
+        return [
+            sequence,
+            kind,
+            title,
+            body,
+            step,
+            max_steps,
+            ok,
+        ]
+    body_field = (
+        {"body_ref": body}
+        if isinstance(stored, _PagedTranscriptEntry)
+        else {"body": body}
+    )
+    # Omitting the legacy body field makes older cores reject a paged handoff
+    # instead of silently restoring an empty transcript body.
+    return {
+        "sequence": sequence,
+        "kind": kind,
+        "title": title,
+        **body_field,
+        "step": step,
+        "max_steps": max_steps,
+        "ok": ok,
+    }
+
+
+def _restore_entry(
+    value: object,
+    stores: Mapping[str, object],
+) -> TranscriptEntry | _PagedTranscriptEntry:
+    if isinstance(value, list):
+        if len(value) != _COMPACT_ENTRY_LENGTH:
+            message = "Invalid compact transcript entry."
+            raise ValueError(message)
+        sequence, kind, title, stored_body, step, max_steps, ok = value
+        reference = (
+            parse_ref(stored_body, stores=stores)
+            if isinstance(stored_body, dict)
+            else None
+        )
+        body = (
+            ""
+            if reference is not None
+            else text_field(stored_body, "entry body", allow_empty=True)
+        )
+    else:
+        entry = configuration_fields(value, "transcript entry")
+        reference = (
+            parse_ref(entry["body_ref"], stores=stores) if "body_ref" in entry else None
+        )
+        body = (
+            ""
+            if reference is not None
+            else text_field(entry["body"], "entry body", allow_empty=True)
+        )
+        sequence, kind, title = entry["sequence"], entry["kind"], entry["title"]
+        step, max_steps, ok = entry["step"], entry["max_steps"], entry["ok"]
+    restored = TranscriptEntry(
+        integer_field(sequence, "sequence", minimum=1),
+        text_field(kind, "entry kind"),
+        text_field(title, "entry title", allow_empty=True),
+        body,
+        optional_index(step, "entry step"),
+        optional_index(max_steps, "max steps"),
+        None if ok is None else boolean_field(ok, "entry ok"),
+    )
+    return (
+        _PagedTranscriptEntry(
+            restored.sequence,
+            restored.kind,
+            restored.title,
+            restored.step,
+            restored.max_steps,
+            restored.ok,
+            reference,
+        )
+        if reference is not None
+        else _store_entry(restored)
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class PendingApproval:
     """Capture validated approval records independently of viewport dimensions."""
 
@@ -1250,23 +1520,35 @@ class TuiState:
             raise ValueError(error_message)
         self._max_entries = max_entries
         self._phase = Phase.IDLE
-        self._entries: list[TranscriptEntry] = []
+        self._entries: list[TranscriptEntry | _PagedTranscriptEntry] = []
+        self._prepared_body: TextPageRef | None = None
         self._task = ""
         self._step = 0
         self._max_steps = 0
         self._pending_approval: PendingApproval | None = None
         self._next_sequence = 1
         self._dropped_entries = 0
-        # Keep exactly one width-specific rendering. Animated frames normally
-        # ask for the same viewport sixty times per second. New entries extend
-        # the cache incrementally; only a resize or bounded-history eviction
-        # requires a complete reflow.
+        # Retain row offsets and only the current viewport. Full row text is
+        # materialized on demand for explicit transcript selection and copying.
         self._transcript_cache_width: int | None = None
-        self._transcript_cache_lines: list[TranscriptLine] = []
+        self._transcript_row_ends: list[int] = []
+        self._transcript_viewport: TranscriptViewport | None = None
         self._transcript_viewport_height: int | None = None
         self._transcript_scroll_offset: int | None = None
         self._thinking_expanded = False
         self._failure_streak = 0
+        self._transcript_hasher: _FingerprintHash | None = hashlib.sha256()
+
+    @property
+    def transcript_fingerprint(self) -> str:
+        """Stable content identity for safe selection rebinding after handoff."""
+        if self._transcript_hasher is None:
+            self._transcript_hasher = hashlib.sha256()
+            for stored in self._entries:
+                _update_transcript_fingerprint(self._transcript_hasher, stored)
+        digest = self._transcript_hasher.copy()
+        digest.update(b"thinking-expanded=" + str(self._thinking_expanded).encode())
+        return digest.hexdigest()
 
     def toggle_thinking(self) -> bool:
         """Flip between collapsed previews and complete reasoning text.
@@ -1280,10 +1562,16 @@ class TuiState:
         self._assert_main_thread()
         self._thinking_expanded = not self._thinking_expanded
         self._transcript_cache_width = None
-        self._transcript_cache_lines = []
+        self._transcript_row_ends = []
+        self._transcript_viewport = None
         return self._thinking_expanded
 
-    def _display_entry(self, entry: TranscriptEntry) -> TranscriptEntry:
+    def _display_entry(
+        self,
+        stored: TranscriptEntry | _PagedTranscriptEntry,
+        *,
+        thinking_expanded: bool | None = None,
+    ) -> TranscriptEntry:
         """Collapse thinking entries to a one-line preview unless expanded.
 
         Returns
@@ -1292,7 +1580,11 @@ class TuiState:
             The entry to render, possibly a collapsed preview copy.
 
         """
-        if entry.kind != "thinking" or self._thinking_expanded or not entry.body:
+        entry = _materialize_entry(stored)
+        expanded = (
+            self._thinking_expanded if thinking_expanded is None else thinking_expanded
+        )
+        if entry.kind != "thinking" or expanded or not entry.body:
             return entry
         first_line = entry.body.split("\n", 1)[0]
         preview = truncate_display(first_line, _THINKING_PREVIEW_CELLS)
@@ -1315,7 +1607,7 @@ class TuiState:
     @property
     def entries(self) -> tuple[TranscriptEntry, ...]:
         """Immutable snapshot of retained transcript entries."""
-        return tuple(self._entries)
+        return tuple(_materialize_entry(entry) for entry in self._entries)
 
     @property
     def pending_approval(self) -> PendingApproval | None:
@@ -1343,7 +1635,7 @@ class TuiState:
         """
         return TuiSnapshot(
             self._phase,
-            tuple(self._entries),
+            self.entries,
             self._task,
             self._step,
             self._max_steps,
@@ -1361,26 +1653,7 @@ class TuiState:
             Exact transcript entries and idle lifecycle fields.
 
         """
-        return {
-            "phase": self._phase.value,
-            "task": self._task,
-            "step": self._step,
-            "max_steps": self._max_steps,
-            "dropped": self._dropped_entries,
-            "next_sequence": self._next_sequence,
-            "entries": [
-                {
-                    "sequence": e.sequence,
-                    "kind": e.kind,
-                    "title": e.title,
-                    "body": e.body,
-                    "step": e.step,
-                    "max_steps": e.max_steps,
-                    "ok": e.ok,
-                }
-                for e in self._entries
-            ],
-        }
+        return self._handoff(compact=False)
 
     @handoff.setter
     def handoff(self, value: object) -> None:
@@ -1397,23 +1670,13 @@ class TuiState:
         if phase in {Phase.RUNNING, Phase.APPROVAL, Phase.STOPPING}:
             message = "Cannot hand off an executing transcript."
             raise ValueError(message)
-        entries = []
-        for raw in array_field(data["entries"], "transcript entries"):
-            entry = configuration_fields(raw, "transcript entry")
-            entries.append(
-                TranscriptEntry(
-                    integer_field(entry["sequence"], "sequence", minimum=1),
-                    text_field(entry["kind"], "entry kind"),
-                    text_field(entry["title"], "entry title", allow_empty=True),
-                    text_field(entry["body"], "entry body", allow_empty=True),
-                    optional_index(entry["step"], "entry step"),
-                    optional_index(entry["max_steps"], "entry max steps"),
-                    None
-                    if entry["ok"] is None
-                    else boolean_field(entry["ok"], "entry ok"),
-                ),
-            )
+        stores = configuration_fields(data.get("page_stores", {}), "page stores")
+        entries = [
+            _restore_entry(raw, stores)
+            for raw in array_field(data["entries"], "transcript entries")
+        ]
         self._phase, self._entries = phase, entries
+        self._transcript_hasher = None
         self._task = text_field(data["task"], "task", allow_empty=True)
         self._step = integer_field(data["step"], "step", minimum=0)
         self._max_steps = integer_field(data["max_steps"], "max steps", minimum=0)
@@ -1427,7 +1690,36 @@ class TuiState:
             message = "Invalid transcript sequence."
             raise ValueError(message)
         self._transcript_cache_width = None
+        self._transcript_row_ends = []
+        self._transcript_viewport = None
         self._pending_approval = None
+
+    def compact_handoff(self) -> dict[str, object]:
+        """Capture transcript entries in compact positional records for checkpoints.
+
+        Returns
+        -------
+        dict[str, object]
+            A checkpoint-safe representation of the current TUI state.
+
+        """
+        return self._handoff(compact=True)
+
+    def _handoff(self, *, compact: bool) -> dict[str, object]:
+        stores: dict[str, object] = {}
+        entries = [
+            _entry_handoff(entry, stores, compact=compact) for entry in self._entries
+        ]
+        return {
+            "phase": self._phase.value,
+            "task": self._task,
+            "step": self._step,
+            "max_steps": self._max_steps,
+            "dropped": self._dropped_entries,
+            "next_sequence": self._next_sequence,
+            "entries": entries,
+            **({"page_stores": stores} if stores else {}),
+        }
 
     def _append(
         self,
@@ -1447,8 +1739,10 @@ class TuiState:
             None,
             ok,
         )
+        stored = _store_entry(entry, self._prepared_body)
+        self._prepared_body = None
         self._next_sequence += 1
-        self._entries.append(entry)
+        self._entries.append(stored)
         overflow = (
             max(0, len(self._entries) - self._max_entries)
             if self._max_entries is not None
@@ -1457,13 +1751,25 @@ class TuiState:
         if overflow > 0:
             del self._entries[:overflow]
             self._dropped_entries += overflow
-        if self._transcript_cache_width is not None and not overflow:
-            self._transcript_cache_lines.extend(
-                entry_lines(self._display_entry(entry), self._transcript_cache_width),
+            self._transcript_hasher = None
+        elif self._transcript_hasher is not None:
+            _update_transcript_fingerprint(self._transcript_hasher, stored)
+        self._transcript_viewport = None
+        if self._transcript_cache_width is not None:
+            if overflow:
+                removed = self._transcript_row_ends[overflow - 1]
+                self._transcript_row_ends = [
+                    end - removed for end in self._transcript_row_ends[overflow:]
+                ]
+            total = self._transcript_row_ends[-1] if self._transcript_row_ends else 0
+            count = _entry_line_count(
+                self._display_entry(entry),
+                self._transcript_cache_width,
             )
+            self._transcript_row_ends.append(total + count)
         else:
             self._transcript_cache_width = None
-            self._transcript_cache_lines = []
+            self._transcript_row_ends = []
             self._transcript_viewport_height = None
             self._transcript_scroll_offset = None
         return entry
@@ -1473,6 +1779,8 @@ class TuiState:
         self._assert_main_thread()
         self._phase = Phase.IDLE
         self._entries.clear()
+        self._transcript_hasher = hashlib.sha256()
+        self._prepared_body = None
         self._task = ""
         self._step = 0
         self._max_steps = 0
@@ -1480,7 +1788,8 @@ class TuiState:
         self._next_sequence = 1
         self._dropped_entries = 0
         self._transcript_cache_width = None
-        self._transcript_cache_lines = []
+        self._transcript_row_ends = []
+        self._transcript_viewport = None
         self._transcript_viewport_height = None
         self._transcript_scroll_offset = None
 
@@ -1499,7 +1808,12 @@ class TuiState:
             raise TypeError(error_message)
         self._append("system", title, body)
 
-    def restore(self, messages: Iterable[Mapping[str, object]]) -> None:
+    def restore(
+        self,
+        messages: Iterable[Mapping[str, object]],
+        *,
+        page_stores: Mapping[str, object] | None = None,
+    ) -> None:
         """Rebuild the visible conversation from committed session messages.
 
         Raises
@@ -1509,7 +1823,17 @@ class TuiState:
 
         """
         self.reset()
-        for message in messages:
+        for saved in messages:
+            message = (
+                {
+                    **saved,
+                    "content": read_ref(
+                        parse_ref(saved["content_ref"], stores=page_stores),
+                    ),
+                }
+                if "content_ref" in saved
+                else saved
+            )
             if message["kind"] == "prompt":
                 content = message["content"]
                 if not _is_text(content):
@@ -1549,6 +1873,16 @@ class TuiState:
                 elif action.get("action") == "run":
                     self._append("command", "Command", format_command(action))
 
+    def prepare_submission(self, task: str) -> None:
+        """Persist a large pending body before dispatch permission is acknowledged."""
+        self._assert_main_thread()
+        self._prepared_body = None
+        prepared = _store_entry(
+            TranscriptEntry(self._next_sequence, "user", "You", task),
+        )
+        if isinstance(prepared, _PagedTranscriptEntry):
+            self._prepared_body = prepared.reference
+
     def start(
         self,
         task: str,
@@ -1574,18 +1908,20 @@ class TuiState:
             error_message = "task must be a nonempty string"
             raise ValueError(error_message)
         normalized = task.replace("\r\n", "\n").replace("\r", "\n")
-        self._task = "\n".join(
+        sanitized = "\n".join(
             sanitize_text(line, max_chars=len(line)) for line in normalized.split("\n")
         )
-        self._step = 0
-        self._max_steps = _event_step(max_steps)
-        self._pending_approval = None
-        self._phase = Phase.RUNNING
+        steps = _event_step(max_steps)
         self._append(
             "system" if host_notification else "user",
             "System" if host_notification else "You",
-            self._task,
+            sanitized,
         )
+        self._task = sanitized
+        self._step = 0
+        self._max_steps = steps
+        self._pending_approval = None
+        self._phase = Phase.RUNNING
 
     def begin_approval(
         self,
@@ -1732,7 +2068,7 @@ class TuiState:
             return
         last = self._entries[-1] if self._entries else None
         if (
-            last is not None
+            isinstance(last, TranscriptEntry)
             and last.kind == "status"
             and last.title.startswith("Action failed")
             and last.body == body
@@ -1742,8 +2078,10 @@ class TuiState:
                 last,
                 title=f"Action failed x{self._failure_streak}",
             )
+            self._transcript_hasher = None
             self._transcript_cache_width = None
-            self._transcript_cache_lines = []
+            self._transcript_row_ends = []
+            self._transcript_viewport = None
             return
         self._failure_streak = 1
         self._append("status", "Action failed", body, ok=False)
@@ -1847,33 +2185,46 @@ class TuiState:
         "goal_retry": _apply_goal_retry,
     }
 
+    def _index_transcript(self, width: int) -> None:
+        self._assert_main_thread()
+        if not _is_integer(width) or width < 1:
+            error_message = "width must be a positive integer"
+            raise ValueError(error_message)
+        if self._transcript_cache_width != width:
+            ends = []
+            total = 0
+            for entry in self._entries:
+                total += _entry_line_count(self._display_entry(entry), width)
+                ends.append(total)
+            self._transcript_row_ends = ends
+            self._transcript_cache_width = width
+            self._transcript_viewport = None
+
     def transcript_rows(self, width: int) -> tuple[TranscriptLine, ...]:
-        """Return the cached rows shared by painting, scrolling and selection.
+        """Materialize complete rows for explicit selection without retaining them.
 
         Returns
         -------
         tuple[TranscriptLine, ...]
             The immutable rendered rows at the requested width.
 
-        Raises
-        ------
-        ValueError
-            The display width is not a positive integer.
+        """
+        self._index_transcript(width)
+        return transcript_lines(
+            (self._display_entry(entry) for entry in self._entries),
+            width,
+        )
+
+    def selection_rows(self, width: int) -> TranscriptRowSource:
+        """Expose globally indexed rows without flattening the full transcript.
+
+        Returns
+        -------
+        TranscriptRowSource
+            A lazy, indexed view over the transcript at the requested width.
 
         """
-        self._assert_main_thread()
-        if not _is_integer(width) or width < 1:
-            error_message = "width must be a positive integer"
-            raise ValueError(error_message)
-        if self._transcript_cache_width != width:
-            self._transcript_cache_lines = list(
-                transcript_lines(
-                    (self._display_entry(entry) for entry in self._entries),
-                    width,
-                ),
-            )
-            self._transcript_cache_width = width
-        return tuple(self._transcript_cache_lines)
+        return _TranscriptRows(self, width)
 
     def viewport(
         self,
@@ -1881,15 +2232,51 @@ class TuiState:
         height: int,
         scroll_offset: int = 0,
     ) -> TranscriptViewport:
-        """Render a bottom-anchored viewport and retain its clamped scroll offset.
+        """Render a bottom-anchored viewport without retaining off-screen rows.
 
         Returns
         -------
         TranscriptViewport
             The visible rows and their clamped position within the transcript.
 
+        Raises
+        ------
+        ValueError
+            The height or scroll offset is not a nonnegative integer.
+
         """
-        viewport = viewport_lines(self.transcript_rows(width), height, scroll_offset)
+        if not _is_integer(height) or height < 0:
+            error_message = "height must be a nonnegative integer"
+            raise ValueError(error_message)
+        if not _is_integer(scroll_offset) or scroll_offset < 0:
+            error_message = "scroll_offset must be a nonnegative integer"
+            raise ValueError(error_message)
+        self._index_transcript(width)
+        total = self._transcript_row_ends[-1] if self._transcript_row_ends else 0
+        offset = min(scroll_offset, max(0, total - height))
+        end = max(0, total - offset)
+        start = max(0, end - height)
+        viewport = self._transcript_viewport
+        if viewport is None or (viewport.start, viewport.end) != (start, end):
+            visible: list[TranscriptLine] = []
+            index = bisect_right(self._transcript_row_ends, start)
+            while start < end and index < len(self._entries):
+                prior = self._transcript_row_ends[index - 1] if index else 0
+                if prior >= end:
+                    break
+                rows = entry_lines(self._display_entry(self._entries[index]), width)
+                visible.extend(rows[max(0, start - prior) : end - prior])
+                index += 1
+            viewport = TranscriptViewport(
+                tuple(visible),
+                start,
+                end,
+                total,
+                offset,
+                start > 0,
+                end < total,
+            )
+            self._transcript_viewport = viewport
         self._transcript_viewport_height = height
         self._transcript_scroll_offset = viewport.scroll_offset
         return viewport
@@ -1901,7 +2288,8 @@ class TuiState:
             return None
         return max(
             0,
-            len(self._transcript_cache_lines) - self._transcript_viewport_height,
+            (self._transcript_row_ends[-1] if self._transcript_row_ends else 0)
+            - self._transcript_viewport_height,
         )
 
     @property
@@ -2005,6 +2393,28 @@ def entry_lines(entry: TranscriptEntry, width: int) -> tuple[TranscriptLine, ...
                 )
             )
     return tuple(rendered)
+
+
+def _entry_line_count(entry: TranscriptEntry, width: int) -> int:
+    """Count rows without building wrapped rows for ordinary random input.
+
+    Returns
+    -------
+    int
+        Number of display rows required by the entry.
+
+    """
+    if (
+        entry.kind in {"user", "assistant"}
+        and entry.body
+        and "\n" not in entry.body
+        and all("!" <= character <= "~" for character in entry.body)
+    ):
+        header_count = len(wrap_display(_line_prefix(entry), width))
+        indent = 2 if width > _TRANSCRIPT_INDENT_CELLS else 0
+        body_width = max(1, width - indent)
+        return header_count + (len(entry.body) + body_width - 1) // body_width
+    return len(entry_lines(entry, width))
 
 
 def transcript_lines(

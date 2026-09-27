@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 
@@ -18,6 +17,8 @@ async def copy_native_clipboard_async(data: bytes) -> bool:
         Whether the fixed native clipboard program completed successfully.
 
     """
+    import asyncio
+
     try:
         process = await asyncio.create_subprocess_exec(
             "/usr/bin/pbcopy",
@@ -43,6 +44,8 @@ async def copy_native_clipboard_async(data: bytes) -> bool:
 
 
 def _run_copy(data: bytes) -> bool:
+    import asyncio
+
     return asyncio.run(copy_native_clipboard_async(data))
 
 
@@ -58,6 +61,8 @@ def copy_native_clipboard(data: bytes) -> bool:
         Whether the native clipboard accepted the complete selection.
 
     """
+    import asyncio
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:

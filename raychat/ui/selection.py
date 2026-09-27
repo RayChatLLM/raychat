@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from raychat.ui.state import display_clusters, display_width
+from raychat.ui.state import (
+    TranscriptRowSource,
+    _PrefixTranscriptRows,
+    display_clusters,
+    display_width,
+)
 
 _SCROLL_INTERVAL_SECONDS = 0.1
 _SCROLL_LINES = 3
@@ -19,7 +24,7 @@ class SelectionViewport:
     width: int
     height: int
     start: int
-    rows: tuple[str, ...]
+    rows: TranscriptRowSource
 
 
 def cell_slice(text: str, start: int, end: int) -> str:
@@ -47,12 +52,23 @@ class TextSelection:
 
     anchor: tuple[int, int] | None = None
     focus: tuple[int, int] | None = None
-    rows: tuple[str, ...] = ()
+    rows: TranscriptRowSource = ()
     width: int = 0
     dragging: bool = False
     pointer: tuple[int, int] | None = None
     _scroll_direction: int = field(default=0, repr=False)
     _next_scroll: float = field(default=0, repr=False)
+    needs_rebind: bool = field(default=False, repr=False)
+    expected_history: str = field(default="", repr=False)
+
+    @property
+    def has_text(self) -> bool:
+        """Whether the selected coordinates span any display cells."""
+        return (
+            self.anchor is not None
+            and self.focus is not None
+            and self.anchor != self.focus
+        )
 
     def finish(self) -> None:
         """Stop tracking a held pointer while retaining the selected text."""
@@ -66,14 +82,36 @@ class TextSelection:
         self.anchor = self.focus = None
         self.rows = ()
         self.finish()
+        self.needs_rebind = False
 
-    def reconcile(self, rows: tuple[str, ...], width: int) -> None:
+    def reconcile(self, rows: TranscriptRowSource, width: int) -> None:
         """Discard coordinates invalidated by replacement text or a resize."""
         # New output may extend a transcript. A resize, clear or history eviction
         # changes its coordinates and must never copy unrelated replacement text.
-        if self.anchor is not None and (
-            width != self.width or rows[: len(self.rows)] != self.rows
-        ):
+        if self.needs_rebind:
+            if self.anchor is None or self.focus is None:
+                self.clear()
+                return
+            if (
+                width != self.width
+                or not isinstance(rows, _PrefixTranscriptRows)
+                or rows.fingerprint != self.expected_history
+                or min(self.anchor[0], self.focus[0]) < 0
+                or max(self.anchor[0], self.focus[0]) >= len(rows)
+            ):
+                self.clear()
+            else:
+                self.rows = rows
+                self.needs_rebind = False
+                self.expected_history = ""
+            return
+        prefix_matches = (
+            self.rows.is_prefix_of(rows)
+            if isinstance(self.rows, _PrefixTranscriptRows)
+            else len(rows) >= len(self.rows)
+            and all(self.rows[index] == rows[index] for index in range(len(self.rows)))
+        )
+        if self.anchor is not None and (width != self.width or not prefix_matches):
             self.clear()
         elif self.anchor is not None:
             self.rows = rows
@@ -139,7 +177,13 @@ class TextSelection:
         self._next_scroll = now + _SCROLL_INTERVAL_SECONDS
         return direction * _SCROLL_LINES
 
-    def begin(self, row: int, column: int, rows: tuple[str, ...], width: int) -> None:
+    def begin(
+        self,
+        row: int,
+        column: int,
+        rows: TranscriptRowSource,
+        width: int,
+    ) -> None:
         """Anchor a new drag when its row belongs to the current transcript."""
         self.clear()
         if 0 <= row < len(rows):
@@ -167,7 +211,12 @@ class TextSelection:
             Start and exclusive end columns, or None outside the selection.
 
         """
-        if self.anchor is None or self.focus is None or self.anchor == self.focus:
+        if (
+            self.needs_rebind
+            or self.anchor is None
+            or self.focus is None
+            or not self.has_text
+        ):
             return None
         first, last = sorted((self.anchor, self.focus))
         if not first[0] <= row <= last[0]:
@@ -186,8 +235,17 @@ class TextSelection:
             Selected text with its transcript line breaks.
 
         """
+        if (
+            self.needs_rebind
+            or not self.has_text
+            or self.anchor is None
+            or self.focus is None
+        ):
+            return ""
+        first, last = sorted((self.anchor, self.focus))
         selected = []
-        for row, text in enumerate(self.rows):
+        for row in range(first[0], last[0] + 1):
+            text = self.rows[row]
             span = self.span(row)
             if span is not None:
                 selected.append(cell_slice(text, *span))

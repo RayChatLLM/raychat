@@ -479,10 +479,14 @@ class RecoveryFailureTests(TypedTestCase):
         """Leave the reader blocked after its direct child has already exited."""
         supervisor = _supervisor(root)
         core = RecordingCore(supervisor.initial, returncode=0)
+        saved: dict[str, object] = {"draft": "retained recovery draft"}
+        core.state = supervisor.last_state = saved
         core.reader = asyncio.create_task(_never())
         await supervisor.stop_core(core)
         self.require(core.reader.cancelled())
         self.require(core.log.closed)
+        self.equal(core.state, None)
+        self.require(supervisor.last_state is saved)
 
     def test_busy_and_interrupted_requests_remain_durable_results(self) -> None:
         """Concurrent and cancelled transitions retain distinct final outcomes."""

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec
 
 from raychat.plugin_sources import SourceTree
+from raychat.plugins import Runtime
 from raychat.sdk import PluginError
 from raychat.type_support import override
 from tests.plugin_support import package
@@ -161,6 +162,36 @@ class SourceTreeTests(unittest.TestCase):
             self.fail(
                 "Snapshot reconstruction did not preserve captured bytes/settings.",
             )
+
+    def test_snapshots_share_only_immutable_payload_between_runtimes(self) -> None:
+        """Detach public containers without duplicating identical encoded source."""
+        path = package(self.root / "sample", "def register(api): pass\n")
+        first = SourceTree(path, settings={"nested": {"mode": "first"}})
+        second = SourceTree(path, settings={"nested": {"mode": "second"}})
+        self.addCleanup(first.retire)
+        self.addCleanup(second.retire)
+        runtimes = [Runtime(self.root), Runtime(self.root)]
+        for runtime, tree in zip(runtimes, (first, second), strict=True):
+            self.addCleanup(runtime.close)
+            runtime.load([tree.entrypoint()])
+        snapshots = [runtime.export_sources()["packages"][0] for runtime in runtimes]
+        retained = [runtime.source_snapshots[str(first.path)] for runtime in runtimes]
+        name = "__init__.py"
+        if retained[0]["files"][name] is not retained[1]["files"][name]:
+            self.fail("Separate runtimes duplicated an immutable source payload.")
+        if snapshots[0]["files"] is retained[0]["files"]:
+            self.fail("A public source snapshot aliases a retained mapping.")
+        snapshots[0]["files"][name] = "changed"
+        snapshots[0]["settings"]["nested"] = {"mode": "changed"}
+        snapshots[0]["path"] = "changed"
+        direct = first.snapshot()
+        direct["files"].clear()
+        if runtimes[0].export_sources()["packages"][0]["files"][name] == "changed":
+            self.fail("Mutating an export changed its runtime's captured source.")
+        if runtimes[1].export_sources()["packages"][0] != snapshots[1]:
+            self.fail("Mutating one runtime's export changed another runtime.")
+        if first.snapshot()["settings"] != {"nested": {"mode": "first"}}:
+            self.fail("Mutating an export changed its generation settings.")
 
     def test_malformed_snapshot_fields_are_rejected(self) -> None:
         """Reject invalid schemas, field types, dictionary keys and base64 data."""

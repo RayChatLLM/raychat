@@ -882,7 +882,11 @@ class PackageMetadataTests(PackageSystemFixture):
             "from raychat.composition import create_session; "
             's=create_session(lambda _: \'{"action":"done","message":"bare"}\', '
             f"{str(self.workspace)!r}, plugins=[]); "
-            "assert s.run('test') == 'bare'; s.close()"
+            "assert s.run('test') == 'bare'; "
+            "assert s.export_checkpoint()['history']; "
+            "assert s.stream_checkpoint().members; "
+            "assert not any(n.startswith('raychat_bootstrap') for n in sys.modules); "
+            "s.close()"
         )
         completed = asyncio.run(_run_python(["-I", "-B", "-S", "-c", script]))
         self.equal(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
