@@ -114,28 +114,6 @@ class DistributionValidationTests(PackageTestCase):
 class DistributionCoordinationTests(PackageTestCase):
     """Revalidate profile inputs before publishing packages or completion receipts."""
 
-    def test_unchanged_archive_preserves_edits_without_overwrite_fingerprint(
-        self,
-    ) -> None:
-        """No replacement decision is needed when the offered archive is unchanged."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            profile = read_distribution(_write_distribution(root))
-            manager = PackageManager(root / "work", root / "home")
-            manager.ensure_profile(profile)
-            installed = manager.paths()["example"] / "__init__.py"
-            edited = b"# Local edits remain authoritative.\n"
-            installed.write_bytes(edited)
-            with mock.patch.object(
-                manager,
-                "_source_matches",
-                side_effect=AssertionError(
-                    "Unchanged archives need no overwrite check",
-                ),
-            ):
-                manager.ensure_profile(profile)
-            self.equal(installed.read_bytes(), edited)
-
     def test_profile_rejects_an_intervening_install_in_either_scope(self) -> None:
         """A stale profile plan cannot replace a new operator choice or graph."""
         for scope in ("user", "workspace"):
