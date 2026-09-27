@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from unittest import mock
 
 from plugins.subagents.sessions import AgentSessions
-from raychat import checkpoint_stream
+from raychat import checkpoint_stream, paged_text
 from raychat.checkpoint_stream import (
     HandoffExporter,
     JsonArray,
@@ -48,6 +48,7 @@ class CheckpointStreamTests(TypedTestCase):
         """Create isolated page and manifest storage without starting workers."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
+        self.addCleanup(paged_text._close_default)
         self.root = Path(temporary.name)
         previous = os.environ.get("RAYCHAT_TEXT_PAGE_DIR")
         os.environ["RAYCHAT_TEXT_PAGE_DIR"] = str(self.root / "pages")

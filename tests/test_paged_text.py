@@ -7,12 +7,16 @@ import os
 import tempfile
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from typing import cast
 from unittest import mock
 
+from raychat import paged_text
 from raychat.paged_text import TextPageRef, TextPageStore, read_ref, store_text
 from tests.assertions import TypedTestCase
+
+_ERROR_PRIVILEGE_NOT_HELD = 1314
 
 
 class PagedTextTests(TypedTestCase):
@@ -58,9 +62,11 @@ class PagedTextTests(TypedTestCase):
 
     def test_unconfigured_store_recovers_after_prior_directory_retirement(self) -> None:
         """Create a fresh fallback after a former run-owned directory is removed."""
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+            cleanup.callback(paged_text._close_default)
             replacement = Path(temporary) / "replacement"
-            with tempfile.TemporaryDirectory() as retired:
+            with tempfile.TemporaryDirectory() as retired, ExitStack() as retirement:
+                retirement.callback(paged_text._close_default)
                 environment = {"RAYCHAT_TEXT_PAGE_DIR": retired}
                 with mock.patch.dict(os.environ, environment):
                     original = store_text("same text")
@@ -79,15 +85,43 @@ class PagedTextTests(TypedTestCase):
 
     def test_configured_store_disappearance_still_fails_closed(self) -> None:
         """Never replace an explicitly configured run's disappeared page file."""
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+            cleanup.callback(paged_text._close_default)
             directory = Path(temporary) / "run-pages"
             environment = {"RAYCHAT_TEXT_PAGE_DIR": str(directory)}
             with mock.patch.dict(os.environ, environment):
                 reference = store_text("committed")
-                Path(reference.path).unlink()
-                with self.rejected(FileNotFoundError):
-                    store_text("new prompt")
-                self.require(not Path(reference.path).exists())
+                path = Path(reference.path)
+                if os.name == "nt":
+                    # Windows protects open journal files from deletion. Exercise
+                    # the missing-path check without closing the live owner.
+                    with self.rejected(PermissionError, r"\[WinError 32\]"):
+                        path.unlink()
+                    self.equal(read_ref(reference), "committed")
+                    lstat = Path.lstat
+
+                    def missing_page(selected: Path) -> os.stat_result:
+                        if selected == path:
+                            message = "Page disappeared"
+                            raise FileNotFoundError(message)
+                        return lstat(selected)
+
+                    with (
+                        mock.patch.object(
+                            Path,
+                            "lstat",
+                            autospec=True,
+                            side_effect=missing_page,
+                        ),
+                        self.rejected(FileNotFoundError, "Page disappeared"),
+                    ):
+                        store_text("new prompt")
+                    self.equal(read_ref(reference), "committed")
+                else:
+                    path.unlink()
+                    with self.rejected(FileNotFoundError):
+                        store_text("new prompt")
+                    self.require(not path.exists())
 
     def test_unicode_ranges_empty_pages_and_reopen_are_exact(self) -> None:
         """Preserve Unicode and control bytes without normalization."""
@@ -178,8 +212,8 @@ class PagedTextTests(TypedTestCase):
                 with self.rejected(ValueError):
                     next(store.iter_bytes(reference))
 
-    def test_replaced_inode_symlinks_hardlinks_and_names_fail_closed(self) -> None:
-        """Reject aliases, path escapes and files exchanged beneath an open store."""
+    def test_replaced_inode_and_names_fail_closed(self) -> None:
+        """Reject escapes and exchanged files, including replacement after closure."""
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for name in ("../escape", "a/b", "..", "", "/absolute"):
@@ -188,22 +222,57 @@ class PagedTextTests(TypedTestCase):
             with TextPageStore(directory, "history.pages") as store:
                 reference = store.append("retained")
                 old = directory / "moved.pages"
+                if os.name == "nt":
+                    with self.rejected(PermissionError, r"\[WinError 32\]"):
+                        store.path.rename(old)
+                    self.equal(store.read(reference), "retained")
+                else:
+                    store.path.rename(old)
+                    store.path.write_bytes(old.read_bytes())
+                    with self.rejected(ValueError, "identity changed"):
+                        store.read(reference)
+            if os.name == "nt":
                 store.path.rename(old)
                 store.path.write_bytes(old.read_bytes())
-                with self.rejected(ValueError, "identity changed"):
-                    store.read(reference)
             with (
                 TextPageStore(directory, "history.pages") as changed,
                 self.rejected(ValueError),
             ):
                 changed.read(reference)
+
+    def test_hardlinks_fail_closed(self) -> None:
+        """Hardlinked page files remain invalid on every supported platform."""
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with TextPageStore(directory, "history.pages") as store:
+                store.append("retained")
             linked = directory / "linked.pages"
-            linked.symlink_to(old)
-            with self.rejected((OSError, ValueError)):
-                TextPageStore(directory, linked.name)
-            linked.unlink()
-            os.link(old, linked)
+            os.link(store.path, linked)
             with self.rejected(ValueError):
+                TextPageStore(directory, linked.name)
+
+    def test_symlinks_fail_closed_when_available(self) -> None:
+        """Reject file and directory aliases when the account can create them.
+
+        Raises
+        ------
+        OSError
+            Symlink creation failed for a reason other than Windows privilege.
+
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with TextPageStore(directory, "history.pages") as store:
+                store.append("retained")
+            linked = directory / "linked.pages"
+            try:
+                linked.symlink_to(store.path)
+            except OSError as error:
+                code: object = getattr(error, "winerror", None)
+                if os.name == "nt" and code == _ERROR_PRIVILEGE_NOT_HELD:
+                    self.skipTest("Windows account lacks symlink privilege")
+                raise
+            with self.rejected((OSError, ValueError)):
                 TextPageStore(directory, linked.name)
             linked.unlink()
             alias = directory / "alias"

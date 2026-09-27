@@ -9,12 +9,14 @@ import random
 import tempfile
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest import mock
 
 from plugins.context.policy import ContextPolicy, digest_header, session_digest
 from plugins.context.summaries import clip, messages_size, summary_line
+from raychat import paged_text
 from raychat import session as session_module
 from raychat.paged_text import export_ref, parse_ref, read_ref, store_text
 from raychat.plugins import Runtime
@@ -125,7 +127,8 @@ class PagedSessionTests(TypedTestCase):
 
     def test_public_snapshot_and_compact_handoff_round_trip(self) -> None:
         """Internal references preserve the original materialized snapshot contract."""
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+            cleanup.callback(paged_text._close_default)
             root = Path(temporary)
             environment = {"RAYCHAT_TEXT_PAGE_DIR": str(root / "pages")}
             with mock.patch.dict(os.environ, environment):
@@ -149,7 +152,8 @@ class PagedSessionTests(TypedTestCase):
 
     def test_context_size_matches_json_without_reading_history(self) -> None:
         """Count Unicode and escaped characters exactly before choosing compaction."""
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+            cleanup.callback(paged_text._close_default)
             root = Path(temporary)
             environment = {"RAYCHAT_TEXT_PAGE_DIR": str(root / "pages")}
             with mock.patch.dict(os.environ, environment):
@@ -174,7 +178,8 @@ class PagedSessionTests(TypedTestCase):
         self,
     ) -> None:
         """Once summarized, old pages are not read again for mechanical compaction."""
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+            cleanup.callback(paged_text._close_default)
             root = Path(temporary)
             environment = {"RAYCHAT_TEXT_PAGE_DIR": str(root / "pages")}
             with mock.patch.dict(os.environ, environment):
@@ -202,7 +207,8 @@ class PagedSessionTests(TypedTestCase):
 
     def test_turn_abort_and_complete_snapshot_keep_prior_history(self) -> None:
         """Rollback drops new references while preserving earlier pages."""
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+            cleanup.callback(paged_text._close_default)
             root = Path(temporary)
             environment = {"RAYCHAT_TEXT_PAGE_DIR": str(root / "pages")}
             with mock.patch.dict(os.environ, environment):
@@ -228,7 +234,8 @@ class PagedSessionTests(TypedTestCase):
 
     def test_shared_text_deduplicates_and_ref_table_round_trips(self) -> None:
         """UI and semantic owners retain references to the same committed bytes."""
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+            cleanup.callback(paged_text._close_default)
             environment = {"RAYCHAT_TEXT_PAGE_DIR": temporary}
             with mock.patch.dict(os.environ, environment):
                 first = store_text("distinct prompt\n" * 1000)
@@ -279,7 +286,8 @@ class PagedSessionTests(TypedTestCase):
 
     def test_summary_cache_is_bounded_and_retains_lengths(self) -> None:
         """Large histories keep exact output with bounded strings and warm lengths."""
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+            cleanup.callback(paged_text._close_default)
             environment = {"RAYCHAT_TEXT_PAGE_DIR": temporary}
             with mock.patch.dict(os.environ, environment):
                 messages = [

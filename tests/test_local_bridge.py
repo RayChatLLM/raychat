@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import os
+import signal
 import threading
 from collections import UserDict
 from pathlib import Path
@@ -451,6 +452,8 @@ class LocalBridgeTests(TypedTestCase):
 
     def test_worker_trigger_and_finish_markers(self) -> None:
         """A request is sent once and a clean local exit avoids promotion."""
+        if os.name != "posix" or not hasattr(signal, "SIGWINCH"):
+            self.skipTest("Local guardian promotion uses the POSIX SIGWINCH signal.")
         self.bridge.send("finished")
         self.require((self.directory / "finished").is_file())
         self.require(not (self.directory / "promote").exists())
@@ -659,6 +662,8 @@ class LocalBridgeTests(TypedTestCase):
 
     def test_failed_promotion_keeps_local_frame_routing_and_can_retry(self) -> None:
         """Marker publication failure cannot leave frames on an unconsumed pipe."""
+        if os.name != "posix" or not hasattr(signal, "SIGWINCH"):
+            self.skipTest("Local guardian promotion uses the POSIX SIGWINCH signal.")
         with (
             mock.patch("raychat.filesystem.os.fsync", side_effect=OSError("disk")),
             self.rejected(OSError, "disk"),

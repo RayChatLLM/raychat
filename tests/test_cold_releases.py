@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import py_compile
 import subprocess
 import sys
@@ -143,12 +144,21 @@ class ColdReleaseTests(TypedTestCase):
                 root = Path(temporary)
                 source = _source(root)
                 module = source / "raychat" / "extra.py"
+                alias: Path | None = None
                 if malformed == "link":
                     module.symlink_to(source / "raychat" / "__init__.py")
                 else:
                     module.write_bytes(b"")
-                    # Distinct punctuation aliases collide even on insensitive disks.
-                    (source / "raychat" / "extra.py.").write_bytes(b"")
-                with self.rejected(ValueError):
-                    Releases.cold(source, root / "releases")
+                    alias = source / "raychat" / "extra.py."
+                    if os.name == "nt":
+                        # Preserve the invalid literal name instead of Win32 aliasing.
+                        alias = Path("\\\\?\\" + str(alias))
+                    alias.write_bytes(b"")
+                    self.require(not alias.samefile(module))
+                try:
+                    with self.rejected(ValueError):
+                        Releases.cold(source, root / "releases")
+                finally:
+                    if alias is not None:
+                        alias.unlink()
                 self.equal(list((root / "releases").iterdir()), [])

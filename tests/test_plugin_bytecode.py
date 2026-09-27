@@ -90,6 +90,12 @@ class PluginBytecodeTests(TypedTestCase):
 
         """
         build_cache(self.root)
+        registry = object_field(json_object(self.registry.read_bytes()), "registry")
+        packages = object_field(registry["packages"], "packages")
+        self.equal(
+            [object_field(value, "package")["path"] for value in packages.values()],
+            ["plugins/sample"],
+        )
         identity = hashlib.sha256(self.registry.read_bytes()).hexdigest()
         for path in (*self.root.rglob("*"), self.root):
             path.chmod(0o500 if path.is_dir() else 0o400)

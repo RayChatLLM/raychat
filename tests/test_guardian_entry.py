@@ -107,6 +107,8 @@ class GuardianEntryTests(TypedTestCase):
         self,
     ) -> None:
         """Independent PID and termios survive failure of the launch attestation."""
+        if os.name != "posix" or not hasattr(os, "WNOHANG"):
+            self.skipTest("Guardian child reaping uses POSIX waitpid options.")
         with tempfile.TemporaryDirectory() as temporary:
             harness = RecoveryHarness(Path(temporary))
             environment = self.environment(harness)

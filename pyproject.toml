@@ -53,6 +53,9 @@ ignore = ["missing-copyright-notice"]
 # Regression tests inspect storage ownership and immutable row snapshots.
 "tests/test_deferred_view_handoff.py" = ["import-private-name", "private-member-access"]
 "tests/test_local_bridge.py" = ["private-member-access", "too-many-public-methods"]
+# Tests close the process-owned page store before removing their temporary roots.
+"tests/test_paged_text.py" = ["private-member-access"]
+"tests/test_checkpoint_stream.py" = ["private-member-access"]
 # Seeded unit fixtures reproduce oracle results; acceptance stress uses urandom.
 "tests/test_input_history.py" = ["suspicious-non-cryptographic-random-usage", "private-member-access"]
 "tests/test_paged_sessions.py" = ["import-private-name", "private-member-access", "complex-structure", "suspicious-non-cryptographic-random-usage"]

@@ -20,8 +20,11 @@ from raychat_bootstrap.releases import Release, Releases
 from raychat_bootstrap.wire import decode, encode
 from tests.assertions import TypedTestCase
 from tests.test_live_recovery_qa import RecordingCore, RecoveryHarness
-from tools import build_portable, live_core_tui
+from tools import build_portable
 from tools.smoke_process import SmokeCommand, run_checked
+
+if os.name == "posix":
+    from tools import live_core_tui
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -943,6 +946,8 @@ class BootstrapPathTests(TypedTestCase):
 
     def test_live_update_fixture_includes_environment_templates(self) -> None:
         """Real-TUI update sources retain the portable environment directory."""
+        if os.name != "posix":
+            self.skipTest("The real-TUI fixture uses the POSIX PTY driver.")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in ("raychat", "plugins", "plugin_catalog", "environment"):

@@ -95,6 +95,9 @@ _RUFF_FILE_RULE_EXCEPTIONS = {
     "tests/test_tui_state.py": "PLR0904,SLF001",
     "tests/test_deferred_view_handoff.py": "PLC2701,SLF001",
     "tests/test_local_bridge.py": "SLF001,PLR0904",
+    # Close the process-owned page store before removing test temporary roots.
+    "tests/test_paged_text.py": "SLF001",
+    "tests/test_checkpoint_stream.py": "SLF001",
     # Seeded unit fixtures reproduce oracle results; acceptance stress uses urandom.
     "tests/test_input_history.py": "S311,SLF001",
     "tests/test_paged_sessions.py": "PLC2701,SLF001,C901,S311",

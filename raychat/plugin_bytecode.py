@@ -109,7 +109,7 @@ def build_cache(root: Path) -> None:
                 sources = files(package)
                 modules = _build_package(root, package, sources)
                 packages[digest(sources)] = {
-                    "path": str(package.relative_to(root)),
+                    "path": package.relative_to(root).as_posix(),
                     "modules": modules,
                 }
     document: dict[str, object] = {"metadata": _metadata(root), "packages": packages}
