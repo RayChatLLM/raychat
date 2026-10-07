@@ -68,7 +68,7 @@ def capture_view(owner: ChatView) -> dict[str, object]:
         "selection": {
             "anchor": selection.anchor,
             "focus": selection.focus,
-            "rows": selection.rows,
+            "total_rows": selection.total_rows,
             "width": selection.width,
             "dragging": selection.dragging,
             "pointer": selection.pointer,
@@ -89,10 +89,7 @@ def restore_selection(value: object) -> TextSelection:
     restored = TextSelection(
         anchor=_point(selection["anchor"]),
         focus=_point(selection["focus"]),
-        rows=tuple(
-            text_field(row, "selection row", allow_empty=True)
-            for row in array_field(selection["rows"], "rows")
-        ),
+        total_rows=integer_field(selection["total_rows"], "total rows", minimum=0),
         width=integer_field(selection["width"], "width", minimum=0),
         dragging=boolean_field(selection["dragging"], "dragging"),
         pointer=_point(selection.get("pointer"), minimum=None),

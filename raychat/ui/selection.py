@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from raychat.ui.state import display_clusters, display_width
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _SCROLL_INTERVAL_SECONDS = 0.1
 _SCROLL_LINES = 3
@@ -19,7 +23,7 @@ class SelectionViewport:
     width: int
     height: int
     start: int
-    rows: tuple[str, ...]
+    rows: Sequence[str]
 
 
 def cell_slice(text: str, start: int, end: int) -> str:
@@ -47,8 +51,9 @@ class TextSelection:
 
     anchor: tuple[int, int] | None = None
     focus: tuple[int, int] | None = None
-    rows: tuple[str, ...] = ()
+    total_rows: int = 0
     width: int = 0
+    revision: int | None = None
     dragging: bool = False
     pointer: tuple[int, int] | None = None
     _scroll_direction: int = field(default=0, repr=False)
@@ -64,19 +69,25 @@ class TextSelection:
     def clear(self) -> None:
         """Discard the selection and release an active drag."""
         self.anchor = self.focus = None
-        self.rows = ()
+        self.total_rows = 0
+        self.revision = None
         self.finish()
 
-    def reconcile(self, rows: tuple[str, ...], width: int) -> None:
+    def reconcile(self, rows: Sequence[str], width: int, revision: int) -> None:
         """Discard coordinates invalidated by replacement text or a resize."""
-        # New output may extend a transcript. A resize, clear or history eviction
-        # changes its coordinates and must never copy unrelated replacement text.
-        if self.anchor is not None and (
-            width != self.width or rows[: len(self.rows)] != self.rows
+        # New output may extend a transcript without changing earlier rows; the
+        # revision only advances on a reflow (resize, clear, history eviction or
+        # replacement text), which must never let the drag copy unrelated text.
+        if self.anchor is None:
+            return
+        if width != self.width or (
+            self.revision is not None and revision != self.revision
         ):
             self.clear()
-        elif self.anchor is not None:
-            self.rows = rows
+            return
+        # A restored selection adopts the transcript rebuilt by the same handoff.
+        self.revision = revision
+        self.total_rows = len(rows)
 
     def press(self, x: int, y: int, viewport: SelectionViewport) -> None:
         """Start a selection only when the press lands on a transcript row."""
@@ -139,11 +150,12 @@ class TextSelection:
         self._next_scroll = now + _SCROLL_INTERVAL_SECONDS
         return direction * _SCROLL_LINES
 
-    def begin(self, row: int, column: int, rows: tuple[str, ...], width: int) -> None:
+    def begin(self, row: int, column: int, rows: Sequence[str], width: int) -> None:
         """Anchor a new drag when its row belongs to the current transcript."""
         self.clear()
         if 0 <= row < len(rows):
-            self.rows = rows
+            self.total_rows = len(rows)
+            self.revision = getattr(rows, "revision", None)
             self.width = width
             self.anchor = self.focus = (row, max(0, min(column, width - 1)))
             self.dragging = True
@@ -152,7 +164,7 @@ class TextSelection:
         """Update the clamped drag endpoint and optionally release it."""
         if self.dragging:
             self.focus = (
-                max(0, min(row, len(self.rows) - 1)),
+                max(0, min(row, self.total_rows - 1)),
                 max(0, min(column, self.width - 1)),
             )
             if released:
@@ -177,8 +189,17 @@ class TextSelection:
             last[1] + 1 if row == last[0] else self.width,
         )
 
-    def text(self) -> str:
-        """Copy the selection as whole glyphs.
+    @property
+    def active(self) -> bool:
+        """Report whether a nonempty selection exists."""
+        return (
+            self.anchor is not None
+            and self.focus is not None
+            and self.anchor != self.focus
+        )
+
+    def text(self, rows: Sequence[str]) -> str:
+        """Copy the selection as whole glyphs from the current rows.
 
         Returns
         -------
@@ -186,9 +207,13 @@ class TextSelection:
             Selected text with its transcript line breaks.
 
         """
+        if self.anchor is None or self.focus is None:
+            return ""
+        first, last = sorted((self.anchor, self.focus))
+        limit = min(last[0], len(rows) - 1)
         selected = []
-        for row, text in enumerate(self.rows):
+        for row in range(first[0], limit + 1):
             span = self.span(row)
             if span is not None:
-                selected.append(cell_slice(text, *span))
+                selected.append(cell_slice(rows[row], *span))
         return "\n".join(selected)
