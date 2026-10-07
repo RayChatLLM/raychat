@@ -305,7 +305,8 @@ class Supervisor:
         recover_history: bool | Literal["retained"] = False,
         safe: bool = False,
     ) -> Core:
-        await run_filesystem_task(release.verify)
+        if not release.fresh:
+            await run_filesystem_task(release.verify)
         changed_plugins = await run_filesystem_task(
             partial(self._changed_plugins, release),
         )

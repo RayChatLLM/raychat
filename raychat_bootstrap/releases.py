@@ -19,6 +19,7 @@ from raychat.filesystem import (
     cleanup_tree,
     create_scratch_directory,
     is_link_or_reparse_point,
+    map_io,
     portable_relative_path,
     read_regular,
     remove_tree,
@@ -93,12 +94,27 @@ def _version(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _read_entry(entry: tuple[Path, os.stat_result]) -> bytes:
+    return _read_source(*entry)
+
+
 def _read_source(path: Path, expected: os.stat_result) -> bytes:
     data = read_regular(path, expected.st_size + 1, follow_symlinks=False)
     if _version(path.lstat()) != _version(expected) or len(data) != expected.st_size:
         message = f"Release source changed while reading: {path}"
         raise ValueError(message)
     return data
+
+
+def _copy_member(
+    source: Path,
+    target: Path,
+    entry: tuple[Path, os.stat_result],
+) -> None:
+    path, info = entry
+    destination = target / path.relative_to(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(_read_source(path, info))
 
 
 def _copy(source: Path, target: Path) -> None:
@@ -110,12 +126,11 @@ def _copy(source: Path, target: Path) -> None:
         return
     entries = _entries(source, ignore_scratch=True)
     for path, info in entries:
-        destination = target / path.relative_to(source)
         if stat.S_ISDIR(info.st_mode):
-            destination.mkdir(parents=True, exist_ok=True)
-        else:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(_read_source(path, info))
+            (target / path.relative_to(source)).mkdir(parents=True, exist_ok=True)
+    members = [entry for entry in entries if not stat.S_ISDIR(entry[1].st_mode)]
+    for result in map_io(partial(_copy_member, source, target), members):
+        del result
     _check_versions(source, entries, ignore_scratch=True)
 
 
@@ -202,10 +217,15 @@ def _release_entries(root: Path) -> list[tuple[Path, os.stat_result]]:
 
 def _digest(root: Path, entries: list[tuple[Path, os.stat_result]]) -> str:
     value = hashlib.sha256()
-    for path, info in sorted(entries):
-        if stat.S_ISREG(info.st_mode):
-            value.update(str(path.relative_to(root)).encode() + b"\0")
-            value.update(_read_source(path, info))
+    members = [
+        (path, info) for path, info in sorted(entries) if stat.S_ISREG(info.st_mode)
+    ]
+    # _map_io yields in submission order, so the digest consumes identical
+    # bytes in the identical sequence as a sequential read.
+    contents = map_io(_read_entry, members)
+    for (path, _info), data in zip(members, contents, strict=True):
+        value.update(str(path.relative_to(root)).encode() + b"\0")
+        value.update(data)
     _check_versions(root, entries)
     return value.hexdigest()
 
@@ -240,6 +260,10 @@ class Release:
 
     path: Path
     identity: str
+    # True only for a release sealed by this process in this run; its digest
+    # was just computed from the written bytes, so the pre-launch re-hash is
+    # redundant. Releases reconstructed from stored state always verify.
+    fresh: bool = False
 
     def verify(self) -> None:
         """Reject release files changed after acceptance.
@@ -343,7 +367,7 @@ class Releases:
 
         """
         root = self.capture(self.source)
-        return Release(root, seal(root))
+        return Release(root, seal(root), fresh=True)
 
     @staticmethod
     async def validate(root: Path, log: Path, *, python: str | None = None) -> Release:
