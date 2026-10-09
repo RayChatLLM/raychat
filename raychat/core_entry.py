@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING
 
 from raychat_bootstrap.wire import MAX_MESSAGE, decode
 
+from . import core_staging
 from .core_bridge import CoreBridge
-from .core_tools import install
+from .core_recover import install
 from .entrypoint import build_parser, prepare_interactive
 from .handoff import document
 from .plugin_sources import SourceTree
@@ -22,7 +23,10 @@ from .ui.controller import run_tui
 from .validation import array_field, configuration_fields, text_field
 
 if TYPE_CHECKING:
+    import argparse
     from collections.abc import Mapping
+
+    from .resources import AgentResources
 
 
 def _sources(saved: Mapping[str, object], replacements: object) -> dict[str, object]:
@@ -58,6 +62,38 @@ def _sources(saved: Mapping[str, object], replacements: object) -> dict[str, obj
             finally:
                 added.retire()
     return {"packages": packages}
+
+
+def _prepare_staging(
+    resources: AgentResources,
+    bridge: CoreBridge,
+    args: argparse.Namespace,
+    saved: Mapping[str, object] | None,
+    *,
+    probe: bool,
+) -> None:
+    """Adopt the workspace source mirror; failures only disable it."""
+    raw_args: object = vars(args)
+    workspace = text_field(
+        configuration_fields(raw_args, "args")["workspace"],
+        "workspace",
+    )
+    try:
+        resources.staging = core_staging.prepare(
+            bridge.source_root,
+            Path(workspace).resolve(),
+            saved,
+            core_staging.LaunchPolicy(
+                trusted=resources.runtime.workspace_trusted,
+                probe=probe,
+                recovered=bridge.recover_history,
+            ),
+        )
+    except OSError as error:
+        resources.staging = None
+        bridge.notices.append(
+            f"Source staging disabled for this session: {error}",
+        )
 
 
 def _run(bridge: CoreBridge, launch: Mapping[str, object]) -> int:
@@ -115,6 +151,7 @@ def _run(bridge: CoreBridge, launch: Mapping[str, object]) -> int:
         resources.live = bridge
         resources.runtime.services["core_updates"] = bridge
         install(resources.runtime, bridge)
+        _prepare_staging(resources, bridge, args, saved, probe=probe)
         bridge.restore = saved
         result = run_tui(args, resources, bridge)
         if not bridge.retire:

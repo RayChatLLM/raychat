@@ -41,13 +41,31 @@ def register(api: PluginAPI) -> None:
             raise ValueError(message)
         return WorkflowRunner(execution).run(action, ctx.cancel_check, ctx.emit)
 
+    descriptions = {
+        "delegate": "Run one task in a separate read-only agent session.",
+        "delegate_many": (
+            "Run independent tasks in parallel read-only agent sessions."
+        ),
+    }
+    parameters = {
+        "delegate": {
+            "agent": "unique child name",
+            "purpose": "short purpose label",
+            "task": "complete task text",
+            "profile": "optional model profile",
+        },
+        "delegate_many": {
+            "agents": "[{agent, purpose, task, profile?}]",
+        },
+    }
     for name in ("delegate", "delegate_many"):
         api.register_tool(
             ToolDefinition(
                 name,
-                "Delegate read-only work",
+                descriptions[name],
                 validate_action,
                 execute_tool,
                 requires_approval=False,
+                parameters=parameters[name],
             ),
         )

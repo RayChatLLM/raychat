@@ -15,12 +15,14 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
 from itertools import starmap
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeGuard, runtime_checkable
 
+from raychat import core_staging
 from raychat.application import dispatch_command
 from raychat.configuration import SETTINGS
 from raychat.navigation import Navigation
@@ -1942,12 +1944,23 @@ class _TuiController:
         if not self._authorize_dispatch():
             self.view.message_queue.append(text)
             return None
+        staging = self.resources.staging
+        if staging is not None and not text.startswith(
+            ("HOST_RESULT:", "CORE_UPDATE_RESULT:"),
+        ):
+            # A fresh user instruction lifts any automatic-update
+            # suppression and anchors result echoes to this request.
+            staging.last_prompt = text
+            staging.suppressed = False
+            staging.consecutive_rejections = 0
         return _submit(self.view.state, self.view.worker, text, self.args.max_steps)
 
     def _drain_queue(self) -> None:
         if self.resources.live is not None and self.resources.live.paused:
             return
         if self._continue_update():
+            return
+        if self._check_staging():
             return
         if self.view.message_queue.editing or not self.view.message_queue.items:
             return
@@ -1965,6 +1978,115 @@ class _TuiController:
             if self.view.active_job_id is None:
                 self.view.message_queue.restore_handoff(queued)
             self.view.scroll_offset = 0
+
+    def _staging_quiet(self) -> bool:
+        """Whether the mirror may be swept and submitted right now.
+
+        Returns
+        -------
+        bool
+            True only at a fully quiescent, unsuppressed turn boundary.
+
+        """
+        staging = self.resources.staging
+        live = self.resources.live
+        if staging is None or live is None or self.quitting:
+            return False
+        if not SETTINGS.chat.auto_core_updates:
+            return False
+        if self.view is not self.views[self.root_id]:
+            return False
+        if live.paused or not live.active or live.frame.get("active") is not True:
+            return False
+        if live.update_results or staging.inflight_id or staging.suppressed:
+            return False
+        return self.handoff_quiescent()
+
+    def _staging_change(self) -> str:
+        """Detect a new mirror digest worth submitting.
+
+        Returns
+        -------
+        str
+            The changed digest, or "" when nothing submittable changed.
+
+        """
+        staging = self.resources.staging
+        if staging is None:
+            return ""
+        now = time.monotonic()
+        if now - staging.last_check < SETTINGS.limits.staging_poll_seconds:
+            return ""
+        staging.last_check = now
+        try:
+            swept = core_staging.fingerprint(staging.root)
+            if swept == staging.fingerprints:
+                return ""
+            staging.fingerprints = swept
+            digest = core_staging.runtime_digest(staging.root)
+        except OSError:
+            return ""
+        staging.staging_digest = digest
+        if digest in {staging.active_digest, staging.rejected_digest}:
+            return ""
+        return digest
+
+    def _check_staging(self) -> bool:
+        """Submit the staging mirror when it changed and the turn is over.
+
+        Returns
+        -------
+        bool
+            Whether a submission was dispatched this frame.
+
+        """
+        if not self._staging_quiet():
+            return False
+        digest = self._staging_change()
+        if not digest:
+            return False
+        staging = self.resources.staging
+        live = self.resources.live
+        if staging is None or live is None:
+            return False
+        session = self.view.worker.session
+        store = self.resources.store if session is None else session.store
+        origin = {
+            "request_id": uuid.uuid4().hex,
+            "prompt": staging.last_prompt,
+            "session_id": store.session_id if isinstance(store, SessionStore) else "",
+        }
+        staging.inflight_id = origin["request_id"]
+        staging.submitted_digest = digest
+        self.views[self.root_id].state.notice(
+            "Core update",
+            "Source mirror changed; validating the new application code.",
+        )
+        live.request(str(staging.root), {}, origin=origin)
+        return True
+
+    def _staging_outcome(self, result: Mapping[str, object]) -> None:
+        staging = self.resources.staging
+        if staging is None or result.get("request_id") != staging.inflight_id:
+            return
+        staging.inflight_id = ""
+        status = result.get("status")
+        if status == "rejected":
+            staging.rejected_digest = staging.submitted_digest
+            staging.consecutive_rejections += 1
+            if staging.consecutive_rejections >= SETTINGS.limits.staging_reject_limit:
+                staging.suppressed = True
+                self.views[self.root_id].state.notice(
+                    "Core update",
+                    "Automatic updates stopped after repeated rejections;"
+                    " your edits remain in the source mirror. They resume"
+                    " with your next message.",
+                )
+        elif status in {"busy", "interrupted"}:
+            staging.suppressed = True
+        else:
+            staging.rejected_digest = ""
+            staging.consecutive_rejections = 0
 
     def _continue_update(self) -> bool:
         live = self.resources.live
@@ -1999,6 +2121,7 @@ class _TuiController:
         if not self._authorize_dispatch(update_result=identifier):
             return True
         live.update_results.pop(identifier, None)
+        self._staging_outcome(result)
         payload = {
             **result,
             "screen": live.screen[-10000:],

@@ -96,6 +96,13 @@ def _validate_configuration(settings: HostSettings, raw_size: int) -> None:
         condition=storage.session_suffix.startswith("."),
         message="storage.session_suffix must start with a period.",
     )
+    staging = PurePosixPath(storage.staging_directory)
+    _require(
+        condition=bool(staging.parts)
+        and not staging.is_absolute()
+        and ".." not in staging.parts,
+        message="storage.staging_directory must be a relative workspace path.",
+    )
     for name, values in (
         ("plugins.disabled", settings.plugins.disabled),
         ("plugins.paths", settings.plugins.paths),
@@ -186,6 +193,7 @@ def _validate_timeouts(settings: HostSettings) -> None:
         ("limits.max_timeout_seconds", limits.max_timeout_seconds),
         ("limits.worker_poll_seconds", limits.worker_poll_seconds),
         ("limits.worker_stop_seconds", limits.worker_stop_seconds),
+        ("limits.staging_poll_seconds", limits.staging_poll_seconds),
         ("tui.no_animation_fps", tui.no_animation_fps),
         ("tui.escape_delay_seconds", tui.escape_delay_seconds),
         ("tui.double_escape_seconds", tui.double_escape_seconds),

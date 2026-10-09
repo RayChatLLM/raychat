@@ -28,6 +28,7 @@ from raychat.filesystem import (
     read_regular,
     write_bytes,
 )
+from raychat.validation import array_field, configuration_fields, text_field
 from tools import release_folder
 from tools.build_plugin_catalog import build_catalog
 from tools.smoke_process import SmokeCommand, run_checked
@@ -227,27 +228,48 @@ def _slim_catalog(sources: dict[str, bytes]) -> None:
         match = _CATALOG_ARCHIVE_PATTERN.match(relative)
         if match is not None:
             shipped[match.group("id")] = match.group("version")
-    catalog = json.loads(sources["plugin_catalog/catalog.json"].decode("utf-8"))
-    records = [item for item in catalog["plugins"] if item["id"] in shipped]
-    missing = sorted(set(shipped) - {item["id"] for item in records})
+    raw_catalog: object = json.loads(
+        sources["plugin_catalog/catalog.json"].decode("utf-8"),
+    )
+    catalog = configuration_fields(raw_catalog, "plugin catalog")
+    records: list[dict[str, object]] = []
+    names: list[str] = []
+    for raw_record in array_field(catalog["plugins"], "catalog plugins"):
+        record = configuration_fields(raw_record, "catalog record")
+        identity = text_field(record["id"], "catalog record id")
+        if identity not in shipped:
+            continue
+        absent = sorted(
+            set(configuration_fields(record.get("requires", {}), "requires"))
+            - set(shipped),
+        )
+        if absent:
+            error_message = (
+                f"Packaged plugin {identity!r} requires unpackaged"
+                " plugins: " + ", ".join(absent)
+            )
+            raise RuntimeError(error_message)
+        records.append(dict(record))
+        names.append(identity)
+    missing = sorted(set(shipped) - set(names))
     if missing:
         error_message = (
             "Packaged plugin archives without catalog records: " + ", ".join(missing)
         )
         raise RuntimeError(error_message)
-    for item in records:
-        absent = sorted(set(item.get("requires", {})) - set(shipped))
-        if absent:
-            error_message = (
-                f"Packaged plugin {item['id']!r} requires unpackaged"
-                " plugins: " + ", ".join(absent)
-            )
-            raise RuntimeError(error_message)
-    catalog["plugins"] = records
-    profile = json.loads(sources["plugin_catalog/profile.json"].decode("utf-8"))
-    profile["packages"] = [item["id"] + "@" + item["version"] for item in records]
+    slimmed: dict[str, object] = {**catalog, "plugins": records}
+    raw_profile: object = json.loads(
+        sources["plugin_catalog/profile.json"].decode("utf-8"),
+    )
+    profile: dict[str, object] = dict(
+        configuration_fields(raw_profile, "plugin profile"),
+    )
+    profile["packages"] = [
+        name + "@" + text_field(record["version"], "catalog record version")
+        for name, record in zip(names, records, strict=True)
+    ]
     for name, document in (
-        ("plugin_catalog/catalog.json", catalog),
+        ("plugin_catalog/catalog.json", slimmed),
         ("plugin_catalog/profile.json", profile),
     ):
         sources[name] = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode(

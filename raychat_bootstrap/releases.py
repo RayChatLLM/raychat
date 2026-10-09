@@ -34,7 +34,15 @@ if TYPE_CHECKING:
     from typing import BinaryIO
 
 _RUNTIME_ROOTS = ("raychat", "plugins", "plugin_catalog")
-_FIXED_ROOTS = ("raychat_bootstrap", "tests", "tools", "examples", "docs", ".github")
+_FIXED_ROOTS = (
+    "raychat_bootstrap",
+    "tests",
+    "tools",
+    "examples",
+    "docs",
+    "environment",
+    ".github",
+)
 _FIXED_FILES = (
     "raychat.py",
     "pyproject.toml",

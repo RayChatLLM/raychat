@@ -268,7 +268,7 @@ class PortableBuildTests(PackageTestCase):
         require(("raychat/storage.py") in (sources))
         require(("tests/test_plugin_sessions.py") in (sources))
         require(not (any(path.startswith("gepa/") for path in sources)))
-        packaged = (
+        core = (
             "chat_completions",
             "context",
             "filesystem",
@@ -279,13 +279,22 @@ class PortableBuildTests(PackageTestCase):
             "subagents",
             "workflows",
         )
+        # The allowlist regenerates inside live-update candidates, so the
+        # test asserts consistency, not a fixed set: every packaged plugin
+        # ships sources and archive together, and the core nine are
+        # always among them.
+        packaged = {
+            path.removeprefix("plugin_catalog/").rsplit("-", 1)[0]
+            for path in sources
+            if path.startswith("plugin_catalog/") and path.endswith(".zip")
+        }
+        sourced = {
+            path.split("/")[1] for path in sources if path.startswith("plugins/")
+        }
+        require(packaged == sourced)
+        require(set(core) <= packaged)
         for name in packaged:
             require(f"plugins/{name}/plugin.json" in sources)
-            require(f"plugin_catalog/{name}-1.0.0.zip" in sources)
-        # The development-only plugins stay out of the shipped release.
-        for name in ("memory", "optimization", "self_harness"):
-            require(not any(path.startswith(f"plugins/{name}/") for path in sources))
-            require(f"plugin_catalog/{name}-1.0.0.zip" not in sources)
         for driver in (
             "accept_tui",
             "features_tui",

@@ -108,6 +108,11 @@ def _is_reply_failure(error: Exception) -> bool:
     return error.kind in _REPLY_FAILURE_KINDS
 
 
+_CORE_REVIEW_ACTIONS = frozenset(
+    {"list", "read", "write", "edit", "run", "done", "core_recover"},
+)
+
+
 @runtime_checkable
 class _CoreReview(Protocol):
     """Use optional supervised feedback without importing the terminal bootstrap."""
@@ -412,7 +417,6 @@ class AgentSession:
         self._next_prompt_id = 1
         self._sending = self._turn_open = False
         self._core_review = False
-        self._core_editing = False
         self._core_result_id = ""
         self._state_lock = threading.RLock()
         self._rollback_state: dict[str, dict[str, object]] | None = None
@@ -439,15 +443,8 @@ class AgentSession:
     def allowed_actions(self) -> frozenset[str]:
         """Configured actions still available in the active host."""
         available = frozenset(self.runtime.tools) | {"done"}
-        if self._core_review or self._core_editing:
-            available &= {
-                "core_source",
-                "core_update",
-                "core_recover",
-                "core_status",
-                "core_verify",
-                "done",
-            }
+        if self._core_review:
+            available &= _CORE_REVIEW_ACTIONS
         return (
             available
             if self._allowed_actions is None
@@ -751,7 +748,6 @@ class AgentSession:
             with self._state_lock:
                 self._sending = False
                 self._core_review = False
-                self._core_editing = False
                 self._core_result_id = ""
 
     def checkpoint(self, owner: str) -> None:
@@ -1164,13 +1160,7 @@ class AgentSession:
                     "ok": False,
                     "denied": True,
                     "error": f"Action {name!r} is disabled for this agent. "
-                    + (
-                        "This task is inspecting the running application's source. "
-                        "Use core_source to read it and core_update to edit it; "
-                        "workspace tools cannot inspect the active release."
-                        if self._core_editing
-                        else "Use an enabled action instead."
-                    ),
+                    "Use an enabled action instead.",
                     "allowed_actions": sorted(self.allowed_actions),
                 },
             )
@@ -1186,14 +1176,6 @@ class AgentSession:
             else:
                 result = self._execute_action(state, action)
         self._check_cancel(state.cancel_check)
-        if (
-            name == "core_source"
-            and isinstance(self.runtime.services.get("core_updates"), _CoreReview)
-            and result.get("ok") is not False
-        ):
-            self._core_editing = True
-            result["source_scope"] = "active_application_release"
-            result["allowed_actions"] = sorted(self.allowed_actions)
         self._publish_result(state, action, result)
         if self.runtime.tools[name].finishes_turn and (
             result.get("ok") is True or result.get("finish_turn") is True

@@ -23,6 +23,7 @@ from .bare_tui import PROVIDER_SOURCE
 from .drive_tui import TerminalChat
 
 _MARKER = "LIVE_CORE_V2"
+_STAGING_MARKER = "LIVE_STAGING_V3"
 
 
 def _source(root: Path, target: Path) -> None:
@@ -64,10 +65,70 @@ def _fixture(root: Path, output: Path) -> tuple[Path, list[str]]:
         str(configuration),
         "--workspace",
         str(workspace),
+        "--trust-workspace",
+        "grant",
         "--plugin",
         str(provider),
         "--provider",
         "bare_probe",
+    ]
+
+
+def _staging_tests(
+    chat: TerminalChat,
+    workspace: Path,
+    manifest: Path,
+) -> list[str]:
+    """Edit the workspace source mirror and require a seamless activation.
+
+    Returns
+    -------
+    list[str]
+        Completed acceptance checks.
+
+    """
+    staging = workspace / ".raychat" / "source"
+    controller = staging / "raychat" / "ui" / "controller.py"
+    require(controller.is_file(), "Trusted workspace has no source mirror")
+    before = read_object(manifest)
+    source = controller.read_text(encoding="utf-8")
+    title = 'title = "CHAT"'
+    require(source.count(title) == 1, "Expected one mirror title to replace")
+    controller.write_text(
+        source.replace(title, f'title = "CHAT | {_STAGING_MARKER}"'),
+        encoding="utf-8",
+    )
+    chat.wait("validating", seconds=30)
+    chat.wait("Core updated", seconds=600)
+    chat.wait(_STAGING_MARKER)
+    after = read_object(manifest)
+    require(
+        before["active"] != after["active"],
+        "Mirror edit did not change the release identity",
+    )
+    mirrored = controller.read_text(encoding="utf-8")
+    require(
+        _STAGING_MARKER in mirrored,
+        "Activation lost the mirrored staging edit",
+    )
+    chat.command("AFTER_STAGING", "ANSWER_AFTER_STAGING")
+    chat.command("/recover previous", "Core updated", seconds=30)
+    chat.command("/clear", "Start a conversation below")
+    require(
+        _STAGING_MARKER not in chat.screen(),
+        "Recovery kept the staged behavior on screen",
+    )
+    recovered = controller.read_text(encoding="utf-8")
+    require(
+        _STAGING_MARKER not in recovered,
+        "Recovery left rolled-back edits in the mirror",
+    )
+    return [
+        (
+            "an ordinary file edit in .raychat/source validates and"
+            " hot-activates at the turn boundary"
+        ),
+        "recovery restores behavior and resets the source mirror",
     ]
 
 
@@ -130,7 +191,7 @@ def run(root: Path, output: Path) -> dict[str, object]:
 
     """
     output.mkdir(parents=True)
-    _workspace, arguments = _fixture(root, output)
+    workspace, arguments = _fixture(root, output)
     candidate = output / "source"
     _source(root, candidate)
     controller = candidate / "raychat/ui/controller.py"
@@ -181,6 +242,7 @@ def run(root: Path, output: Path) -> dict[str, object]:
             "keyboard, mouse, committed history and previous-version recovery "
             "work after activation",
         )
+        checks.extend(_staging_tests(chat, workspace, manifest))
         checks.extend(_failure_tests(chat, root, output, manifest))
         require(chat.process.pid == launcher_pid, "Recovery replaced the supervisor")
     finally:

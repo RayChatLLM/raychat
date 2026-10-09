@@ -20,57 +20,55 @@ are exchanged. `--exec` remains a single noninteractive job.
 - `/update-log` displays the diagnostic log path. Update status and failures appear
   in the dynamic footer.
 
-The ordinary chat agent can inspect and edit the core through `core_source` and
-`core_update`, restore versions through `core_recover`, and read checker diagnostics with
-`core_status`. `core_verify` checks exact text in named rendered UI regions. These tools work
-without Self-Harness. Ask for a UI change in chat; source edits are validated before
-automatic activation. Submission yields the requesting task and displays a **system** notice that
-validation is pending. It does not claim activation. Other jobs keep running.
-After successful `core_source` inspection, that task can use only core tools and
-completion. Attempts to fall back to workspace tools receive a redirect to the
-active source tools. Ordinary workspace tools return on the next user task.
+The ordinary chat agent edits the application through the **source mirror**:
+in a trusted workspace the core materializes a writable copy of the active
+release's `raychat/` and `plugins/` trees at `.raychat/source` (configurable via
+`storage.staging_directory`). The agent reads and edits those files with the
+ordinary filesystem tools, exactly like any other project files. At each turn
+boundary - once every chat, command worker and runtime is quiescent - the host
+fingerprints the mirror and, when its content digest differs from the active
+release, submits the whole tree to the supervisor for validation and automatic
+live activation. There are no bespoke editing tools and no editing-specific
+prompt. A **system** notice reports that validation is pending; other jobs keep
+running. Untrusted workspaces get no mirror and submit nothing, the operator can
+disable automatic submission with `chat.auto_core_updates`, and probe launches
+never submit.
+
 After validation and handoff, the supervisor automatically resumes the agent with
 `CORE_UPDATE_RESULT` JSON: `request_id`, `session_id`, `status` (`activated`,
 `rejected`, `busy`, or `interrupted`), `ok`, original request, active/previous
-release IDs, diagnostics, and a fresh screen captured after the replacement owns the
-terminal at its actual dimensions. Activation means the new code is running in the
-open terminal; no restart is needed. It does not establish that the requested
-behavior is correct.
+release IDs, diagnostics, and a fresh screen captured after the replacement owns
+the terminal at its actual dimensions. Activation means the new code is running
+in the open terminal; no restart is needed. It does not establish that the
+requested behavior is correct - the agent verifies against the result's screen
+field or by reading the running state. After an activation the mirror is
+refreshed from the activated release (which may differ from the submitted bytes:
+the validation gate reformats candidates), unless the mirror changed again while
+validation ran, in which case the newer edits are preserved and resubmitted at
+the next boundary.
 
-The agent can inspect the result and repair a rejected or incomplete change.
-`core_verify` accepts checks such as
-`{"region":"system","kind":"wrapped_contains","text":"accounts/vendor/models/name"}`
-in a `checks` array. Regions are `system`, `header`, `transcript`, and `composer`;
-predicates are `contains`, `absent`, and `wrapped_contains` (text joined across
-displayed lines). Missing, inactive, or stale regions fail even an absence check.
-SYSTEM evidence excludes the top header and conversation. Its source is
-`_sidebar_details` and `_paint_sidebar` in `raychat/ui/controller.py`;
-`_paint_header` only paints the title row. `core_source` always reads the active
-immutable release, including during ordinary follow-up questions. A developer
-checkout can differ from the source currently running.
+During the automatic review turn the agent may use the ordinary file and process
+tools plus `core_recover` to repair a rejected change; edits resubmit at the next
+turn boundary. The host stops automatic resubmission after
+`limits.staging_reject_limit` consecutive rejections (default three) and after
+`busy` or `interrupted` results; the next user message lifts the suppression. A
+tree byte-identical to the last rejected submission is never resubmitted. Each
+review is limited to twenty model turns; if the model reaches that limit, the
+host commits the actual update status with an explicit limit notice, then closes
+the review. A result for a different saved session waits until that session is
+resumed; unrelated queued work can continue.
 
-When the review finishes, the host composes and journals its final report from the
-actual update status and listed checks. An unverified model completion cannot
-become the visible or saved review report. With no checks, the report explicitly
-says the visual outcome is unverified. A passing text check establishes only that
-predicate, not layout quality or complete user intent; `task_verified` stays false.
-Automatic review permits only the core tools and completion;
-workspace commands stay unavailable during that review. The host limits automatic
-repairs to three submissions and each review to twenty model turns. Busy or
-interrupted results are reported without automatic resubmission. A result for a
-different saved session waits until that session is resumed; unrelated queued work
-can continue.
-If the model reaches the review turn limit, the host commits the actual update
-status and available checks with an explicit limit notice, then closes the review.
+`core_recover` is the one remaining agent tool: it restores the `previous` or
+`known-good` release after active work stops, with host approval. Recovery also
+resets the source mirror to the restored release, so rolled-back edits cannot
+resubmit themselves.
 
 Results survive handoff and remain pending until the feedback worker durably claims
 them immediately before its first model request. A crash before that claim leaves
 the result available for delivery. After the claim, recovery retains evidence of
 the uncertain provider request and does not replay it. The host clears that evidence
 only after the assistant response is committed to the journal.
-`core_status` exposes the last structured result, active source, current phase,
-phase elapsed time, and captured screen for later questions. ETA remains unknown
-(`null`); long-running tasks can postpone activation indefinitely. Deleting
+Long-running tasks can postpone activation indefinitely. Deleting
 workspace `.raychat` files does not change the UI.
 
 Every launch retains private recovery files outside the workspace, below

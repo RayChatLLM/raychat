@@ -17,7 +17,7 @@
       "user",
       "assistant"
     ],
-    "bare_protocol": "Reply with one JSON action. Finish with {\"action\":\"done\",\"message\":\"...\"}.",
+    "bare_protocol": "Reply with one JSON action. Finish with {\"action\":\"done\",\"message\":\"...\"}. Never delete .raychat directories - they hold application state.",
     "protocol_file": null,
     "auto_approve": false,
     "log_file": null,
@@ -31,7 +31,8 @@
     },
     "default_provider": "chat_completions",
     "debug": false,
-    "debug_dir": ".raychat-http-debug"
+    "debug_dir": ".raychat-http-debug",
+    "auto_core_updates": true
   },
   "plugins": {
     "disabled": [
@@ -64,7 +65,8 @@
     "preview_bytes": 32768,
     "atomic_attempts": 100,
     "atomic_random_bytes": 12,
-    "workspace_file_mode": 438
+    "workspace_file_mode": 438,
+    "staging_directory": ".raychat/source"
   },
   "limits": {
     "max_reply_chars": 262144,
@@ -82,7 +84,9 @@
     "max_result_items": 12,
     "max_worker_error_chars": 4096,
     "worker_poll_seconds": 0.05,
-    "worker_stop_seconds": 1.0
+    "worker_stop_seconds": 1.0,
+    "staging_reject_limit": 3,
+    "staging_poll_seconds": 1.0
   },
   "tui": {
     "target_fps": 120,
@@ -407,8 +411,9 @@
       "raychat/configuration.py",
       "raychat/core_bridge.py",
       "raychat/core_entry.py",
+      "raychat/core_recover.py",
       "raychat/core_review.py",
-      "raychat/core_tools.py",
+      "raychat/core_staging.py",
       "raychat/distribution.py",
       "raychat/entrypoint.py",
       "raychat/event_bus.py",
