@@ -65,7 +65,9 @@ def _build_release(source: Path) -> tuple[Releases, Release]:
         message = "The release module does not provide a prepared capture."
         raise TypeError(message)
     home = Path.home() / settings.storage.home_directory
-    return prepared(source, home / "live" / uuid.uuid4().hex)
+    result = prepared(source, home / "live" / uuid.uuid4().hex)
+    importlib.import_module("raychat.startup_trace").mark("prelaunch-capture-ready")
+    return result
 
 
 def begin(source: Path, workspace: Path) -> None:

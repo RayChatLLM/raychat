@@ -25,6 +25,7 @@ from raychat.filesystem import (
     write_bytes_async,
 )
 from raychat.provider_settings import provider_settings
+from raychat.startup_trace import mark
 from raychat.ui.terminal import TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
 from raychat.validation import configuration_fields, text_field
@@ -315,6 +316,7 @@ class Supervisor:
         recover_history: bool | Literal["retained"] = False,
         safe: bool = False,
     ) -> Core:
+        mark("supervisor-spawn-core")
         if not release.fresh:
             await run_filesystem_task(release.verify)
         changed_plugins = await run_filesystem_task(
@@ -463,6 +465,7 @@ class Supervisor:
             safe=safe,
         )
         await self._await_ready(core)
+        mark("supervisor-core-ready")
         return core
 
     async def _restart_previous(
@@ -1073,6 +1076,7 @@ def main() -> int:
         source = recovery_release(
             saved["previous" if version == "previous" else "known_good"],
         ).path
+    mark("supervisor-main")
     prepared = prelaunch.take(source)
     if prepared is not None:
         directory = prepared[0].directory
