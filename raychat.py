@@ -37,6 +37,14 @@ def main() -> int:
         The installed entrypoint does not supply a callable launcher.
 
     """
+    if sys.platform == "linux" and "MALLOC_ARENA_MAX" not in os.environ:
+        # Worker threads otherwise spread large history strings over glibc
+        # arenas that never shrink, and freed heap blocks between 32 KiB and
+        # the default mmap threshold never return to the OS. One restart
+        # bounds every process spawned from this launcher.
+        os.environ["MALLOC_ARENA_MAX"] = "2"
+        os.environ.setdefault("MALLOC_MMAP_THRESHOLD_", "32768")
+        os.execv(sys.executable, list(sys.orig_argv))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     prepare: object = importlib.import_module("raychat_bootstrap.recovery").prepare
     if not isinstance(prepare, _Recovery):

@@ -316,6 +316,17 @@ class Supervisor:
             **os.environ,
             "RAYCHAT_CONFIG": str(self.safe_config if safe else self.config),
             "PYTHONDONTWRITEBYTECODE": "1",
+            # Bound glibc malloc arenas so worker threads do not spread large
+            # history strings over arenas that never return freed pages, and
+            # let freed history-sized blocks return to the OS immediately.
+            "MALLOC_ARENA_MAX": os.environ.get("MALLOC_ARENA_MAX", "2"),
+            "MALLOC_MMAP_THRESHOLD_": os.environ.get(
+                "MALLOC_MMAP_THRESHOLD_",
+                "32768",
+            ),
+            # Large text spills into the launch-owned database and history
+            # keeps small references; recovery shares the same directory.
+            "RAYCHAT_TEXT_DB": str(self.releases.directory / "text.db"),
         }
         overlay = release.path / "harness.txt"
         if overlay.is_file():
