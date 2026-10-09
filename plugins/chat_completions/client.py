@@ -2,20 +2,15 @@
 
 from __future__ import annotations
 
-import http.client
 import json
 import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request
 
 from raychat.configuration import SETTINGS
-from raychat.http_debug import build_http_opener, drain_debug_response
 from raychat.provider_settings import provider_settings
 from raychat.sdk import (
     HTTP_PROVIDER,
@@ -57,6 +52,7 @@ if TYPE_CHECKING:
     from email.message import Message as EmailMessage
     from types import TracebackType
     from urllib.parse import SplitResult
+    from urllib.request import HTTPRedirectHandler, Request
 
     from typing_extensions import Self
 
@@ -116,14 +112,54 @@ def _worker_payload(
     ).private_payload()
 
 
-class NoRedirects(HTTPRedirectHandler):
-    """Avoid forwarding credentials to a redirect target."""
+_NO_REDIRECTS: type[HTTPRedirectHandler] | None = None
 
-    @staticmethod
-    @override
-    def redirect_request(*_args: object, **_kwargs: object) -> None:
-        """Reject every redirect without forwarding request credentials."""
-        return
+
+def _no_redirects() -> type[HTTPRedirectHandler]:
+    """Build and cache the redirect-rejecting handler class on first use.
+
+    Returns
+    -------
+    type[HTTPRedirectHandler]
+        The ``NoRedirects`` handler class, created once per process.
+
+    """
+    global _NO_REDIRECTS  # ruff: ignore[global-statement]
+    if _NO_REDIRECTS is None:
+        # Deferred: urllib.request drags http.client and ssl into every process.
+        from urllib.request import HTTPRedirectHandler
+
+        class NoRedirects(HTTPRedirectHandler):
+            """Avoid forwarding credentials to a redirect target."""
+
+            @staticmethod
+            @override
+            def redirect_request(*_args: object, **_kwargs: object) -> None:
+                """Reject every redirect without forwarding request credentials."""
+                return
+
+        _NO_REDIRECTS = NoRedirects
+    return _NO_REDIRECTS
+
+
+def __getattr__(name: str) -> type[HTTPRedirectHandler]:
+    """Resolve the lazily created ``NoRedirects`` class without importing urllib.
+
+    Returns
+    -------
+    type[HTTPRedirectHandler]
+        The cached redirect-rejecting handler class.
+
+    Raises
+    ------
+    AttributeError
+        If the requested attribute is not provided lazily.
+
+    """
+    if name == "NoRedirects":
+        return _no_redirects()
+    error_message = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(error_message)
 
 
 @runtime_checkable
@@ -158,6 +194,9 @@ def _retry_after_seconds(value: object) -> float | None:
         return min(float(MAX_TIMEOUT_SECONDS), max(0.0, seconds))
     except (OverflowError, ValueError):
         pass
+    # Deferred: email date parsing is needed only for HTTP-date Retry-After.
+    from email.utils import parsedate_to_datetime
+
     try:
         retry_at = parsedate_to_datetime(value)
         if retry_at.tzinfo is None:
@@ -298,6 +337,9 @@ def _chat_request(url: str, body: bytes | None, headers: Mapping[str, str]) -> R
         A validated HTTP(S) request, including its original path and query.
 
     """
+    # Deferred: urllib.request drags http.client and ssl into every process.
+    from urllib.request import Request
+
     endpoint = _validate_endpoint(url)
     location = endpoint.netloc + endpoint.path
     if endpoint.query:
@@ -577,8 +619,29 @@ class ChatAPI:
         self.api_key = api_key
         self.timeout = timeout
         self.request_options = _validated_request_options(request_options)
-        self.opener: RequestOpener = build_http_opener(NoRedirects())
+        self._opener: RequestOpener | None = None
         self.last_reasoning: str = ""
+
+    @property
+    def opener(self) -> RequestOpener:
+        """The redirect-rejecting request opener, built on the first request.
+
+        Returns
+        -------
+        RequestOpener
+            The opener constructed lazily so importing this module stays cheap.
+
+        """
+        if self._opener is None:
+            # Deferred: the HTTP debug opener loads with the first real request.
+            from raychat.http_debug import build_http_opener
+
+            self._opener = build_http_opener(_no_redirects()())
+        return self._opener
+
+    @opener.setter
+    def opener(self, opener: RequestOpener) -> None:
+        self._opener = opener
 
     def call_with_cancel(self, messages: Messages, cancel_check: CancelCheck) -> str:
         """Use the shared isolated transport so cancellation stops blocked HTTP.
@@ -640,6 +703,13 @@ class ChatAPI:
         )
 
     def _read(self, request: Request) -> bytes:
+        # Deferred: urllib.error, http.client and the debug drain are needed
+        # only once a real provider request runs.
+        import http.client
+        from urllib.error import HTTPError, URLError
+
+        from raychat.http_debug import drain_debug_response
+
         try:
             opened: object = self.opener.open(request, timeout=self.timeout)
             return _read_binary(opened)

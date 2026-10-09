@@ -29,6 +29,11 @@ ignore = ["missing-copyright-notice"]
 "raychat/ui/clipboard.py" = ["import-outside-top-level"]
 # Only catalog/package downloads need urllib.request and the HTTP debug stack.
 "raychat/plugin_manager.py" = ["import-outside-top-level"]
+# The provider HTTP stack (urllib, ssl, http.client, email parsing, the debug
+# opener) loads with the first real provider request instead of at import time;
+# the package serves the deferred NoRedirects export through module __getattr__.
+"plugins/chat_completions/client.py" = ["import-outside-top-level"]
+"plugins/chat_completions/__init__.py" = ["undefined-export"]
 # Seeded optimization sampling must reproduce the existing search sequence.
 "plugins/optimization/gepa/batch_sampler.py" = ["suspicious-non-cryptographic-random-usage"]
 "plugins/optimization/gepa/candidate_selector.py" = ["suspicious-non-cryptographic-random-usage"]
