@@ -15,13 +15,16 @@ import json
 import math
 import threading
 import unicodedata
+from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import ClassVar, TypeGuard, cast
+from typing import ClassVar, TypeGuard, cast, overload
 
 from raychat.configuration import SETTINGS
 from raychat.handoff import optional_index
+from raychat.text_store import TextRef, export_text, fetch, parse_text, spill
+from raychat.type_support import override
 from raychat.validation import (
     array_field,
     boolean_field,
@@ -116,6 +119,20 @@ def _is_string_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
         return False
     fields = cast("Mapping[object, object]", value)
     return all(isinstance(key, str) for key in fields)
+
+
+def _restored_content(message: Mapping[str, object]) -> object:
+    """Materialize a committed message body, inline or stored by reference.
+
+    Returns
+    -------
+    object
+        The complete body text, or the raw field when it is not text.
+
+    """
+    if "content_ref" in message:
+        return fetch(parse_text(message["content_ref"], "committed message body"))
+    return message.get("content")
 
 
 def _restored_action(value: object) -> Mapping[str, object] | None:
@@ -1116,10 +1133,15 @@ class TranscriptEntry:
     sequence: int
     kind: str
     title: str
-    body: str = ""
+    payload: str | TextRef = ""
     step: int | None = None
     max_steps: int | None = None
     ok: bool | None = None
+
+    @property
+    def body(self) -> str:
+        """Materialize the complete sanitized body text."""
+        return fetch(self.payload)
 
     def __post_init__(self) -> None:
         """Validate entry identity and sanitize each complete logical line.
@@ -1143,17 +1165,20 @@ class TranscriptEntry:
                 error_message = f"{name} must be a positive integer or None"
                 raise ValueError(error_message)
         object.__setattr__(self, "title", truncate_display(self.title, MAX_TITLE_CELLS))
-        if not _is_text(self.body):
+        if isinstance(self.payload, TextRef):
+            # A stored reference was sanitized before it was spilled.
+            return
+        if not _is_text(self.payload):
             error_message = "transcript body must be a string"
             raise TypeError(error_message)
         # Preserve intentional hard line breaks as layout data while stripping
         # every terminal instruction from each logical line.  No body is
         # clipped here: viewport virtualization, not data loss, bounds drawing.
-        normalized = self.body.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = self.payload.replace("\r\n", "\n").replace("\r", "\n")
         safe_lines = (
             sanitize_text(line, max_chars=len(line)) for line in normalized.split("\n")
         )
-        object.__setattr__(self, "body", "\n".join(safe_lines))
+        object.__setattr__(self, "payload", spill("\n".join(safe_lines)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1257,12 +1282,16 @@ class TuiState:
         self._pending_approval: PendingApproval | None = None
         self._next_sequence = 1
         self._dropped_entries = 0
-        # Keep exactly one width-specific rendering. Animated frames normally
-        # ask for the same viewport sixty times per second. New entries extend
-        # the cache incrementally; only a resize or bounded-history eviction
-        # requires a complete reflow.
-        self._transcript_cache_width: int | None = None
-        self._transcript_cache_lines: list[TranscriptLine] = []
+        # Keep only per-entry row counts for one width, never rendered text.
+        # Views render the few entries they touch on demand; new entries extend
+        # the index incrementally and only a resize or bounded-history eviction
+        # requires a complete recount. The revision identifies reflows so held
+        # display coordinates can be discarded when earlier rows changed.
+        self._rows_width: int | None = None
+        self._row_ends: list[int] = []
+        self._rows_revision: int = 0
+        self._entry_rows_memo: dict[int, tuple[TranscriptLine, ...]] = {}
+        self._viewport_cache: tuple[tuple[int, ...], TranscriptViewport] | None = None
         self._transcript_viewport_height: int | None = None
         self._transcript_scroll_offset: int | None = None
         self._thinking_expanded = False
@@ -1279,9 +1308,63 @@ class TuiState:
         """
         self._assert_main_thread()
         self._thinking_expanded = not self._thinking_expanded
-        self._transcript_cache_width = None
-        self._transcript_cache_lines = []
+        self._invalidate_rows()
         return self._thinking_expanded
+
+    def _invalidate_rows(self) -> None:
+        """Discard the row index after a change to already-rendered entries."""
+        self._rows_width = None
+        self._row_ends = []
+        self._rows_revision += 1
+        self._viewport_cache = None
+        self._entry_rows_memo.clear()
+
+    _ENTRY_MEMO_LIMIT: ClassVar[int] = 32
+
+    def _memoized_entry_rows(
+        self,
+        index: int,
+        width: int,
+    ) -> tuple[TranscriptLine, ...]:
+        """Render one entry's rows, reusing recent renders across frames.
+
+        Returns
+        -------
+        tuple[TranscriptLine, ...]
+            The entry's rows at the requested width.
+
+        """
+        rows = self._entry_rows_memo.get(index)
+        if rows is None:
+            rows = entry_lines(self._display_entry(self._entries[index]), width)
+            while len(self._entry_rows_memo) >= self._ENTRY_MEMO_LIMIT:
+                self._entry_rows_memo.pop(next(iter(self._entry_rows_memo)))
+            self._entry_rows_memo[index] = rows
+        return rows
+
+    def _reflow_row_ends(self, revision: int, width: int) -> list[int]:
+        """Return the live row index while a view's reflow is still current.
+
+        Returns
+        -------
+        list[int]
+            Cumulative row counts per entry, extended as entries append.
+
+        Raises
+        ------
+        RuntimeError
+            The transcript reflowed since the view was created.
+
+        """
+        if self._rows_revision != revision or self._rows_width != width:
+            message = "Transcript rows changed; request a fresh view."
+            raise RuntimeError(message)
+        return self._row_ends
+
+    @property
+    def rows_revision(self) -> int:
+        """Identify the current reflow; it changes when earlier rows change."""
+        return self._rows_revision
 
     def _display_entry(self, entry: TranscriptEntry) -> TranscriptEntry:
         """Collapse thinking entries to a one-line preview unless expanded.
@@ -1292,13 +1375,16 @@ class TuiState:
             The entry to render, possibly a collapsed preview copy.
 
         """
-        if entry.kind != "thinking" or self._thinking_expanded or not entry.body:
+        if entry.kind != "thinking" or self._thinking_expanded:
             return entry
-        first_line = entry.body.split("\n", 1)[0]
+        body = entry.body
+        if not body:
+            return entry
+        first_line = body.split("\n", 1)[0]
         preview = truncate_display(first_line, _THINKING_PREVIEW_CELLS)
         return replace(
             entry,
-            body=f"{preview} … [{len(entry.body)} chars — Ctrl+T expands]",
+            payload=f"{preview} … [{len(body)} chars — Ctrl+T expands]",
         )
 
     @staticmethod
@@ -1373,7 +1459,9 @@ class TuiState:
                     "sequence": e.sequence,
                     "kind": e.kind,
                     "title": e.title,
-                    "body": e.body,
+                    "body" if isinstance(e.payload, str) else "body_ref": (
+                        export_text(e.payload)
+                    ),
                     "step": e.step,
                     "max_steps": e.max_steps,
                     "ok": e.ok,
@@ -1400,12 +1488,18 @@ class TuiState:
         entries = []
         for raw in array_field(data["entries"], "transcript entries"):
             entry = configuration_fields(raw, "transcript entry")
+            if ("body" in entry) == ("body_ref" in entry):
+                message = "Transcript entries need exactly one body field."
+                raise ValueError(message)
             entries.append(
                 TranscriptEntry(
                     integer_field(entry["sequence"], "sequence", minimum=1),
                     text_field(entry["kind"], "entry kind"),
                     text_field(entry["title"], "entry title", allow_empty=True),
-                    text_field(entry["body"], "entry body", allow_empty=True),
+                    parse_text(
+                        entry["body"] if "body" in entry else entry["body_ref"],
+                        "entry body",
+                    ),
                     optional_index(entry["step"], "entry step"),
                     optional_index(entry["max_steps"], "entry max steps"),
                     None
@@ -1426,7 +1520,7 @@ class TuiState:
         if self._next_sequence <= max((e.sequence for e in entries), default=0):
             message = "Invalid transcript sequence."
             raise ValueError(message)
-        self._transcript_cache_width = None
+        self._invalidate_rows()
         self._pending_approval = None
 
     def _append(
@@ -1457,13 +1551,13 @@ class TuiState:
         if overflow > 0:
             del self._entries[:overflow]
             self._dropped_entries += overflow
-        if self._transcript_cache_width is not None and not overflow:
-            self._transcript_cache_lines.extend(
-                entry_lines(self._display_entry(entry), self._transcript_cache_width),
+        if self._rows_width is not None and not overflow:
+            self._row_ends.append(
+                (self._row_ends[-1] if self._row_ends else 0)
+                + len(entry_lines(self._display_entry(entry), self._rows_width)),
             )
         else:
-            self._transcript_cache_width = None
-            self._transcript_cache_lines = []
+            self._invalidate_rows()
             self._transcript_viewport_height = None
             self._transcript_scroll_offset = None
         return entry
@@ -1479,8 +1573,7 @@ class TuiState:
         self._pending_approval = None
         self._next_sequence = 1
         self._dropped_entries = 0
-        self._transcript_cache_width = None
-        self._transcript_cache_lines = []
+        self._invalidate_rows()
         self._transcript_viewport_height = None
         self._transcript_scroll_offset = None
 
@@ -1511,7 +1604,7 @@ class TuiState:
         self.reset()
         for message in messages:
             if message["kind"] == "prompt":
-                content = message["content"]
+                content = _restored_content(message)
                 if not _is_text(content):
                     error = "Committed user prompts must contain text."
                     raise TypeError(error)
@@ -1532,7 +1625,7 @@ class TuiState:
                 else:
                     self._append("user", "You", content)
             elif message["kind"] == "assistant":
-                action = _restored_action(message["content"])
+                action = _restored_action(_restored_content(message))
                 if action is None:
                     continue
                 response = action.get("message")
@@ -1742,8 +1835,7 @@ class TuiState:
                 last,
                 title=f"Action failed x{self._failure_streak}",
             )
-            self._transcript_cache_width = None
-            self._transcript_cache_lines = []
+            self._invalidate_rows()
             return
         self._failure_streak = 1
         self._append("status", "Action failed", body, ok=False)
@@ -1847,13 +1939,14 @@ class TuiState:
         "goal_retry": _apply_goal_retry,
     }
 
-    def transcript_rows(self, width: int) -> tuple[TranscriptLine, ...]:
-        """Return the cached rows shared by painting, scrolling and selection.
+    def transcript_rows(self, width: int) -> TranscriptRows:
+        """Return the lazy rows shared by painting, scrolling and selection.
 
         Returns
         -------
-        tuple[TranscriptLine, ...]
-            The immutable rendered rows at the requested width.
+        TranscriptRows
+            Rendered rows at the requested width, materialized per entry on
+            access so the complete transcript text is never retained twice.
 
         Raises
         ------
@@ -1865,15 +1958,20 @@ class TuiState:
         if not _is_integer(width) or width < 1:
             error_message = "width must be a positive integer"
             raise ValueError(error_message)
-        if self._transcript_cache_width != width:
-            self._transcript_cache_lines = list(
-                transcript_lines(
-                    (self._display_entry(entry) for entry in self._entries),
-                    width,
-                ),
-            )
-            self._transcript_cache_width = width
-        return tuple(self._transcript_cache_lines)
+        if self._rows_width != width:
+            self._entry_rows_memo.clear()
+            ends: list[int] = []
+            total = 0
+            for entry in self._entries:
+                total += len(entry_lines(self._display_entry(entry), width))
+                ends.append(total)
+            self._rows_width, self._row_ends = width, ends
+        return TranscriptRows(
+            self._rows_revision,
+            width,
+            self._reflow_row_ends,
+            self._memoized_entry_rows,
+        )
 
     def viewport(
         self,
@@ -1889,7 +1987,14 @@ class TuiState:
             The visible rows and their clamped position within the transcript.
 
         """
-        viewport = viewport_lines(self.transcript_rows(width), height, scroll_offset)
+        rows = self.transcript_rows(width)
+        key = (width, height, scroll_offset, self._rows_revision, len(rows))
+        cached = self._viewport_cache
+        if cached is not None and cached[0] == key:
+            viewport = cached[1]
+        else:
+            viewport = viewport_lines(rows, height, scroll_offset)
+            self._viewport_cache = (key, viewport)
         self._transcript_viewport_height = height
         self._transcript_scroll_offset = viewport.scroll_offset
         return viewport
@@ -1899,10 +2004,8 @@ class TuiState:
         """Largest useful offset for the most recently rendered viewport."""
         if self._transcript_viewport_height is None:
             return None
-        return max(
-            0,
-            len(self._transcript_cache_lines) - self._transcript_viewport_height,
-        )
+        total = self._row_ends[-1] if self._row_ends else 0
+        return max(0, total - self._transcript_viewport_height)
 
     @property
     def transcript_scroll_offset(self) -> int | None:
@@ -1940,6 +2043,119 @@ class TranscriptLine:
             "text",
             sanitize_text(self.text, max_chars=len(self.text)),
         )
+
+
+class TranscriptRows(Sequence["TranscriptLine"]):
+    """Rendered transcript rows that materialize one entry at a time.
+
+    The view stays valid while entries are only appended; any reflow of
+    existing rows bumps the owning state's revision and invalidates it.
+    """
+
+    __slots__ = ("_ends", "_memo_index", "_memo_rows", "_render", "_revision", "_width")
+
+    def __init__(
+        self,
+        revision: int,
+        width: int,
+        ends: Callable[[int, int], list[int]],
+        render: Callable[[int, int], tuple[TranscriptLine, ...]],
+    ) -> None:
+        """Bind the view to the state's current reflow at one width."""
+        self._revision = revision
+        self._width = width
+        self._ends = ends
+        self._render = render
+        self._memo_index = -1
+        self._memo_rows: tuple[TranscriptLine, ...] = ()
+
+    @override
+    def __len__(self) -> int:
+        ends = self._ends(self._revision, self._width)
+        return ends[-1] if ends else 0
+
+    def _entry_rows(self, index: int) -> tuple[TranscriptLine, ...]:
+        if index != self._memo_index:
+            self._memo_rows = self._render(index, self._width)
+            self._memo_index = index
+        return self._memo_rows
+
+    @overload
+    def __getitem__(self, item: int, /) -> TranscriptLine: ...
+
+    @overload
+    def __getitem__(
+        self,
+        item: slice[int | None, int | None, int | None],
+        /,
+    ) -> tuple[TranscriptLine, ...]: ...
+
+    @override
+    def __getitem__(
+        self,
+        item: int | slice[int | None, int | None, int | None],
+        /,
+    ) -> TranscriptLine | tuple[TranscriptLine, ...]:
+        ends = self._ends(self._revision, self._width)
+        total = ends[-1] if ends else 0
+        if not isinstance(item, int):
+            start, stop, step = item.indices(total)
+            return tuple(self[index] for index in range(start, stop, step))
+        index = item + total if item < 0 else item
+        if not 0 <= index < total:
+            raise IndexError(index)
+        entry_index = bisect_right(ends, index)
+        begin = ends[entry_index - 1] if entry_index else 0
+        return self._entry_rows(entry_index)[index - begin]
+
+    @property
+    def revision(self) -> int:
+        """Identify the reflow this view renders."""
+        return self._revision
+
+    @property
+    def texts(self) -> RowTexts:
+        """Expose the same rows as display text only."""
+        return RowTexts(self)
+
+
+class RowTexts(Sequence[str]):
+    """Adapt rendered rows to their display text for selection and copying."""
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, rows: TranscriptRows) -> None:
+        """Wrap one lazy row view."""
+        self._rows = rows
+
+    @override
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    @overload
+    def __getitem__(self, item: int, /) -> str: ...
+
+    @overload
+    def __getitem__(
+        self,
+        item: slice[int | None, int | None, int | None],
+        /,
+    ) -> tuple[str, ...]: ...
+
+    @override
+    def __getitem__(
+        self,
+        item: int | slice[int | None, int | None, int | None],
+        /,
+    ) -> str | tuple[str, ...]:
+        if not isinstance(item, int):
+            return tuple(line.text for line in self._rows[item])
+        return self._rows[item].text
+
+    @property
+    def revision(self) -> int:
+        """Identify the reflow these texts render."""
+        return self._rows.revision
 
 
 def _line_prefix(entry: TranscriptEntry) -> str:

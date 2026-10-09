@@ -316,6 +316,9 @@ class Supervisor:
             **os.environ,
             "RAYCHAT_CONFIG": str(self.safe_config if safe else self.config),
             "PYTHONDONTWRITEBYTECODE": "1",
+            # Large text spills into the launch-owned database and history
+            # keeps small references; recovery shares the same directory.
+            "RAYCHAT_TEXT_DB": str(self.releases.directory / "text.db"),
         }
         overlay = release.path / "harness.txt"
         if overlay.is_file():

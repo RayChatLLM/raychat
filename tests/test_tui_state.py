@@ -792,7 +792,7 @@ class StateTests(TypedTestCase):
             FrozenInstanceError,
             _assign_field,
             snapshot.entries[0],
-            "body",
+            "payload",
             "mutated",
         )
 
@@ -1009,34 +1009,36 @@ class TranscriptViewportTests(TypedTestCase):
         """Check state viewport reuses one width and invalidates on entry changes."""
         state = tui_state.TuiState()
         state.start("first prompt")
-        original = tui_state.transcript_lines
 
-        with mock.patch.object(tui_state, "transcript_lines", wraps=original) as render:
-            first = state.viewport(20, 3)
-            second = state.viewport(20, 1, scroll_offset=1)
-            state.apply_worker_event(
-                "request",
-                {"step": 1, "action": {"action": "read", "path": "."}},
-            )
-            third = state.viewport(20, 3)
+        first = state.viewport(20, 3)
+        # Identical repeated requests must be pure cache hits.
+        self.require(state.viewport(20, 3) is first)
+        second = state.viewport(20, 1, scroll_offset=1)
+        revision = state.rows_revision
+        state.apply_worker_event(
+            "request",
+            {"step": 1, "action": {"action": "read", "path": "."}},
+        )
+        third = state.viewport(20, 3)
 
-            self.equal(render.call_count, 1)
-            self.equal(first.total, third.total)
-            self.equal(second.scroll_offset, 1)
+        # Appending reuses the earlier reflow instead of starting a new one.
+        self.equal(state.rows_revision, revision)
+        self.equal(first.total, third.total)
+        self.equal(second.scroll_offset, 1)
 
-            state.apply_worker_event("done", {"message": "first response"})
-            updated = state.viewport(20, 3)
-            self.equal(render.call_count, 1)
-            self.require((updated.total) > (first.total))
+        state.apply_worker_event("done", {"message": "first response"})
+        updated = state.viewport(20, 3)
+        self.equal(state.rows_revision, revision)
+        self.require((updated.total) > (first.total))
 
-            state.viewport(21, 3)
-            state.viewport(20, 3)
-            self.equal(render.call_count, 3)
+        state.viewport(21, 3)
+        resized = state.viewport(20, 3)
+        self.equal(resized.total, updated.total)
 
-            state.reset()
-            empty = state.viewport(20, 3)
-            self.equal(render.call_count, 4)
-            self.equal(empty.lines, ())
+        state.reset()
+        self.require((state.rows_revision) > (revision))
+        empty = state.viewport(20, 3)
+        self.equal(empty.lines, ())
 
         # Validation must not be bypassed merely because bool compares equal to
         # a previously cached integer width.

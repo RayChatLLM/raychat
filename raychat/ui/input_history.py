@@ -5,7 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from raychat.handoff import editor_parts, editor_state, optional_index
-from raychat.validation import array_field, configuration_fields, text_field
+from raychat.text_store import (
+    INPUT_SPILL_MIN_CHARS,
+    TextRef,
+    export_text,
+    fetch,
+    parse_text,
+    spill,
+)
+from raychat.validation import array_field, configuration_fields
 
 if TYPE_CHECKING:
     from .terminal import LineEditor
@@ -19,7 +27,7 @@ class InputHistory:
 
     def __init__(self) -> None:
         """Start an empty history for one chat during this application run."""
-        self.items: list[str] = []
+        self.items: list[str | TextRef] = []
         self.selected: int | None = None
         self._draft: tuple[str, int] | None = None
         self._bytes = 0
@@ -27,8 +35,8 @@ class InputHistory:
     def record(self, text: str) -> None:
         """Remember a nonblank submission and finish browsing."""
         if text.strip():
-            self.items.append(text)
             self._bytes += len(text.encode("utf-8"))
+            self.items.append(spill(text, INPUT_SPILL_MIN_CHARS))
         self.selected = None
         self._draft = None
         self._trim()
@@ -40,7 +48,7 @@ class InputHistory:
             len(self.items) > _MAX_ITEMS or self._bytes > _MAX_BYTES
         ):
             index = 1 if self.selected == 0 else 0
-            self._bytes -= len(self.items.pop(index).encode("utf-8"))
+            self._bytes -= len(fetch(self.items.pop(index)).encode("utf-8"))
             if self.selected is not None and index < self.selected:
                 self.selected -= 1
 
@@ -60,7 +68,7 @@ class InputHistory:
             self._draft = None
             return
         draft = (editor.text, editor.cursor)
-        editor.set_text(self.items[index])
+        editor.set_text(fetch(self.items[index]))
         if self._draft is None:
             self._draft = draft
         self.selected = index
@@ -75,7 +83,7 @@ class InputHistory:
 
         """
         return {
-            "items": list(self.items),
+            "items": [export_text(item) for item in self.items],
             "selected": self.selected,
             "draft": None if self._draft is None else editor_state(*self._draft),
         }
@@ -96,8 +104,8 @@ class InputHistory:
             self._bytes = 0
             return
         data = configuration_fields(value, "input history")
-        items = [
-            text_field(item, "submitted input")
+        items: list[str | TextRef] = [
+            parse_text(item, "submitted input")
             for item in array_field(data["items"], "history items")
         ]
         selected = optional_index(data["selected"], "history selection")
@@ -108,5 +116,5 @@ class InputHistory:
             message = "Inconsistent input history handoff."
             raise ValueError(message)
         self.items, self.selected, self._draft = items, selected, draft
-        self._bytes = sum(len(item.encode("utf-8")) for item in items)
+        self._bytes = sum(len(fetch(item).encode("utf-8")) for item in items)
         self._trim()

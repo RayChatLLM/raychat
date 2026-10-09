@@ -470,7 +470,7 @@ class ClipboardTests(TypedTestCase):
                 selection.point(x, y, viewport)
                 scrolled = SelectionViewport(2, 3, 30, 10, end, rows)
                 selection.point(x, y, scrolled, released=True)
-                self.equal(selection.text(), "\n".join(rows[first : last + 1]))
+                self.equal(selection.text(rows), "\n".join(rows[first : last + 1]))
                 self.require(not selection.dragging)
 
     def test_wheel_projection_and_appended_rows_remain_selectable(self) -> None:
@@ -481,12 +481,12 @@ class ClipboardTests(TypedTestCase):
         selection.press(2, 5, viewport)
         scrolled = SelectionViewport(2, 3, 30, 10, 16, rows)
         selection.point(31, 5, scrolled)
-        self.equal(selection.text(), "\n".join(rows[12:19]))
+        self.equal(selection.text(rows), "\n".join(rows[12:19]))
         extended = (*rows, "Appended 雪🙂")
-        selection.reconcile(extended, 30)
+        selection.reconcile(extended, 30, 0)
         scrolled = SelectionViewport(2, 3, 30, 10, 21, extended)
         selection.point(31, 12, scrolled, released=True)
-        self.equal(selection.text(), "\n".join(extended[12:]))
+        self.equal(selection.text(extended), "\n".join(extended[12:]))
 
     def test_multiline_reverse_scrolled_and_unicode_selection_exact_bytes(self) -> None:
         """Check multiline reverse scrolled and unicode selection exact bytes."""
@@ -496,7 +496,7 @@ class ClipboardTests(TypedTestCase):
             selection = TextSelection()
             selection.begin(*start, rows, 16)
             selection.move(*end, released=True)
-            self.equal(selection.text().encode(), expected.encode())
+            self.equal(selection.text(rows).encode(), expected.encode())
             self.require(not selection.dragging)
 
     def test_empty_click_resize_and_replaced_history_clear_selection(self) -> None:
@@ -504,18 +504,21 @@ class ClipboardTests(TypedTestCase):
         selection = TextSelection()
         selection.begin(0, 0, ("hello",), 10)
         selection.move(0, 0, released=True)
-        self.equal(selection.text(), "")
+        self.equal(selection.text(("hello",)), "")
         selection.begin(0, 0, ("hello",), 10)
         selection.move(0, 3)
-        selection.reconcile(("hello", "appended"), 10)
-        self.equal(selection.text(), "hell")
-        selection.reconcile(("hello", "appended"), 9)
-        self.equal(selection.text(), "")
+        selection.reconcile(("hello", "appended"), 10, 0)
+        self.equal(selection.text(("hello", "appended")), "hell")
+        selection.reconcile(("hello", "appended"), 9, 0)
+        self.equal(selection.text(("hello", "appended")), "")
         selection.begin(0, 0, ("hello",), 10)
         selection.move(0, 3)
-        selection.reconcile(("other",), 10)
+        # A reflow of existing rows advances the revision and must clear the
+        # held coordinates so unrelated replacement text is never copied.
+        selection.reconcile(("hello",), 10, 0)
+        selection.reconcile(("other",), 10, 1)
         self.require(not selection.dragging)
-        self.equal(selection.text(), "")
+        self.equal(selection.text(("other",)), "")
 
     def test_native_clipboard_and_fallback_report_accurately(self) -> None:
         """Check native clipboard and fallback report accurately."""
