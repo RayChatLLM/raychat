@@ -25,7 +25,7 @@ from raychat.plugin_arguments import add_plugin_arguments
 from raychat.plugin_manager import PackageManager, scaffold
 from raychat.plugin_sources import SourceTree
 from raychat.sdk import PluginError
-from raychat.validation import json_object, object_field
+from raychat.validation import json_object, object_field, text_field
 from tests.assertions import TypedTestCase
 
 if TYPE_CHECKING:
@@ -226,7 +226,7 @@ class PackageRecoveryTests(TypedTestCase):
                 profile_ids = [
                     manifest.id
                     for manifest in read_distribution(
-                        SETTINGS.plugins.profile,
+                        text_field(SETTINGS.plugins.profile, "plugins.profile"),
                     ).manifests
                 ]
                 self.equal(consumed, ["example", *profile_ids])
