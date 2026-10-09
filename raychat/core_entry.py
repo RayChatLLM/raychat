@@ -66,8 +66,11 @@ def _run(bridge: CoreBridge, launch: Mapping[str, object]) -> int:
         text_field(item, "argument")
         for item in array_field(launch["argv"], "arguments")
     ]
+    mark("core-build-parser-begin")
     parser = build_parser(os.environ, argv)
+    mark("core-parser-built")
     args = parser.parse_args(argv)
+    mark("core-args-parsed")
     saved = None if launch.get("state") is None else document(launch["state"])
     probe = launch.get("probe") is True
     source = (
