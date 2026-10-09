@@ -110,16 +110,25 @@ def _copy_member(
     source: Path,
     target: Path,
     entry: tuple[Path, os.stat_result],
-) -> None:
+) -> bytes:
     path, info = entry
     destination = target / path.relative_to(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(_read_source(path, info))
+    data = _read_source(path, info)
+    destination.write_bytes(data)
+    return data
 
 
-def _copy(source: Path, target: Path) -> None:
+def _copy(
+    source: Path,
+    target: Path,
+    recorded: dict[str, bytes] | None = None,
+    base: Path | None = None,
+) -> None:
     # Selected top-level components are optional. Once discovered, a missing or
     # changed descendant is a failed capture, never an omitted source file.
+    # When a recorder is given, the bytes written to each destination are
+    # retained so sealing can hash them without re-reading the tree.
     try:
         source.lstat()
     except FileNotFoundError:
@@ -129,8 +138,12 @@ def _copy(source: Path, target: Path) -> None:
         if stat.S_ISDIR(info.st_mode):
             (target / path.relative_to(source)).mkdir(parents=True, exist_ok=True)
     members = [entry for entry in entries if not stat.S_ISDIR(entry[1].st_mode)]
-    for result in map_io(partial(_copy_member, source, target), members):
-        del result
+    contents = map_io(partial(_copy_member, source, target), members)
+    anchor = target if base is None else base
+    for (path, _info), data in zip(members, contents, strict=True):
+        if recorded is not None:
+            destination = target / path.relative_to(source)
+            recorded[destination.relative_to(anchor).as_posix()] = data
     _check_versions(source, entries, ignore_scratch=True)
 
 
@@ -215,14 +228,36 @@ def _release_entries(root: Path) -> list[tuple[Path, os.stat_result]]:
     return entries
 
 
-def _digest(root: Path, entries: list[tuple[Path, os.stat_result]]) -> str:
+def _recorded_entry(
+    root: Path,
+    recorded: Mapping[str, bytes],
+    entry: tuple[Path, os.stat_result],
+) -> bytes:
+    path, info = entry
+    data = recorded.get(path.relative_to(root).as_posix())
+    if data is not None and len(data) == info.st_size:
+        return data
+    return _read_source(path, info)
+
+
+def _digest(
+    root: Path,
+    entries: list[tuple[Path, os.stat_result]],
+    recorded: Mapping[str, bytes] | None = None,
+) -> str:
     value = hashlib.sha256()
     members = [
         (path, info) for path, info in sorted(entries) if stat.S_ISREG(info.st_mode)
     ]
-    # _map_io yields in submission order, so the digest consumes identical
-    # bytes in the identical sequence as a sequential read.
-    contents = map_io(_read_entry, members)
+    # map_io yields in submission order, so the digest consumes identical
+    # bytes in the identical sequence as a sequential read. Bytes recorded
+    # while this process wrote the tree are trusted only when the member's
+    # stat version still matches the walked inventory, which _check_versions
+    # enforces below exactly as it does for freshly read bytes.
+    reader = (
+        _read_entry if recorded is None else partial(_recorded_entry, root, recorded)
+    )
+    contents = map_io(reader, members)
     for (path, _info), data in zip(members, contents, strict=True):
         value.update(str(path.relative_to(root)).encode() + b"\0")
         value.update(data)
@@ -230,7 +265,7 @@ def _digest(root: Path, entries: list[tuple[Path, os.stat_result]]) -> str:
     return value.hexdigest()
 
 
-def seal(root: Path) -> str:
+def seal(root: Path, recorded: Mapping[str, bytes] | None = None) -> str:
     """Make release sources read-only and return their content identity.
 
     Returns
@@ -245,7 +280,7 @@ def seal(root: Path) -> str:
 
     """
     entries = _release_entries(root)
-    identity = _digest(root, entries)
+    identity = _digest(root, entries, recorded)
     for path, info in reversed(entries):
         if _version(_inspect(path)) != _version(info):
             message = f"Release member changed before sealing: {path}"
@@ -335,21 +370,33 @@ class Releases:
             A private staging tree with no references to mutable source files.
 
         """
+        root, _recorded = self._capture_with_record(source, changes, record=False)
+        return root
+
+    def _capture_with_record(
+        self,
+        source: Path,
+        changes: Mapping[str, bytes] | None,
+        *,
+        record: bool,
+    ) -> tuple[Path, dict[str, bytes] | None]:
         proposals = _proposal_paths(changes or {})
         source = source.resolve(strict=True)
         target = create_scratch_directory(prefix="candidate-", parent=self.directory)
+        recorded: dict[str, bytes] | None = {} if record else None
         try:
-            self._capture(source, target, proposals)
+            self._capture(source, target, proposals, recorded)
         except BaseException:
             cleanup_tree(target)
             raise
-        return target
+        return target, recorded
 
     def _capture(
         self,
         source: Path,
         target: Path,
         changes: Mapping[str, bytes] | None,
+        recorded: dict[str, bytes] | None = None,
     ) -> None:
         # The initial launch capture carries exactly what a running core
         # imports; the evaluator-only trees (tests, tools, docs, examples,
@@ -359,9 +406,9 @@ class Releases:
             _FIXED_ROOTS if changes is not None else ("raychat_bootstrap",)
         )
         for name in (*_RUNTIME_ROOTS, "harness.txt"):
-            _copy(source / name, target / name)
+            _copy(source / name, target / name, recorded, target)
         for name in (*fixed_roots, *_FIXED_FILES, "raychat.json"):
-            _copy(self.trusted / name, target / name)
+            _copy(self.trusted / name, target / name, recorded, target)
         paths = PortablePathIndex()
         for item, info in _entries(target):
             if item != target:
@@ -375,7 +422,13 @@ class Releases:
             path = target.joinpath(*portable_relative_path(name).parts)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+            if recorded is not None:
+                recorded[path.relative_to(target).as_posix()] = data
         _packaging_inventory(target)
+        if recorded is not None:
+            # The inventory pass rewrites the configuration, so its recorded
+            # bytes are refreshed from the single published file.
+            recorded["raychat.json"] = (target / "raychat.json").read_bytes()
 
     def initial(self) -> Release:
         """Capture the launch version without running the candidate evaluator.
@@ -386,8 +439,8 @@ class Releases:
             The immutable initial core.
 
         """
-        root = self.capture(self.source)
-        return Release(root, seal(root), fresh=True)
+        root, recorded = self._capture_with_record(self.source, None, record=True)
+        return Release(root, seal(root, recorded), fresh=True)
 
     @staticmethod
     async def validate(root: Path, log: Path, *, python: str | None = None) -> Release:
