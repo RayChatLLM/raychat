@@ -15,6 +15,7 @@ from raychat.composition import package_manager
 from raychat.packages import files
 from raychat.plugin_sources import SourceTree
 from raychat.sdk import PluginError
+from raychat.startup_trace import mark
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,14 +25,17 @@ _LOG = logging.getLogger(__name__)
 
 def warm(workspace: Path) -> None:
     """Install the configured profile and materialize plugin generations."""
+    mark("prewarm-begin")
     try:
         manager = package_manager(workspace)
         installed = manager.paths(include_disabled=True)
     except (PluginError, OSError, RuntimeError, ValueError) as error:
         _LOG.debug("Plugin prewarm skipped: %s", error)
         return
+    mark("prewarm-installed")
     for identifier, path in installed.items():
         _materialize(identifier, path)
+    mark("prewarm-done")
 
 
 def _materialize(identifier: str, path: Path) -> None:

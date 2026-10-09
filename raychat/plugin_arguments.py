@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 from .composition import package_manager
 from .configuration import SETTINGS
+from .distribution import read_distribution
 from .packages import read_manifest
 from .sdk import PluginError
 from .session_options import paths
@@ -127,11 +128,15 @@ def _selected_packages(argv: Sequence[str] | None) -> dict[str, Manifest]:
     raw: object = vars(known)
     fields = configuration_fields(raw, "plugin discovery arguments")
     workspace = text_field(fields["workspace"], "workspace")
+    # Argument declaration needs manifests only, never installed trees: the
+    # configured profile's catalog already carries every package manifest,
+    # so parsing does not trigger (or wait for) the profile installation
+    # that runtime composition performs.
     manager = package_manager(
         workspace,
         trusted=fields.get("trust_workspace") == "grant"
         or (fields.get("trust_workspace") != "revoke" and workspace_trust(workspace)),
-        install_profile=not fields.get("no_plugins"),
+        install_profile=False,
     )
     with manager.source_read():
         packages = manager.paths(include_disabled=True)
@@ -141,10 +146,15 @@ def _selected_packages(argv: Sequence[str] | None) -> dict[str, Manifest]:
             if identifier in packages and packages[identifier] != path:
                 raise PluginError("Ambiguous plugin ID: " + identifier)
             packages[identifier] = path
-        return {
+        manifests = {
             name: read_manifest(path, require_current_sdk=False)
             for name, path in packages.items()
         }
+    if not fields.get("no_plugins") and SETTINGS.plugins.profile:
+        for manifest in read_distribution(SETTINGS.plugins.profile).manifests:
+            if manifest.id not in manifests and manifest.id not in manager.disabled:
+                manifests[manifest.id] = manifest
+    return manifests
 
 
 def add_plugin_arguments(
