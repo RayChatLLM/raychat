@@ -89,9 +89,23 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
     '   starting "Error:".\n'
     "3. final(answer) - the ONLY way to answer; call it IN your code.\n"
     "4. plugins - lazy mapping of installed plugin libraries\n"
-    '   ({plugin_names}). plugins["name"] imports that plugin package and\n'
-    '   returns the module; e.g. lib = plugins["{plugin_example}"], then\n'
-    "   call its library functions directly (print(dir(lib)) to explore).\n"
+    "   ({plugin_names}). Plugin packages are NOT importable until you\n"
+    "   access the mapping once: a bare `import {plugin_example}` raises\n"
+    '   ModuleNotFoundError. Start with lib = plugins["{plugin_example}"];\n'
+    "   after that, submodules import normally (e.g.\n"
+    "   `import {plugin_example}.some_module`). The package __init__ is\n"
+    "   lazy, so dir(lib) can look nearly empty - the real API lives in\n"
+    "   the submodules listed in your first message; import those.\n"
+    "5. rlm(task, text) - delegate to a nested worker like yourself\n"
+    "   (own REPL, half your budgets; text becomes its prompt\n"
+    "   variable). The worker starts from ZERO context: its task\n"
+    "   string must carry everything it needs - exact imports, call\n"
+    "   signatures, field names you already discovered. Use it when a\n"
+    "   piece is too big or too complex for one llm() call; at\n"
+    "   maximum depth it falls back to a plain llm() completion.\n"
+    "\n"
+    "Write plain ASCII in code: smart quotes, em dashes and ellipsis\n"
+    "characters are SyntaxErrors.\n"
     "\n"
     "IMPORTANT: llm() calls are expensive. Batch as much information as\n"
     "reasonably possible into each llm() call (up to {chunk_chars} chars)\n"
@@ -358,13 +372,12 @@ async def _call_llm(run: RlmRun, messages: Messages) -> str:
     Returns
     -------
     str
-        The model reply, clipped to the configured reply budget.
+        The raw model reply; callers clip what they store or forward.
 
     """
     client = run.chat_service.factory()
     request: Messages = [dict(message) for message in messages]
-    reply = await asyncio.to_thread(client, request)
-    return _clip(reply, run.budget.max_llm_reply_chars)
+    return await asyncio.to_thread(client, request)
 
 
 def _observation(
@@ -445,7 +458,10 @@ async def _llm_payload(
     state.counters["llm_calls"] += 1
     text = str(frame.get("text") or "")
     try:
-        reply = await _call_llm(run, [{"role": "user", "content": text}])
+        reply = _clip(
+            await _call_llm(run, [{"role": "user", "content": text}]),
+            run.budget.max_llm_reply_chars,
+        )
     except Exception as exc:
         _LOGGER.debug("rlm llm() call failed", exc_info=True)
         return {
@@ -539,6 +555,31 @@ async def _await_done(
         return None
 
 
+def _plugin_modules(plugin_roots: Mapping[str, str]) -> str:
+    """Render each plugin's importable submodules for the first message.
+
+    Returns
+    -------
+    str
+        One indented line per plugin naming its top-level modules.
+
+    """
+    lines: list[str] = []
+    for name in sorted(plugin_roots):
+        root = Path(plugin_roots[name])
+        try:
+            modules = sorted(
+                item.stem
+                for item in root.iterdir()
+                if item.suffix == ".py" and not item.name.startswith("_")
+            )
+        except OSError:
+            modules = []
+        listed = ", ".join(modules) if modules else "(none found)"
+        lines.append(f"  {name}: {listed}")
+    return "\n".join(lines) if lines else "  (no plugins installed)"
+
+
 def _prompt_chars(prompt: str, prompt_path: str | None) -> int:
     """Measure the symbolic prompt announced to the sub-model up front.
 
@@ -589,7 +630,9 @@ def _seed_messages(
     first_user = (
         f"Task: {task}\n"
         f"Symbolic prompt: {prompt_chars} chars{located}\n"
-        f"Installed plugins: {plugin_names}"
+        f"Installed plugins: {plugin_names}\n"
+        f"Plugin modules (import via plugins[name] first):\n"
+        f"{_plugin_modules(run.plugin_roots)}"
     )
     if prompt:
         preview = _clip(prompt, run.budget.prompt_preview_chars)
@@ -643,8 +686,15 @@ async def _one_round(
         state.stopped = "total timeout"
         return False
     reply = await _call_llm(run, messages)
+    # Execute code from the raw reply: clipping executable code mid-stream
+    # manufactures SyntaxErrors and burns an iteration for nothing.
     code = _extract_code(reply)
-    messages.append({"role": "assistant", "content": reply})
+    messages.append(
+        {
+            "role": "assistant",
+            "content": _clip(reply, run.budget.max_llm_reply_chars),
+        },
+    )
     _write_frame(io_pair.writer, {"op": "exec", "code": code})
     await io_pair.writer.drain()
     done = await _await_done(run, state, io_pair)
