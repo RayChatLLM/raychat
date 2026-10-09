@@ -496,6 +496,7 @@
       "raychat/session_options.py",
       "raychat/status.py",
       "raychat/storage.py",
+      "raychat/text_store.py",
       "raychat/transport.py",
       "raychat/type_support.py",
       "raychat/ui/__init__.py",

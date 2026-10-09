@@ -17,6 +17,8 @@ ignore = ["missing-copyright-notice"]
 "raychat/ui/state.py" = ["too-many-public-methods"]
 # One test method per behavior; the suite grows with every UI behavior.
 "tests/test_tui_state.py" = ["too-many-public-methods"]
+# Spill tests must reset the module's cached store between environments.
+"tests/test_text_store.py" = ["private-member-access"]
 # Seeded optimization sampling must reproduce the existing search sequence.
 "plugins/optimization/gepa/batch_sampler.py" = ["suspicious-non-cryptographic-random-usage"]
 "plugins/optimization/gepa/candidate_selector.py" = ["suspicious-non-cryptographic-random-usage"]

@@ -792,7 +792,7 @@ class StateTests(TypedTestCase):
             FrozenInstanceError,
             _assign_field,
             snapshot.entries[0],
-            "body",
+            "payload",
             "mutated",
         )
 

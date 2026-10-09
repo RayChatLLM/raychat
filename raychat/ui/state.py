@@ -23,6 +23,7 @@ from typing import ClassVar, TypeGuard, cast
 
 from raychat.configuration import SETTINGS
 from raychat.handoff import optional_index
+from raychat.text_store import TextRef, export_text, fetch, parse_text, spill
 from raychat.validation import (
     array_field,
     boolean_field,
@@ -117,6 +118,20 @@ def _is_string_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
         return False
     fields = cast("Mapping[object, object]", value)
     return all(isinstance(key, str) for key in fields)
+
+
+def _restored_content(message: Mapping[str, object]) -> object:
+    """Materialize a committed message body, inline or stored by reference.
+
+    Returns
+    -------
+    object
+        The complete body text, or the raw field when it is not text.
+
+    """
+    if "content_ref" in message:
+        return fetch(parse_text(message["content_ref"], "committed message body"))
+    return message.get("content")
 
 
 def _restored_action(value: object) -> Mapping[str, object] | None:
@@ -1117,10 +1132,15 @@ class TranscriptEntry:
     sequence: int
     kind: str
     title: str
-    body: str = ""
+    payload: str | TextRef = ""
     step: int | None = None
     max_steps: int | None = None
     ok: bool | None = None
+
+    @property
+    def body(self) -> str:
+        """Materialize the complete sanitized body text."""
+        return fetch(self.payload)
 
     def __post_init__(self) -> None:
         """Validate entry identity and sanitize each complete logical line.
@@ -1144,17 +1164,20 @@ class TranscriptEntry:
                 error_message = f"{name} must be a positive integer or None"
                 raise ValueError(error_message)
         object.__setattr__(self, "title", truncate_display(self.title, MAX_TITLE_CELLS))
-        if not _is_text(self.body):
+        if isinstance(self.payload, TextRef):
+            # A stored reference was sanitized before it was spilled.
+            return
+        if not _is_text(self.payload):
             error_message = "transcript body must be a string"
             raise TypeError(error_message)
         # Preserve intentional hard line breaks as layout data while stripping
         # every terminal instruction from each logical line.  No body is
         # clipped here: viewport virtualization, not data loss, bounds drawing.
-        normalized = self.body.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = self.payload.replace("\r\n", "\n").replace("\r", "\n")
         safe_lines = (
             sanitize_text(line, max_chars=len(line)) for line in normalized.split("\n")
         )
-        object.__setattr__(self, "body", "\n".join(safe_lines))
+        object.__setattr__(self, "payload", spill("\n".join(safe_lines)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1307,13 +1330,16 @@ class TuiState:
             The entry to render, possibly a collapsed preview copy.
 
         """
-        if entry.kind != "thinking" or self._thinking_expanded or not entry.body:
+        if entry.kind != "thinking" or self._thinking_expanded:
             return entry
-        first_line = entry.body.split("\n", 1)[0]
+        body = entry.body
+        if not body:
+            return entry
+        first_line = body.split("\n", 1)[0]
         preview = truncate_display(first_line, _THINKING_PREVIEW_CELLS)
         return replace(
             entry,
-            body=f"{preview} … [{len(entry.body)} chars — Ctrl+T expands]",
+            payload=f"{preview} … [{len(body)} chars — Ctrl+T expands]",
         )
 
     @staticmethod
@@ -1388,7 +1414,9 @@ class TuiState:
                     "sequence": e.sequence,
                     "kind": e.kind,
                     "title": e.title,
-                    "body": e.body,
+                    "body" if isinstance(e.payload, str) else "body_ref": (
+                        export_text(e.payload)
+                    ),
                     "step": e.step,
                     "max_steps": e.max_steps,
                     "ok": e.ok,
@@ -1415,12 +1443,18 @@ class TuiState:
         entries = []
         for raw in array_field(data["entries"], "transcript entries"):
             entry = configuration_fields(raw, "transcript entry")
+            if ("body" in entry) == ("body_ref" in entry):
+                message = "Transcript entries need exactly one body field."
+                raise ValueError(message)
             entries.append(
                 TranscriptEntry(
                     integer_field(entry["sequence"], "sequence", minimum=1),
                     text_field(entry["kind"], "entry kind"),
                     text_field(entry["title"], "entry title", allow_empty=True),
-                    text_field(entry["body"], "entry body", allow_empty=True),
+                    parse_text(
+                        entry["body"] if "body" in entry else entry["body_ref"],
+                        "entry body",
+                    ),
                     optional_index(entry["step"], "entry step"),
                     optional_index(entry["max_steps"], "entry max steps"),
                     None
@@ -1525,7 +1559,7 @@ class TuiState:
         self.reset()
         for message in messages:
             if message["kind"] == "prompt":
-                content = message["content"]
+                content = _restored_content(message)
                 if not _is_text(content):
                     error = "Committed user prompts must contain text."
                     raise TypeError(error)
@@ -1546,7 +1580,7 @@ class TuiState:
                 else:
                     self._append("user", "You", content)
             elif message["kind"] == "assistant":
-                action = _restored_action(message["content"])
+                action = _restored_action(_restored_content(message))
                 if action is None:
                     continue
                 response = action.get("message")
