@@ -1365,14 +1365,20 @@ class PackageManager:
             ),
         )
 
-    def _stage_install(
+    def _stage_prepared(
         self,
-        spec: str,
+        prepared: tuple[str, Path],
+    ) -> tuple[Manifest, PackageRecord]:
+        return self._stage(prepared[0], prepared[1])
+
+    def _adopt_staged(
+        self,
         plan: _Staging,
+        target: Path,
+        manifest: Manifest,
+        record: PackageRecord,
         expected: tuple[str, str] | None = None,
     ) -> Manifest:
-        target = Path(plan.temporary.name) / ("package-" + str(len(plan.staged)))
-        manifest, record = self._stage(spec, target)
         if expected is not None and (manifest.id, manifest.version) != expected:
             message = "Dependency resolved to an unexpected version."
             raise PluginError(message)
@@ -1388,6 +1394,18 @@ class PackageManager:
         plan.staged[manifest.id], plan.records[manifest.id] = target, record
         plan.manifests[manifest.id] = manifest
         return manifest
+
+    def _stage_install(
+        self,
+        spec: str,
+        plan: _Staging,
+        expected: tuple[str, str] | None = None,
+    ) -> Manifest:
+        # Dependency staging names stay disjoint from the enumerate-indexed
+        # root directories even when duplicate root specs leave gaps.
+        target = Path(plan.temporary.name) / f"dependency-{len(plan.staged)}"
+        manifest, record = self._stage(spec, target)
+        return self._adopt_staged(plan, target, manifest, record, expected)
 
     def _collect_install(self, identifier: str, plan: _Staging) -> None:
         if identifier in plan.complete:
@@ -1451,11 +1469,23 @@ class PackageManager:
         plan.records[primary]["path"] = str(Path(sources[0]).expanduser().resolve())
 
     def _stage_roots(self, plan: _Staging) -> _PackageChange:
-        primary = self._stage_install(plan.request.sources[0], plan)
         # Stage every requested root before collecting dependencies so an entire
-        # profile upgrade is checked as one candidate generation.
-        for source in plan.request.sources[1:]:
-            self._stage_install(source, plan)
+        # profile upgrade is checked as one candidate generation. Materializing
+        # each root (extract, hash, manifest) is independent per target
+        # directory, so the heavy work runs on the shared pool; every check
+        # and plan mutation stays sequential in request order below.
+        prepared = [
+            (source, Path(plan.temporary.name) / f"package-{index}")
+            for index, source in enumerate(plan.request.sources)
+        ]
+        staged_roots = list(map_io(self._stage_prepared, prepared))
+        primary = self._adopt_staged(plan, prepared[0][1], *staged_roots[0])
+        for (_, target), (manifest, record) in zip(
+            prepared[1:],
+            staged_roots[1:],
+            strict=True,
+        ):
+            self._adopt_staged(plan, target, manifest, record)
         for identifier in list(plan.staged):
             self._collect_install(identifier, plan)
         expected_sources = self._replacement_sources(plan)

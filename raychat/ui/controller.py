@@ -47,6 +47,7 @@ from raychat.ui.renderer import (
     Surface,
 )
 from raychat.ui.selection import SelectionViewport, TextSelection
+from raychat.startup_trace import mark
 from raychat.ui.state import (
     LayoutOptions,
     PendingApproval,
@@ -3259,7 +3260,9 @@ class _TuiController:
 
     def run(self) -> int:
         try:
+            mark("tui-run-begin")
             self.view.worker.start()
+            mark("tui-worker-started")
             live = self.resources.live
             if live is not None:
                 if live.restore is not None:
@@ -3276,12 +3279,15 @@ class _TuiController:
                     "ready",
                     state=handoff.capture(self, strict=live.restore is not None),
                 )
+                mark("tui-ready-sent")
             if self.args.initial_prompt and live is not None:
                 self.view.message_queue.append(self.args.initial_prompt)
             elif self.args.initial_prompt:
                 self.view.active_job_id = self._submit_task(self.args.initial_prompt)
-            while self._step_frame():
-                pass
+            first_frame = self._step_frame()
+            mark("tui-first-frame")
+            while first_frame:
+                first_frame = self._step_frame()
         finally:
             self._close()
         return 0
