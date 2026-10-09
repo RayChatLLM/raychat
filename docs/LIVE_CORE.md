@@ -5,7 +5,9 @@ process. The supervisor owns native terminal modes and buffers input while cores
 are exchanged. `--exec` remains a single noninteractive job.
 
 - `/update /absolute/path/to/source` copies a developer checkout into an isolated
-  candidate. `/update` uses the launch source.
+  candidate. Live validation checks imports, the fixed test suite and
+  deterministic packaging with the application's own interpreter; linters and
+  type checkers are development-time tools and do not run in the live gate. `/update` uses the launch source.
 - Self-Harness can generate actual Python source changes under `raychat/` and
   `plugins/`, including its own implementation. Configure a fixed outcome evaluator
   with `/self-harness --scores -- VALIDATOR ARG...`, or the explicit exit-code
@@ -42,8 +44,7 @@ the terminal at its actual dimensions. Activation means the new code is running
 in the open terminal; no restart is needed. It does not establish that the
 requested behavior is correct - the agent verifies against the result's screen
 field or by reading the running state. After an activation the mirror is
-refreshed from the activated release (which may differ from the submitted bytes:
-the validation gate reformats candidates), unless the mirror changed again while
+refreshed from the activated release, unless the mirror changed again while
 validation ran, in which case the newer edits are preserved and resubmitted at
 the next boundary.
 

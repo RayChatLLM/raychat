@@ -542,8 +542,8 @@ class FrameCompositionTests(TypedTestCase):
                     self.require(len(rendered) > 1)
                     self.require("RAYS" in rows)
 
-    def test_transcript_suppresses_internal_action_and_result_rows(self) -> None:
-        """Check transcript suppresses internal action and result rows."""
+    def test_transcript_shows_actions_and_hides_successful_results(self) -> None:
+        """Render every executed action while keeping result payloads quiet."""
         state = TuiState()
         state.start("Inspect the workspace", max_steps=5)
         action = {"action": "list", "path": "."}
@@ -574,8 +574,7 @@ class FrameCompositionTests(TypedTestCase):
 
         self.require(("YOU") in (plain))
         self.require(("Inspect the workspace") in (plain))
-        self.require(("ACTION") not in (plain))
-        self.require(("List files") not in (plain))
+        self.require(("ACTION") in (plain))
         self.require(("RESULT") not in (plain))
         self.require(("alpha.py") not in (plain))
         self.require(("Inspection finished") in (plain))
@@ -1717,13 +1716,20 @@ class TuiControllerTests(TypedTestCase):
             [item[2] for item in rendered],
             [None, "follow-up", "follow-up", None, None, None],
         )
-        # Hidden request/result events do not yank a manually scrolled view.
+        # Action rows and hidden results do not yank a manually scrolled view.
         self.equal([item[3] for item in rendered[:2]], [8, 8])
         self.equal(rendered[3][0].step, 0)
         final_entries = rendered[-1][0].entries
         self.equal(
             [entry.body for entry in final_entries],
-            ["first prompt", "first answer", "follow-up", "second answer"],
+            [
+                "first prompt",
+                "first.py",
+                "first answer",
+                "follow-up",
+                "second.py",
+                "second answer",
+            ],
         )
         self.require(("stale") not in (" ".join(entry.body for entry in final_entries)))
 

@@ -1748,8 +1748,17 @@ class TuiState:
         if self._phase is Phase.IDLE:
             self._phase = Phase.RUNNING
         action = payload.get("action")
-        if _is_string_mapping(action) and action.get("action") == "run":
+        if not _is_string_mapping(action):
+            return
+        name = action.get("action")
+        if name == "run":
             self._append("command", "", format_command(action))
+        elif _is_text(name) and name != "done":
+            # Every action gets a visible row as it executes; a transcript
+            # that shows reasoning but hides successful work reads as a
+            # model that only thinks.
+            summary = format_action(action)
+            self._append("action", summary.title, summary.detail)
 
     def apply_worker_event(self, event: str, payload: Mapping[str, object]) -> None:
         """Apply one detached worker event on the main thread.

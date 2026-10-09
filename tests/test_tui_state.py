@@ -642,7 +642,7 @@ class StateTests(TypedTestCase):
         )
         self.equal(state.step, 1)
         self.equal(state.max_steps, 8)
-        self.equal([entry.kind for entry in state.entries], ["user"])
+        self.equal([entry.kind for entry in state.entries], ["user", "action"])
         state.apply_worker_event(
             "approval_required",
             {"step": 1, "max_steps": 8, "action": action},
@@ -654,7 +654,7 @@ class StateTests(TypedTestCase):
 
         state.resolve_approval(approved=True)
         self.equal(state.phase, tui_state.Phase.RUNNING)
-        self.equal([entry.kind for entry in state.entries], ["user"])
+        self.equal([entry.kind for entry in state.entries], ["user", "action"])
         state.apply_worker_event(
             "result",
             {
@@ -664,7 +664,7 @@ class StateTests(TypedTestCase):
                 "result": {"ok": True, "path": "a.txt", "bytes_written": 5},
             },
         )
-        self.equal([entry.kind for entry in state.entries], ["user"])
+        self.equal([entry.kind for entry in state.entries], ["user", "action"])
         state.apply_worker_event(
             "done",
             {"step": 2, "max_steps": 8, "message": "Created a.txt"},
@@ -674,8 +674,11 @@ class StateTests(TypedTestCase):
         self.equal(snapshot.phase, tui_state.Phase.DONE)
         self.equal(snapshot.step, 2)
         self.require((snapshot.pending_approval) is None)
-        self.equal([entry.kind for entry in snapshot.entries], ["user", "assistant"])
-        self.equal([entry.sequence for entry in snapshot.entries], [1, 2])
+        self.equal(
+            [entry.kind for entry in snapshot.entries],
+            ["user", "action", "assistant"],
+        )
+        self.equal([entry.sequence for entry in snapshot.entries], [1, 2, 3])
 
     def test_denial_and_stop_phases(self) -> None:
         """Check denial and stop phases."""
@@ -856,12 +859,13 @@ class StateTests(TypedTestCase):
         snapshot = state.snapshot()
         self.equal(snapshot.step, 100)
         self.equal(snapshot.max_steps, 100)
-        self.equal([entry.kind for entry in snapshot.entries], ["user"])
-        self.equal(snapshot.dropped_entries, 0)
+        # Every action renders, so a tool-heavy turn fills the bounded
+        # transcript with the newest action rows instead of hiding work.
+        self.equal([entry.kind for entry in snapshot.entries], ["action", "action"])
+        self.require(snapshot.dropped_entries > 0)
 
         state.apply_worker_event("done", {"message": "finished"})
-        self.equal([entry.kind for entry in state.entries], ["user", "assistant"])
-        self.equal(state.snapshot().dropped_entries, 0)
+        self.equal([entry.kind for entry in state.entries], ["action", "assistant"])
 
     def test_mutation_from_worker_thread_is_rejected(self) -> None:
         """Check mutation from worker thread is rejected."""
@@ -1023,7 +1027,7 @@ class TranscriptViewportTests(TypedTestCase):
 
         # Appending reuses the earlier reflow instead of starting a new one.
         self.equal(state.rows_revision, revision)
-        self.equal(first.total, third.total)
+        self.require((third.total) > (first.total))
         self.equal(second.scroll_offset, 1)
 
         state.apply_worker_event("done", {"message": "first response"})

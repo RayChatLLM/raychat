@@ -105,6 +105,7 @@ _MIN_BOX_CELLS = 2
 _MIN_SIDEBAR_COLUMNS = 6
 _MIN_CONTENT_ROWS = 3
 _MIN_INFO_ROWS = 18
+_STATUS_FLASH_SECONDS = 10.0
 _LOGGER = logging.getLogger(__name__)
 TARGET_FPS = SETTINGS.tui.target_fps
 APPROVAL_DEBOUNCE_SECONDS = SETTINGS.tui.approval_debounce_seconds
@@ -944,6 +945,11 @@ def _sidebar_details(
         details.append((label, _STYLE_MUTED_PANEL_ALT_BOLD))
         style = CellStyle(foreground=color, background=PANEL_ALT, bold=False)
         details.extend((line, style) for line in wrap_display(value, width))
+    if composition.sidebar_statuses:
+        details.append(("STATUS", _STYLE_MUTED_PANEL_ALT_BOLD))
+        status_style = CellStyle(foreground=INK, background=PANEL_ALT, bold=False)
+        for label in composition.sidebar_statuses:
+            details.extend((line, status_style) for line in wrap_display(label, width))
     return details
 
 
@@ -1240,6 +1246,7 @@ class FrameComposition:
     model: str
     workspace: str | Path
     statuses: tuple[StatusRecord, ...] = ()
+    sidebar_statuses: tuple[str, ...] = ()
     session_name: str = ""
     panel: ComposerPanel | None = None
     measured_fps: float = 0.0
@@ -1740,6 +1747,7 @@ class _TuiController:
     ) -> None:
         self.args = args
         self.resources = resources
+        self._live_status_seen = ""
         self.terminal = terminal
         self.restore_terminal = restore_terminal
         self.create_root_worker = create_root_worker
@@ -1807,7 +1815,27 @@ class _TuiController:
             ttl_seconds=seconds,
         )
 
-    def _visible_statuses(self) -> tuple[StatusRecord, ...]:
+    def _panel_statuses(self) -> tuple[str, ...]:
+        """Collect the durable application state for the system panel.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Plugin status labels plus the current core-update state.
+
+        """
+        labels: list[str] = []
+        live = self.resources.live
+        if live is not None and live.status:
+            labels.append(live.status)
+        labels.extend(
+            record.item.text
+            for record in self._plugin_statuses()
+            if record.item is not None
+        )
+        return tuple(labels)
+
+    def _plugin_statuses(self) -> tuple[StatusRecord, ...]:
         result: list[StatusRecord] = []
         for identifier, owner in tuple(self.views.items()):
             runtime = self._focused_runtime(owner)
@@ -1833,6 +1861,19 @@ class _TuiController:
                     for record in records.values()
                     if record.scope == "application" or identifier == self.focused_id
                 )
+        return tuple(result)
+
+    def _visible_statuses(self) -> tuple[StatusRecord, ...]:
+        # The footer carries only ephemeral host state; durable plugin
+        # and application status lives in the system panel, and events
+        # flash here briefly through the TTL feedback store. Live
+        # activity counters (running subagents) stay in the footer
+        # while the activity exists.
+        result: list[StatusRecord] = [
+            record
+            for record in self._plugin_statuses()
+            if record.key == "running" or record.expires_at is not None
+        ]
         result.extend(self.view.feedback.snapshot())
         if self.view.message_queue.items:
             result.append(
@@ -1861,17 +1902,6 @@ class _TuiController:
                     "working",
                     StatusItem("Working", priority=90),
                     "session",
-                    None,
-                ),
-            )
-        live = self.resources.live
-        if live is not None and live.status:
-            result.append(
-                StatusRecord(
-                    "host",
-                    "core-update",
-                    StatusItem(live.status, priority=110),
-                    "application",
                     None,
                 ),
             )
@@ -1953,6 +1983,12 @@ class _TuiController:
             staging.last_prompt = text
             staging.suppressed = False
             staging.consecutive_rejections = 0
+        if live is not None and live.status.startswith(
+            ("Update rejected", "Core updated"),
+        ):
+            # A terminal update outcome should not outlive the moment;
+            # a new instruction retires it from the footer.
+            live.status = ""
         return _submit(self.view.state, self.view.worker, text, self.args.max_steps)
 
     def _drain_queue(self) -> None:
@@ -3207,6 +3243,7 @@ class _TuiController:
             or self.args.provider,
             workspace=self.args.workspace,
             statuses=self._visible_statuses(),
+            sidebar_statuses=self._panel_statuses(),
             measured_fps=measured_fps,
             quality=quality,
             scroll_offset=self.view.scroll_offset,
@@ -3314,6 +3351,20 @@ class _TuiController:
             for notice in live.notices:
                 self.views[self.root_id].state.notice("Core update", notice)
             live.notices.clear()
+            if live.status != self._live_status_seen:
+                self._live_status_seen = live.status
+                if live.status:
+                    self.view.feedback.set(
+                        "host",
+                        "core-update",
+                        StatusItem(live.status, priority=110),
+                        ttl_seconds=_STATUS_FLASH_SECONDS,
+                    )
+                if live.status.startswith(("Update rejected", "Core updated")):
+                    self.views[self.root_id].state.notice(
+                        "Core update",
+                        live.status,
+                    )
         if live is None or not live.frozen:
             self._process_all_events()
         if self._process_handoff():
