@@ -41,6 +41,7 @@ from typing import Protocol, TypedDict, runtime_checkable
 
 from raychat.configuration import SETTINGS
 from raychat.service_contracts import CONTEXT_FACTORY
+from raychat.text_store import TextRef, export_text, fetch, parse_text, spill
 
 from ._common import (
     DEFAULT_CONTEXT_CHARS,
@@ -80,6 +81,7 @@ from .validation import (
     text_field,
 )
 
+_HEAD_CHARS = 1024
 _CORE_REVIEW_STEPS = 20
 # Reply-shaped provider failures become model-visible feedback this many
 # consecutive times per prompt before the failure escapes to outer recovery.
@@ -127,6 +129,53 @@ class _CoreReview(Protocol):
         ...
 
 
+def _message_chars(role: str, content: str) -> int:
+    """Measure the serialized provider-message length used for context fitting.
+
+    Returns
+    -------
+    int
+        The exact character count ``json.dumps`` gives this message's dict
+        inside a serialized message list (``ensure_ascii=False`` with compact
+        separators), including JSON string escaping of the content.
+
+    """
+    message: dict[str, str] = {"role": role, "content": content}
+    return len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredMessage:
+    """Keep validated history with large bodies spilled to the launch database."""
+
+    role: str
+    payload: str | TextRef
+    kind: str
+    prompt_id: int
+    # The serialized provider-message length, memoized while the complete
+    # content is in hand so context fitting never refetches spilled bodies.
+    message_chars: int
+    # The first stored characters let compaction digests clip spilled prompts
+    # without rereading complete bodies from the launch database.
+    head: str = ""
+
+    @property
+    def content(self) -> str:
+        """Materialize the complete message text."""
+        return fetch(self.payload)
+
+    def as_message(self) -> dict[str, str]:
+        """Convert a semantic history entry into provider message fields.
+
+        Returns
+        -------
+        dict[str, str]
+            Provider role and content fields with materialized text.
+
+        """
+        return {"role": self.role, "content": self.content}
+
+
 class _HistoryRecord(TypedDict):
     role: str
     content: str
@@ -134,7 +183,7 @@ class _HistoryRecord(TypedDict):
     prompt_id: int
 
 
-def _history_record(message: SessionMessage) -> _HistoryRecord:
+def _history_record(message: SessionMessage | _StoredMessage) -> _HistoryRecord:
     return {
         "role": message.role,
         "content": message.content,
@@ -149,22 +198,40 @@ def _text(value: object) -> str:
     return value
 
 
-def _history_message(value: object) -> SessionMessage:
+def _history_message(value: object) -> _StoredMessage:
     fields = object_field(value, "session history entry")
-    if fields.keys() != {"role", "content", "kind", "prompt_id"}:
-        message = "Invalid session history entry."
-        raise ValueError(message)
-    return SessionMessage(
+    if set(fields) - {"content", "content_ref"} != {"role", "kind", "prompt_id"} or (
+        ("content" in fields) == ("content_ref" in fields)
+    ):
+        error_message = "Invalid session history entry."
+        raise ValueError(error_message)
+    payload = parse_text(
+        fields["content"] if "content" in fields else fields["content_ref"],
+        "history content",
+    )
+    # Validate the semantic fields exactly as inline history always has; a
+    # reference's body was validated when the message was first recorded.
+    message = SessionMessage(
         role=_text(fields["role"]),
-        content=_text(fields["content"]),
+        content=payload if isinstance(payload, str) else "",
         kind=_text(fields["kind"]),
         prompt_id=integer_field(fields["prompt_id"], "history prompt identifier"),
+    )
+    content = fetch(payload) if isinstance(payload, TextRef) else payload
+    head = content[:_HEAD_CHARS] if isinstance(payload, TextRef) else ""
+    return _StoredMessage(
+        message.role,
+        payload,
+        message.kind,
+        message.prompt_id,
+        message_chars=_message_chars(message.role, content),
+        head=head,
     )
 
 
 def _snapshot_parts(
     value: object,
-) -> tuple[list[SessionMessage], dict[str, dict[str, object]]]:
+) -> tuple[list[_StoredMessage], dict[str, dict[str, object]]]:
     try:
         return _read_snapshot(value)
     except ConfigurationError as exc:
@@ -173,7 +240,7 @@ def _snapshot_parts(
 
 def _read_snapshot(
     value: object,
-) -> tuple[list[SessionMessage], dict[str, dict[str, object]]]:
+) -> tuple[list[_StoredMessage], dict[str, dict[str, object]]]:
     fields = object_field(value, "session snapshot")
     if fields.keys() != {"history", "state"}:
         _invalid("Invalid session snapshot.")
@@ -341,7 +408,7 @@ class AgentSession:
             error_message = "Protocol must be nonempty text."
             raise ValueError(error_message)
         self._allowed_actions = _allowed_actions(self.runtime, allowed_actions)
-        self._history: list[SessionMessage] = []
+        self._history: list[_StoredMessage] = []
         self._next_prompt_id = 1
         self._sending = self._turn_open = False
         self._core_review = False
@@ -396,7 +463,10 @@ class AgentSession:
             A detached list of chronological conversation records.
 
         """
-        return list(self._history)
+        return [
+            SessionMessage(item.role, item.content, item.kind, item.prompt_id)
+            for item in self._history
+        ]
 
     def validate_context(self) -> None:
         """Check that the current prompt fits the active context policy."""
@@ -415,11 +485,18 @@ class AgentSession:
             A deep copy of history records and namespaced plugin state.
 
         """
-        document: dict[str, object] = {
-            "history": [_history_record(item) for item in self._history],
-            "state": self.runtime.state,
-        }
-        return copy.deepcopy(document)
+        history: list[dict[str, object]] = [
+            {
+                "role": item.role,
+                "kind": item.kind,
+                "prompt_id": item.prompt_id,
+                "content" if isinstance(item.payload, str) else "content_ref": (
+                    export_text(item.payload)
+                ),
+            }
+            for item in self._history
+        ]
+        return {"history": history, "state": copy.deepcopy(self.runtime.state)}
 
     def restore_snapshot(self, snapshot: object) -> None:
         """Validate and restore a detached history and state snapshot.
@@ -656,7 +733,7 @@ class AgentSession:
             finally:
                 self._finish_turn(history_start)
 
-    def _finish_turn(self, history_start: list[SessionMessage]) -> None:
+    def _finish_turn(self, history_start: list[_StoredMessage]) -> None:
         try:
             with self._state_lock:
                 aborted = self._rollback_state is not None
@@ -730,7 +807,18 @@ class AgentSession:
         log: bool = True,
     ) -> None:
         message = SessionMessage(role, content, kind, prompt_id)
-        self._history.append(message)
+        payload = spill(content)
+        head = content[:_HEAD_CHARS] if isinstance(payload, TextRef) else ""
+        self._history.append(
+            _StoredMessage(
+                role,
+                payload,
+                kind,
+                prompt_id,
+                message_chars=_message_chars(message.role, message.content),
+                head=head,
+            ),
+        )
         if self.store is not None:
             self.store.append("message", _history_record(message))
         if log:

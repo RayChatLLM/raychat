@@ -32,7 +32,6 @@ def document(value: object) -> dict[str, object]:
     if result.get("version") != VERSION:
         message = "Unsupported core handoff version."
         raise ValueError(message)
-    encode(result)
     return decode(encode(result))
 
 
@@ -62,7 +61,6 @@ def export_plugins(runtime: Runtime) -> dict[str, object]:
         for name, callbacks in runtime.handoff_handlers.items()
     }
     result: dict[str, object] = {"plugins": list(runtime.plugins), "resources": values}
-    encode(result)
     return decode(encode(result))
 
 

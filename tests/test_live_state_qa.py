@@ -43,7 +43,7 @@ class LiveStateQATests(TypedTestCase):
         scrolled = SelectionViewport(2, 3, 30, 10, 80, rows)
         restored.project(scrolled)
         restored.point(31, 20, scrolled, released=True)
-        self.equal(restored.text(), "\n".join(rows[14:90]))
+        self.equal(restored.text(rows), "\n".join(rows[14:90]))
         self.equal(restored.scroll_step(scrolled, 2), 0)
         self.require(restored.pointer is None)
 
@@ -61,7 +61,7 @@ class LiveStateQATests(TypedTestCase):
         self.require(restored.pointer is None)
         self.equal(restored.scroll_step(viewport, 1000), 0)
         restored.point(21, 4, viewport, released=True)
-        self.equal(restored.text(), "first 雪\nsecond 🙂")
+        self.equal(restored.text(rows), "first 雪\nsecond 🙂")
 
     def test_all_new_children_follow_primary_while_prepared_children_stay_pinned(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from raychat.text_store import fetch
 from raychat.ui.controller import ChatView
 from raychat.ui.handoff import capture_view
 from raychat.ui.input_history import InputHistory
@@ -42,7 +43,7 @@ class InputHistoryTests(TypedTestCase):
                 history.navigate(editor, -1)
                 history.navigate(editor, 1)
             self.equal(len(history.items), 4)
-            self.equal(history.items[0][:4], "0036")
+            self.equal(fetch(history.items[0])[:4], "0036")
             self.equal(editor.text, "draft")
             histories.append(history.export_handoff())
         self.require(len(encode({"histories": histories})) < 8 * 1024 * 1024)

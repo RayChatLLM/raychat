@@ -51,13 +51,34 @@ _RUFF_RULE_EXCEPTIONS = {
 }
 
 _RUFF_FILE_RULE_EXCEPTIONS = {
+    # The package serves the deferred NoRedirects export through a module
+    # __getattr__ so importing the plugin never loads urllib (mirrors pyproject).
+    "plugins/chat_completions/__init__.py": "F822",
+    # The provider HTTP stack (urllib, ssl, http.client, email parsing, the
+    # debug opener) loads with the first real provider request instead of at
+    # import time (mirrors pyproject).
+    "plugins/chat_completions/client.py": "PLC0415",
     "plugins/optimization/gepa/batch_sampler.py": "S311",
     "plugins/optimization/gepa/candidate_selector.py": "S311",
     "plugins/optimization/gepa/merge.py": "S311",
     "plugins/optimization/gepa/optimize_anything.py": "S311",
+    # Deferred runtime-only imports: asyncio (and the ssl it pulls in) costs
+    # ~10 MiB RSS, so these modules import it only when an operation actually
+    # runs; only catalog/package downloads need urllib.request and the HTTP
+    # debug stack (mirrors pyproject).
+    "raychat/filesystem.py": "PLC0415",
+    "raychat/plugin_manager.py": "PLC0415",
+    "raychat/transport.py": "PLC0415",
+    "raychat/ui/clipboard.py": "PLC0415",
     # One method per user-visible transcript concern; the reasoning-visibility
     # toggle pushed the facade one past the default budget (mirrors pyproject).
     "raychat/ui/state.py": "PLR0904",
+    # Size-parity specs reach the policy's private compaction search and the
+    # session's private stored-history records to prove exact equality; spill
+    # tests must reset the module's cached store between environments
+    # (mirrors pyproject).
+    "tests/test_plugin_context.py": "SLF001",
+    "tests/test_text_store.py": "SLF001",
     "tests/test_tui_state.py": "PLR0904",
     # Fixed CI-owned argv, no shell: explicit Popen handle isolation prevents
     # detached test supervisors from retaining the Actions step's output pipes.

@@ -15,7 +15,6 @@ from http import HTTPStatus
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, TypedDict
 from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunparse
-from urllib.request import getproxies, proxy_bypass
 
 from raychat.event_types import CONFIGURE, Lifecycle
 
@@ -26,7 +25,6 @@ from .filesystem import (
     read_regular,
     write_bytes,
 )
-from .http_debug import HTTPConnection, HTTPSConnection
 from .package_transactions import PackageTransaction
 from .packages import (
     MAX_BYTES,
@@ -433,6 +431,9 @@ class _HTTPRoute:
 
 
 def _proxy_location(parsed: ParseResult) -> str | None:
+    # Deferred: urllib.request drags http.client and ssl into every process.
+    from urllib.request import getproxies, proxy_bypass
+
     proxy = getproxies().get(parsed.scheme)
     if proxy is None:
         return None
@@ -457,6 +458,9 @@ def _request_target(parsed: ParseResult) -> str:
 
 
 def _proxy_route(parsed: ParseResult, proxy: str) -> _HTTPRoute:
+    # Deferred: only catalog/package downloads need the HTTP connection stack.
+    from .http_debug import HTTPConnection, HTTPSConnection
+
     address = urlparse(proxy if "://" in proxy else parsed.scheme + "://" + proxy)
     hostname = address.hostname
     if address.scheme not in {"http", "https"} or hostname is None:
@@ -498,6 +502,9 @@ def _proxy_route(parsed: ParseResult, proxy: str) -> _HTTPRoute:
 
 
 def _http_route(url: str) -> _HTTPRoute:
+    # Deferred: only catalog/package downloads need the HTTP connection stack.
+    from .http_debug import HTTPConnection, HTTPSConnection
+
     parsed = _validate_url(url)
     host = parsed.hostname
     if host is None:

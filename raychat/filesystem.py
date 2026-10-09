@@ -9,7 +9,6 @@ durability of a rename, transactions across files, or coordination with editors.
 
 from __future__ import annotations
 
-import asyncio
 import errno
 import hashlib
 import logging
@@ -34,6 +33,7 @@ from typing import TYPE_CHECKING, Protocol, TypeVar
 from .type_support import override
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Callable, Iterator
     from types import TracebackType
     from typing import BinaryIO, TextIO
@@ -879,6 +879,8 @@ async def _retry_async(
     operation: str,
     policy: RetryPolicy,
 ) -> None:
+    import asyncio  # Deferred: only async publication paths pay asyncio's RSS.
+
     budget = _Budget(policy)
     while True:
         budget.attempts += 1
@@ -934,6 +936,8 @@ def _prepare_stage(destination: Path, data: bytes) -> Path:
 
 
 async def _prepare_stage_async(destination: Path, data: bytes) -> Path:
+    import asyncio  # Deferred: only async publication paths pay asyncio's RSS.
+
     worker = asyncio.get_running_loop().run_in_executor(
         None,
         _prepare_stage,
@@ -959,6 +963,8 @@ async def _join_worker(
     worker: asyncio.Future[_Result],
     cancellation: asyncio.CancelledError,
 ) -> _Result:
+    import asyncio  # Deferred: only async publication paths pay asyncio's RSS.
+
     # Join the same operation, including repeated cancellation; never replay it.
     try:
         while not worker.done():
@@ -989,6 +995,8 @@ async def run_filesystem_task(action: Callable[[], _Result]) -> _Result:
         After a cancelled caller's worker has finished owning its resources.
 
     """
+    import asyncio  # Deferred: only async publication paths pay asyncio's RSS.
+
     worker = asyncio.get_running_loop().run_in_executor(None, action)
     try:
         return await asyncio.shield(worker)
@@ -998,6 +1006,8 @@ async def run_filesystem_task(action: Callable[[], _Result]) -> _Result:
 
 
 async def _cleanup_stage_async(temporary: Path) -> None:
+    import asyncio  # Deferred: only async publication paths pay asyncio's RSS.
+
     try:
         await _retry_async(
             lambda: temporary.unlink(missing_ok=True),

@@ -204,6 +204,101 @@ _FINDER = _Finder()
 sys.meta_path.insert(0, _FINDER)
 
 
+class _Generation:
+    """Immutable shared parts of every tree built from one source digest.
+
+    Trees captured from identical bytes share one generation: the source
+    mapping, the compiled code objects and the extracted files. The directory
+    comes from the cross-launch content-addressed store when its bytes verify,
+    so repeated launches reuse one extracted tree; only a private directory
+    the generation itself created is ever deleted - store entries persist for
+    later launches and are revalidated byte-for-byte before reuse.
+    In-memory sharing lives until the last owning tree retires; retention of
+    any owner keeps the files permanently. A private directory's own finalizer
+    is the __del__-free fallback for owners abandoned without retirement.
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "active",
+        "code",
+        "digest",
+        "directory",
+        "retained",
+        "sources",
+        "temporary",
+    )
+
+    def __init__(self, digest_value: str, sources: Mapping[str, bytes]) -> None:
+        self.digest = digest_value
+        self.sources: dict[str, bytes] = dict(sources)
+        self.retained = False
+        self.active = 0
+        self.directory, self.temporary = _generation_directory(digest_value, sources)
+        try:
+            self.code = self._compile()
+        except BaseException:
+            if self.temporary is not None:
+                self.temporary.cleanup()
+            raise
+
+    def _compile(self) -> dict[str, CodeType]:
+        sources: Mapping[str, bytes] = self.sources
+        if "__init__.py" not in sources:
+            sources = {**sources, "__init__.py": b""}
+        return {
+            name: compile(source, str(self.directory / name), "exec")
+            for name, source in sources.items()
+            if name.endswith(".py")
+        }
+
+    def retain(self, *, reason: str) -> None:
+        # Retaining any owner keeps the shared files: a private directory
+        # detaches its finalizer so later releases and finalization never
+        # delete it, while a store-owned directory already persists. Retention
+        # relinquishes in-memory ownership, so the digest is unpublished: new
+        # captures must rebuild or re-verify rather than share unprovable state.
+        with _GENERATIONS_LOCK:
+            if self.retained:
+                return
+            self.retained = True
+            if _GENERATIONS.get(self.digest) is self:
+                del _GENERATIONS[self.digest]
+        if self.temporary is not None:
+            self.temporary.retain(reason=reason)
+
+    def release(self) -> None:
+        # The last owner's retirement unpublishes the digest so a later
+        # capture reconstructs the generation. Only a private, unpromoted
+        # directory is removed; verified store entries stay on disk for
+        # later launches and the prewarmer.
+        with _GENERATIONS_LOCK:
+            self.active -= 1
+            last = self.active == 0 and not self.retained
+            if last and _GENERATIONS.get(self.digest) is self:
+                del _GENERATIONS[self.digest]
+        if last and self.temporary is not None:
+            self.temporary.cleanup()
+
+
+_GENERATIONS: weakref.WeakValueDictionary[str, _Generation] = (
+    weakref.WeakValueDictionary()
+)
+_GENERATIONS_LOCK = threading.Lock()
+
+
+def _shared_generation(digest_value: str, sources: Mapping[str, bytes]) -> _Generation:
+    # Weak registry entries live exactly as long as some tree strongly holds
+    # the generation, so reuse never pins memory beyond the owners' lifetime.
+    with _GENERATIONS_LOCK:
+        generation = _GENERATIONS.get(digest_value)
+        if generation is None:
+            generation = _Generation(digest_value, sources)
+            _GENERATIONS[digest_value] = generation
+        generation.active += 1
+        return generation
+
+
 class SourceTree:
     """Own a compiled, isolated generation of one plugin and its temporary files."""
 
@@ -216,6 +311,10 @@ class SourceTree:
     ) -> None:
         """Validate metadata and compile captured bytes before publishing the tree.
 
+        Trees captured from identical bytes share one immutable generation of
+        sources, compiled code and extracted files; identity parts (prefix,
+        manifest, overrides, finder registration) stay per tree.
+
         Raises
         ------
         ValueError
@@ -225,7 +324,6 @@ class SourceTree:
         self.path = Path(path).resolve()
         self.prefix = "_raychat_plugin_" + uuid.uuid4().hex
         sources = source_files(self.path) if sources is None else dict(sources)
-        self.sources = sources
         self.manifest = Manifest.parse(json_object(sources.get("plugin.json", b"{}")))
         self.overrides = plain(settings or {})
         self.settings = {**self.manifest.defaults, **self.overrides}
@@ -235,31 +333,50 @@ class SourceTree:
             error_message = "Plugin source exceeds the configured size limit."
             raise ValueError(error_message)
         self._retained = False
-        self._temporary: OwnedTemporaryDirectory | None = None
+        self._released = False
         try:
-            self.directory, self._temporary = _generation_directory(
-                self.digest,
-                sources,
-            )
-            self.code = self._compile_sources(sources)
-        except BaseException as exc:
-            if self._temporary is not None:
-                self._temporary.cleanup()
-            if isinstance(exc, Exception):
-                error_message = "compile"
-                raise self.failure(error_message, exc) from exc
-            raise
+            self._generation = _shared_generation(self.digest, sources)
+        except Exception as exc:
+            error_message = "compile"
+            raise self.failure(error_message, exc) from exc
         with _FINDER.lock:
             _FINDER.trees[self.prefix] = self
 
-    def _compile_sources(self, sources: Mapping[str, bytes]) -> dict[str, CodeType]:
-        if "__init__.py" not in sources:
-            sources = {**sources, "__init__.py": b""}
-        return {
-            name: compile(source, str(self.directory / name), "exec")
-            for name, source in sources.items()
-            if name.endswith(".py")
-        }
+    @property
+    def sources(self) -> Mapping[str, bytes]:
+        """Captured source bytes shared by every tree with this digest.
+
+        Returns
+        -------
+        Mapping[str, bytes]
+            The immutable captured file contents keyed by relative name.
+
+        """
+        return self._generation.sources
+
+    @property
+    def code(self) -> Mapping[str, CodeType]:
+        """Compiled code objects shared by every tree with this digest.
+
+        Returns
+        -------
+        Mapping[str, CodeType]
+            The compiled module objects keyed by relative source name.
+
+        """
+        return self._generation.code
+
+    @property
+    def directory(self) -> Path:
+        """Extracted source directory shared by every tree with this digest.
+
+        Returns
+        -------
+        Path
+            The shared generation's temporary directory.
+
+        """
+        return self._generation.directory
 
     def failure(self, operation: str, error: Exception) -> PluginError:
         """Attach package identity and repair guidance to a loading failure.
@@ -366,15 +483,19 @@ class SourceTree:
         """Keep modules and files when resource shutdown cannot be established.
 
         Retention is permanent for this generation. Context cleanup, retirement
-        and finalization must not remove files that a surviving consumer needs.
+        and finalization must not remove files that a surviving consumer needs,
+        so the shared generation keeps its files for every co-owning tree.
 
         """
         self._retained = True
-        if self._temporary is not None:
-            self._temporary.retain(reason=reason)
+        self._generation.retain(reason=reason)
 
     def retire(self) -> None:
-        """Remove generation modules, unregister its finder and release files."""
+        """Remove generation modules, unregister its finder and release files.
+
+        The shared files disappear only when the last tree owning the same
+        generation retires; a retained generation keeps them indefinitely.
+        """
         if self._retained:
             return
         for name in list(sys.modules):
@@ -382,8 +503,9 @@ class SourceTree:
                 sys.modules.pop(name, None)
         with _FINDER.lock:
             _FINDER.trees.pop(self.prefix, None)
-        if self._temporary is not None:
-            self._temporary.cleanup()
+        if not self._released:
+            self._released = True
+            self._generation.release()
 
 
 def _snapshot_text(value: object) -> str:

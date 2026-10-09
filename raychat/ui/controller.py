@@ -860,12 +860,10 @@ def _paint_transcript(
     inner_height = max(0, rect.height - 2)
     viewport = state.viewport(inner_width, inner_height, composition.scroll_offset)
     if composition.selection is not None:
-        composition.selection.reconcile(
-            tuple(line.text for line in state.transcript_rows(inner_width)),
-            inner_width,
-        )
+        texts = state.transcript_rows(inner_width).texts
+        composition.selection.reconcile(texts, inner_width, texts.revision)
     title = "CHAT"
-    if composition.selection is not None and composition.selection.text():
+    if composition.selection is not None and composition.selection.active:
         title += "  SELECTED"
     if viewport.can_scroll_up:
         title += "  ^ OLDER" if composition.ascii_only else "  ↑ OLDER"
@@ -2460,9 +2458,11 @@ class _TuiController:
         if (
             self.picker is None
             and event.kind in {"copy", "interrupt"}
-            and self.view.selection.text()
+            and self.view.selection.active
         ):
-            self.clipboard_jobs.put((self.view, self.view.selection.text()))
+            selected = self.view.selection.text(self._selection_viewport().rows)
+            if selected:
+                self.clipboard_jobs.put((self.view, selected))
             return True
         if event.kind == "control" and event.text == "\x14":  # Ctrl+T
             expanded = self.view.state.toggle_thinking()
@@ -2698,8 +2698,8 @@ class _TuiController:
             max(0, rect.height - 2),
             self.view.scroll_offset,
         )
-        rows = tuple(line.text for line in self.view.state.transcript_rows(inner_width))
-        self.view.selection.reconcile(rows, inner_width)
+        rows = self.view.state.transcript_rows(inner_width).texts
+        self.view.selection.reconcile(rows, inner_width, rows.revision)
         self.view.scroll_offset = viewport.scroll_offset
         return SelectionViewport(
             left=rect.x + 2,
@@ -2728,8 +2728,10 @@ class _TuiController:
                 viewport,
                 released=event.kind == "release",
             )
-            if event.kind == "release" and was_dragging and self.view.selection.text():
-                self.clipboard_jobs.put((self.view, self.view.selection.text()))
+            if event.kind == "release" and was_dragging and self.view.selection.active:
+                selected = self.view.selection.text(viewport.rows)
+                if selected:
+                    self.clipboard_jobs.put((self.view, selected))
         return True
 
     def _advance_selection(self) -> None:
