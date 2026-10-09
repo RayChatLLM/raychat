@@ -96,7 +96,7 @@ class PluginRetirementTests(TypedTestCase):
         self.equal(value, "retained data")
 
     def require_released(self, tree: SourceTree) -> None:
-        """A retired generation must stop serving modules and imports.
+        """Require a retired generation to stop serving modules and imports.
 
         Captured files may outlive the generation inside the shared
         content-addressed store; release is observable as the import

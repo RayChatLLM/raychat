@@ -27,7 +27,6 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from functools import lru_cache
 from io import FileIO, TextIOWrapper
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, TypeVar
@@ -255,9 +254,9 @@ _R = TypeVar("_R")
 _IO_WORKERS = 8
 
 
-@lru_cache(maxsize=1)
-def _shared_io_pool() -> ThreadPoolExecutor:
-    return ThreadPoolExecutor(max_workers=_IO_WORKERS, thread_name_prefix="file-io")
+# Worker threads start lazily on first submission, so creating the pool at
+# import time costs nothing until parallel file work actually happens.
+_IO_POOL = ThreadPoolExecutor(max_workers=_IO_WORKERS, thread_name_prefix="file-io")
 
 
 def map_io(function: Callable[[_T], _R], items: list[_T]) -> Iterator[_R]:
@@ -276,7 +275,7 @@ def map_io(function: Callable[[_T], _R], items: list[_T]) -> Iterator[_R]:
     if len(items) <= _IO_WORKERS:
         return iter(list(map(function, items)))
     chunk = -(-len(items) // _IO_WORKERS)
-    return _shared_io_pool().map(function, items, chunksize=chunk)
+    return _IO_POOL.map(function, items, chunksize=chunk)
 
 
 def is_linked_stat(metadata: os.stat_result) -> bool:

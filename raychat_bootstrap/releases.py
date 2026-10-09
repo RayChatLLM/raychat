@@ -355,7 +355,9 @@ class Releases:
         # imports; the evaluator-only trees (tests, tools, docs, examples,
         # CI metadata) stay frozen in the trusted copy and are captured
         # into a candidate only when proposal changes require validation.
-        fixed_roots = _FIXED_ROOTS if changes is not None else ("raychat_bootstrap",)
+        fixed_roots: tuple[str, ...] = (
+            _FIXED_ROOTS if changes is not None else ("raychat_bootstrap",)
+        )
         for name in (*_RUNTIME_ROOTS, "harness.txt"):
             _copy(source / name, target / name)
         for name in (*fixed_roots, *_FIXED_FILES, "raychat.json"):

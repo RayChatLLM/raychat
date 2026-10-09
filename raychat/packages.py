@@ -553,9 +553,7 @@ def _package_entries(
         prefix, location = pending.pop()
         with os.scandir(location) as scan:
             for member in scan:
-                relative = (
-                    member.name if not prefix else prefix + "/" + member.name
-                )
+                relative = member.name if not prefix else prefix + "/" + member.name
                 if _ignored_member(
                     Path(relative),
                     ignore_finder_metadata=ignore_finder_metadata,
@@ -596,7 +594,7 @@ def _validated_manifest(data: bytes) -> None:
 
 _FILES_CACHE_LIMIT = 64
 _files_cache: dict[
-    tuple[str, bool, bool],
+    tuple[str, bool],
     tuple[tuple[tuple[str, tuple[int, ...]], ...], dict[str, bytes]],
 ] = {}
 _files_cache_lock = threading.Lock()

@@ -56,13 +56,17 @@ def package_manager(
         Path.home() / SETTINGS.storage.home_directory,
         trusted=trusted,
         defer_state=defer_state,
-        contention_timeout=_PROFILE_PATIENCE_SECONDS,
+        contention_timeout=(
+            _PROFILE_PATIENCE_SECONDS if install_profile else _QUICK_CONTENTION_SECONDS
+        ),
     )
-    if install_profile and SETTINGS.plugins.profile:
-        _ensure_profile_with_patience(manager)
+    profile_source = SETTINGS.plugins.profile
+    if install_profile and profile_source:
+        _ensure_profile_with_patience(manager, profile_source)
     return manager
 
 
+_QUICK_CONTENTION_SECONDS = 1.0
 _PROFILE_PATIENCE_SECONDS = 30.0
 _PROFILE_RETRY_DELAY_SECONDS = 0.2
 
@@ -73,7 +77,7 @@ def _retriable_contention(error: Exception, deadline: float) -> bool:
     return str(error).endswith("retry.") and time.monotonic() < deadline
 
 
-def _ensure_profile_with_patience(manager: PackageManager) -> None:
+def _ensure_profile_with_patience(manager: PackageManager, profile: str) -> None:
     """Reconcile the startup profile, waiting out cooperating installers.
 
     A concurrent session or the launch prewarmer may hold a plugin scope or
@@ -82,7 +86,7 @@ def _ensure_profile_with_patience(manager: PackageManager) -> None:
     failing a launch that would succeed moments later. Non-transient
     failures and exhausted patience re-raise the manager's own error.
     """
-    distribution = read_distribution(SETTINGS.plugins.profile)
+    distribution = read_distribution(profile)
     deadline = time.monotonic() + _PROFILE_PATIENCE_SECONDS
 
     def attempt() -> bool:
