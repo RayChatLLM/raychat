@@ -8,17 +8,16 @@ import html
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from raychat.validation import (
-    array_field,
     configuration_fields,
-    json_object,
     object_field,
     text_field,
 )
 
 from .acceptance_support import (
+    completed_review,
+    history_records,
     json_text,
     read_object,
     require,
@@ -28,9 +27,6 @@ from .acceptance_support import (
 
 if TYPE_CHECKING or os.name == "posix":
     from .drive_tui import TerminalChat, TerminalOptions
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 _PROGRESS_SECONDS = 20
 _REMOVE = (
@@ -92,69 +88,6 @@ def _field_matches(screen: str, *, visible: bool) -> bool:
     return ("LIVE RAY FIELD" in sidebar) == visible and graphic == visible
 
 
-def _history(state: Mapping[str, object]) -> list[Mapping[str, object]]:
-    if state.get("state") is None:
-        return []
-    saved = configuration_fields(state["state"], "handoff")
-    session = configuration_fields(saved["session"], "session")
-    return [
-        configuration_fields(item, "history record")
-        for item in array_field(session["history"], "history")
-    ]
-
-
-def completed_review(
-    state: Mapping[str, object],
-    prompt: str,
-    after_messages: int,
-) -> bool:
-    """Require a committed review completion for the current activation request.
-
-    Returns
-    -------
-    bool
-        The latest idle checkpoint ends with a completed review of this
-        request's activated feedback, with no pending or claimed update reviews.
-
-    """
-    if state.get("update_results") or state.get("claimed_results"):
-        return False
-    history = _history(state)[after_messages:]
-    prompts = [item for item in history if item["kind"] == "prompt"]
-    if not prompts or not any(item["content"] == prompt for item in prompts):
-        return False
-    latest = text_field(prompts[-1]["content"], "latest prompt")
-    if not latest.startswith("CORE_UPDATE_RESULT: "):
-        return False
-    feedback = object_field(
-        json_object(latest.removeprefix("CORE_UPDATE_RESULT: ")),
-        "update feedback",
-    )
-    if feedback.get("request") != prompt or feedback.get("status") != "activated":
-        return False
-    final = history[-1]
-    if final["kind"] != "assistant" or final["role"] != "assistant":
-        return False
-    action = object_field(
-        json_object(text_field(final["content"], "assistant completion")),
-        "completion action",
-    )
-    return (
-        action.get("action") == "done"
-        and action.get("pending") is not True
-        and (
-            action.get("host_generated") is not True
-            or (
-                action.get("review_complete") is True
-                and action.get("request_id") == feedback.get("request_id")
-                and isinstance(action.get("request_id"), str)
-            )
-        )
-        and isinstance(action.get("message"), str)
-        and bool(action["message"])
-    )
-
-
 def _transition(
     chat: TerminalChat,
     manifest: Path,
@@ -174,7 +107,7 @@ def _transition(
             state["active"] != previous["active"]
             and "Core updated" in screen
             and "[DONE" in screen.splitlines()[0]
-            and completed_review(state, prompt, len(_history(previous)))
+            and completed_review(state, prompt, len(history_records(previous)))
             and _field_matches(screen, visible=visible)
         ):
             return state

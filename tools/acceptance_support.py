@@ -10,11 +10,18 @@ from typing import TYPE_CHECKING, TypeVar
 
 from raychat.configuration import SETTINGS
 from raychat.distribution import read_distribution
-from raychat.validation import array_field, json_object, object_field, text_field
+from raychat.validation import (
+    array_field,
+    configuration_fields,
+    json_object,
+    object_field,
+    text_field,
+)
 
 if TYPE_CHECKING:
     import argparse
     import re
+    from collections.abc import Mapping
 
 
 def profile_has_plugin(name: str) -> bool:
@@ -234,3 +241,74 @@ def write_report(report: object, *, indent: int | None = None) -> None:
     """Write and flush one JSON report to the invoking terminal."""
     sys.stdout.write(json_text(report, indent=indent) + "\n")
     sys.stdout.flush()
+
+
+def history_records(state: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """Return the validated session history records from an idle checkpoint.
+
+    Returns
+    -------
+    list[Mapping[str, object]]
+        One validated record per saved history message; empty without state.
+
+    """
+    if state.get("state") is None:
+        return []
+    saved = configuration_fields(state["state"], "handoff")
+    session = configuration_fields(saved["session"], "session")
+    return [
+        configuration_fields(item, "history record")
+        for item in array_field(session["history"], "history")
+    ]
+
+
+def completed_review(
+    state: Mapping[str, object],
+    prompt: str,
+    after_messages: int,
+) -> bool:
+    """Require a committed review completion for the current activation request.
+
+    Returns
+    -------
+    bool
+        The latest idle checkpoint ends with a completed review of this
+        request's activated feedback, with no pending or claimed update reviews.
+
+    """
+    if state.get("update_results") or state.get("claimed_results"):
+        return False
+    history = history_records(state)[after_messages:]
+    prompts = [item for item in history if item["kind"] == "prompt"]
+    if not prompts or not any(item["content"] == prompt for item in prompts):
+        return False
+    latest = text_field(prompts[-1]["content"], "latest prompt")
+    if not latest.startswith("CORE_UPDATE_RESULT: "):
+        return False
+    feedback = object_field(
+        json_object(latest.removeprefix("CORE_UPDATE_RESULT: ")),
+        "update feedback",
+    )
+    if feedback.get("request") != prompt or feedback.get("status") != "activated":
+        return False
+    final = history[-1]
+    if final["kind"] != "assistant" or final["role"] != "assistant":
+        return False
+    action = object_field(
+        json_object(text_field(final["content"], "assistant completion")),
+        "completion action",
+    )
+    return (
+        action.get("action") == "done"
+        and action.get("pending") is not True
+        and (
+            action.get("host_generated") is not True
+            or (
+                action.get("review_complete") is True
+                and action.get("request_id") == feedback.get("request_id")
+                and isinstance(action.get("request_id"), str)
+            )
+        )
+        and isinstance(action.get("message"), str)
+        and bool(action["message"])
+    )

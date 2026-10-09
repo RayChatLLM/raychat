@@ -30,7 +30,7 @@ from tests.assertions import TypedTestCase
 from tests.test_live_recovery_qa import RecordingCore, RecoveryHarness
 from tests.test_tui_sessions import Scheduler, Terminal
 from tests.tui_support import arguments
-from tools.live_agent_tui import completed_review
+from tools.acceptance_support import completed_review
 
 if TYPE_CHECKING:
     import argparse
