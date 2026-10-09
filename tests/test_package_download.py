@@ -480,9 +480,11 @@ class PackageProxyTests(PackageTestCase):
             def bypass(_host: str) -> bool:
                 return False
 
+            # The manager imports proxy discovery lazily from urllib.request,
+            # so system discovery is patched at its source module.
             with (
-                mock.patch("raychat.plugin_manager.getproxies", new=proxies),
-                mock.patch("raychat.plugin_manager.proxy_bypass", new=bypass),
+                mock.patch("urllib.request.getproxies", new=proxies),
+                mock.patch("urllib.request.proxy_bypass", new=bypass),
             ):
                 target = "http://127.0.0.1:9/package?release=1#fragment"
                 self.equal(download(target), b"proxy response")

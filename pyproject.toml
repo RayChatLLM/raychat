@@ -19,6 +19,13 @@ ignore = ["missing-copyright-notice"]
 "tests/test_tui_state.py" = ["too-many-public-methods"]
 # Spill tests must reset the module's cached store between environments.
 "tests/test_text_store.py" = ["private-member-access"]
+# Deferred runtime-only imports: asyncio (and the ssl it pulls in) costs ~10 MiB
+# RSS, so these modules import it only when an operation actually runs.
+"raychat/filesystem.py" = ["import-outside-top-level"]
+"raychat/transport.py" = ["import-outside-top-level"]
+"raychat/ui/clipboard.py" = ["import-outside-top-level"]
+# Only catalog/package downloads need urllib.request and the HTTP debug stack.
+"raychat/plugin_manager.py" = ["import-outside-top-level"]
 # Seeded optimization sampling must reproduce the existing search sequence.
 "plugins/optimization/gepa/batch_sampler.py" = ["suspicious-non-cryptographic-random-usage"]
 "plugins/optimization/gepa/candidate_selector.py" = ["suspicious-non-cryptographic-random-usage"]
