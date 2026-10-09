@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import itertools
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,7 +29,7 @@ from raychat.validation import (
 )
 
 from .configuration import load as load_settings
-from .summaries import clip, messages_size, summary_line
+from .summaries import clip, summary_line
 
 _namespace: object = globals()
 _PLUGIN_SETTINGS = load_settings(_namespace)
@@ -72,6 +74,49 @@ def digest_header(message_count: int) -> str:
         "Re-read files before editing or claiming what they contain, and "
         "re-run checks before reporting them as passing."
     )
+
+
+def message_size(message: SessionMessage | Mapping[str, str]) -> int:
+    """Measure one message's serialized length, preferring its memoized size.
+
+    Returns
+    -------
+    int
+        The exact length ``messages_size`` attributes to this message's dict,
+        including JSON string escaping, without materializing a stored body
+        when the record carries a precomputed ``message_chars``.
+
+    """
+    memoized = cast("int | None", getattr(message, "message_chars", None))
+    if memoized is not None:
+        return memoized
+    payload = message if isinstance(message, Mapping) else message.as_message()
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def _entry_size(role: str, content: str) -> int:
+    """Measure one synthetic provider message built from in-hand strings.
+
+    Returns
+    -------
+    int
+        The serialized dict length for this role and content.
+
+    """
+    message: dict[str, str] = {"role": role, "content": content}
+    return len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+
+
+def _list_chars(sizes: list[int]) -> int:
+    """Compose a serialized message-list length from per-item sizes.
+
+    Returns
+    -------
+    int
+        Brackets, items and separating commas, matching ``messages_size``.
+
+    """
+    return 2 + sum(sizes) + max(0, len(sizes) - 1)
 
 
 def _prompt_source(message: SessionMessage, limit: int) -> str:
@@ -296,6 +341,35 @@ class ContextPolicy:
             *result,
         ]
 
+    def _full_size(self, instructions: str) -> int:
+        """Measure the full-history request without materializing stored bodies.
+
+        Returns
+        -------
+        int
+            Exactly ``messages_size`` of ``_full_messages(instructions)``.
+
+        Raises
+        ------
+        RuntimeError
+            If the input or semantic history violates this operation's contract.
+
+        """
+        sizes = [message_size(message) for message in self.history]
+        if self.session.instruction_role == "user":
+            if not self.history or self.history[0].role != "user":
+                error_message = "AgentSession conversation invariant was violated."
+                raise RuntimeError(error_message)
+            sizes[0] = _entry_size(
+                "user",
+                instructions + "\n\n--- USER TASK ---\n" + self.history[0].content,
+            )
+            return _list_chars(sizes)
+        return _list_chars([
+            _entry_size(self.session.instruction_role, instructions),
+            *sizes,
+        ])
+
     def _compacted_messages(self, instructions: str, active_index: int) -> Messages:
         return _Compaction(self, instructions, active_index).messages()
 
@@ -328,9 +402,8 @@ class ContextPolicy:
             raise RuntimeError(error_message)
         active = self.history[active_index]
         instructions = self.select_instruction(active.content)
-        full = self._full_messages(instructions)
-        if messages_size(full) <= self.session.context_chars:
-            return full
+        if self._full_size(instructions) <= self.session.context_chars:
+            return self._full_messages(instructions)
         return self._compacted_messages(instructions, active_index)
 
 
@@ -519,10 +592,93 @@ class _Compaction:
             raise RuntimeError(error_message)
         return candidate
 
+    def candidate_size(
+        self,
+        prior_digest: str | None,
+        raw_prior: list[SessionMessage],
+        active_digest: str | None,
+        raw_active: list[SessionMessage],
+    ) -> int:
+        """Measure a would-be candidate without materializing stored bodies.
+
+        Mirrors ``build_candidate`` branch for branch, composing the exact
+        ``messages_size`` from the synthetic anchors it would construct and
+        the memoized sizes of the raw history records it would include.
+
+        Returns
+        -------
+        int
+            Exactly ``messages_size`` of the same ``build_candidate`` result.
+
+        Raises
+        ------
+        RuntimeError
+            If the input or semantic history violates this operation's contract.
+
+        """
+        active_content = self.active.content
+        if active_digest is not None:
+            active_content += COMPACTION_SEPARATOR + active_digest
+        instruction_role = self.policy.session.instruction_role
+
+        sizes: list[int]
+        if prior_digest is None:
+            if raw_prior:
+                error_message = "AgentSession conversation invariant was violated."
+                raise RuntimeError(
+                    error_message,
+                )
+            if instruction_role == "user":
+                sizes = [
+                    _entry_size(
+                        "user",
+                        self.instructions + "\n\n--- USER TASK ---\n" + active_content,
+                    ),
+                ]
+            else:
+                sizes = [
+                    _entry_size(instruction_role, self.instructions),
+                    _entry_size("user", active_content),
+                ]
+        elif instruction_role == "user":
+            anchor = (
+                self.instructions
+                + "\n\n--- HOST-GENERATED PRIOR HISTORY ---\n"
+                + prior_digest
+            )
+            if raw_prior:
+                sizes = [
+                    _entry_size("user", anchor),
+                    *(message_size(message) for message in raw_prior),
+                    _entry_size("user", active_content),
+                ]
+            else:
+                sizes = [
+                    _entry_size(
+                        "user",
+                        anchor + "\n\n--- USER TASK ---\n" + active_content,
+                    ),
+                ]
+        else:
+            sizes = [_entry_size(instruction_role, self.instructions)]
+            if raw_prior:
+                sizes.append(_entry_size("user", prior_digest))
+                sizes.extend(message_size(message) for message in raw_prior)
+                sizes.append(_entry_size("user", active_content))
+            else:
+                sizes.append(
+                    _entry_size(
+                        "user",
+                        prior_digest + "\n\n--- USER TASK ---\n" + active_content,
+                    ),
+                )
+        sizes.extend(message_size(message) for message in raw_active)
+        return _list_chars(sizes)
+
     def model_digest(
         self,
         items: list[SessionMessage],
-        candidate_with: Callable[[str], Messages],
+        size_with: Callable[[str], int],
     ) -> str | None:
         """Ask the configured model to write the compaction brief.
 
@@ -565,8 +721,7 @@ class _Compaction:
         digest = (
             digest_header(len(items)) + "\n" + reply.strip()[:_MODEL_DIGEST_REPLY_CHARS]
         )
-        candidate = candidate_with(digest)
-        if messages_size(candidate) <= self.policy.session.context_chars:
+        if size_with(digest) <= self.policy.session.context_chars:
             return digest
         return None
 
@@ -574,11 +729,11 @@ class _Compaction:
         self,
         items: list[SessionMessage],
         minimum: str | None,
-        candidate_with: Callable[[str], Messages],
+        size_with: Callable[[str], int],
     ) -> str | None:
         if not items or minimum is None:
             return None
-        model = self.model_digest(items, candidate_with)
+        model = self.model_digest(items, size_with)
         if model is not None:
             return model
         digest_limit = self.policy.session.context_chars
@@ -587,8 +742,7 @@ class _Compaction:
                 digest = session_digest(items, digest_limit)
             except ValueError:
                 break
-            candidate = candidate_with(digest)
-            candidate_size = messages_size(candidate)
+            candidate_size = size_with(digest)
             if candidate_size <= self.policy.session.context_chars:
                 return digest
             overflow = candidate_size - self.policy.session.context_chars
@@ -605,13 +759,10 @@ class _Compaction:
 
             prior_digest = _minimum_digest(old_prior)
             active_digest = _minimum_digest(old_active)
-            candidate = self.build_candidate(
-                prior_digest,
-                raw_prior,
-                active_digest,
-                raw_active,
-            )
-            if messages_size(candidate) > self.policy.session.context_chars:
+            if (
+                self.candidate_size(prior_digest, raw_prior, active_digest, raw_active)
+                > self.policy.session.context_chars
+            ):
                 continue
 
             def with_active_digest(
@@ -620,16 +771,16 @@ class _Compaction:
                 prior_digest: str | None = prior_digest,
                 raw_prior: list[SessionMessage] = raw_prior,
                 raw_active: list[SessionMessage] = raw_active,
-            ) -> Messages:
-                """With active digest.
+            ) -> int:
+                """Size the would-be candidate carrying this active digest.
 
                 Returns
                 -------
-                Messages
+                int
                     The checked result described above.
 
                 """
-                return self.build_candidate(prior_digest, raw_prior, digest, raw_active)
+                return self.candidate_size(prior_digest, raw_prior, digest, raw_active)
 
             active_digest = self.enrich_digest(
                 old_active,
@@ -643,16 +794,16 @@ class _Compaction:
                 raw_prior: list[SessionMessage] = raw_prior,
                 active_digest: str | None = active_digest,
                 raw_active: list[SessionMessage] = raw_active,
-            ) -> Messages:
-                """With prior digest.
+            ) -> int:
+                """Size the would-be candidate carrying this prior digest.
 
                 Returns
                 -------
-                Messages
+                int
                     The checked result described above.
 
                 """
-                return self.build_candidate(
+                return self.candidate_size(
                     digest,
                     raw_prior,
                     active_digest,
@@ -664,14 +815,16 @@ class _Compaction:
                 prior_digest,
                 with_prior_digest,
             )
-            candidate = self.build_candidate(
-                prior_digest,
-                raw_prior,
-                active_digest,
-                raw_active,
-            )
-            if messages_size(candidate) <= self.policy.session.context_chars:
-                return candidate
+            if (
+                self.candidate_size(prior_digest, raw_prior, active_digest, raw_active)
+                <= self.policy.session.context_chars
+            ):
+                return self.build_candidate(
+                    prior_digest,
+                    raw_prior,
+                    active_digest,
+                    raw_active,
+                )
         error_message = "Context budget is too small to compact this conversation."
         raise ValueError(error_message)
 
@@ -713,5 +866,6 @@ class _InstructionSearch:
                     digest_reserve + "\n\n--- USER TASK ---\n" + active_content
                 )
             floor.append({"role": "user", "content": active_content})
-        floor.extend(message.as_message() for message in recent_active)
-        return messages_size(floor) <= self.policy.session.context_chars, instructions
+        sizes = [message_size(message) for message in floor]
+        sizes.extend(message_size(message) for message in recent_active)
+        return _list_chars(sizes) <= self.policy.session.context_chars, instructions

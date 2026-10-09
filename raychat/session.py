@@ -130,6 +130,21 @@ class _CoreReview(Protocol):
         ...
 
 
+def _message_chars(role: str, content: str) -> int:
+    """Measure the serialized provider-message length used for context fitting.
+
+    Returns
+    -------
+    int
+        The exact character count ``json.dumps`` gives this message's dict
+        inside a serialized message list (``ensure_ascii=False`` with compact
+        separators), including JSON string escaping of the content.
+
+    """
+    message: dict[str, str] = {"role": role, "content": content}
+    return len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+
+
 @dataclass(frozen=True, slots=True)
 class _StoredMessage:
     """Keep validated history with large bodies spilled to the launch database."""
@@ -138,6 +153,9 @@ class _StoredMessage:
     payload: str | TextRef
     kind: str
     prompt_id: int
+    # The serialized provider-message length, memoized while the complete
+    # content is in hand so context fitting never refetches spilled bodies.
+    message_chars: int
     # The first stored characters let compaction digests clip spilled prompts
     # without rereading complete bodies from the launch database.
     head: str = ""
@@ -200,8 +218,16 @@ def _history_message(value: object) -> _StoredMessage:
         kind=_text(fields["kind"]),
         prompt_id=integer_field(fields["prompt_id"], "history prompt identifier"),
     )
-    head = fetch(payload)[:_HEAD_CHARS] if isinstance(payload, TextRef) else ""
-    return _StoredMessage(message.role, payload, message.kind, message.prompt_id, head)
+    content = fetch(payload) if isinstance(payload, TextRef) else payload
+    head = content[:_HEAD_CHARS] if isinstance(payload, TextRef) else ""
+    return _StoredMessage(
+        message.role,
+        payload,
+        message.kind,
+        message.prompt_id,
+        message_chars=_message_chars(message.role, content),
+        head=head,
+    )
 
 
 def _snapshot_parts(
@@ -784,7 +810,16 @@ class AgentSession:
         message = SessionMessage(role, content, kind, prompt_id)
         payload = spill(content)
         head = content[:_HEAD_CHARS] if isinstance(payload, TextRef) else ""
-        self._history.append(_StoredMessage(role, payload, kind, prompt_id, head))
+        self._history.append(
+            _StoredMessage(
+                role,
+                payload,
+                kind,
+                prompt_id,
+                message_chars=_message_chars(message.role, message.content),
+                head=head,
+            ),
+        )
         if self.store is not None:
             self.store.append("message", _history_record(message))
         if log:
