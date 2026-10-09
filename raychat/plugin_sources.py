@@ -16,7 +16,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, TypedDict
 
-from raychat.filesystem import OwnedTemporaryDirectory
+from raychat.filesystem import OwnedTemporaryDirectory, map_io
 from raychat.packages import MAX_BYTES, MAX_FILES, Manifest, safe_name
 from raychat.packages import digest as _digest
 from raychat.packages import files as source_files
@@ -76,11 +76,19 @@ def _store_matches(directory: Path, sources: Mapping[str, bytes]) -> bool:
     return True
 
 
+def _write_generation_member(item: tuple[Path, bytes]) -> None:
+    item[0].write_bytes(item[1])
+
+
 def _write_sources(directory: Path, sources: Mapping[str, bytes]) -> None:
-    for name, data in sources.items():
-        target = directory.joinpath(*safe_name(name).parts)
+    staged = [
+        (directory.joinpath(*safe_name(name).parts), data)
+        for name, data in sources.items()
+    ]
+    for target, _data in staged:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+    for result in map_io(_write_generation_member, staged):
+        del result
 
 
 def _generation_directory(

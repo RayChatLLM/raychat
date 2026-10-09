@@ -22,6 +22,7 @@ from raychat.event_types import CONFIGURE, Lifecycle
 from .filesystem import (
     FileLock,
     OwnedTemporaryDirectory,
+    map_io,
     read_regular,
     write_bytes,
 )
@@ -635,6 +636,10 @@ class _SourceOwnership(threading.local):
     def __init__(self) -> None:
         self.scopes: set[str] = set()
         self.held = ExitStack()
+
+
+def _write_staged(item: tuple[Path, bytes]) -> None:
+    item[0].write_bytes(item[1])
 
 
 class PackageManager:
@@ -1294,10 +1299,11 @@ class PackageManager:
         path = Path(resolved)
         if not _has_url_scheme(resolved) and path.is_dir():
             members = files(path)
-            for name, data in members.items():
-                destination = target / name
+            staged = [(target / name, data) for name, data in members.items()]
+            for destination, _data in staged:
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(data)
+            for result in map_io(_write_staged, staged):
+                del result
             archive_hash = hashlib.sha256(pack(path)).hexdigest()
         else:
             data = download(resolved) if _has_url_scheme(resolved) else read_bytes(path)

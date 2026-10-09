@@ -857,6 +857,10 @@ def _archive_members(data: bytes) -> dict[str, bytes]:
     return members
 
 
+def _write_member(item: tuple[Path, bytes]) -> None:
+    item[0].write_bytes(item[1])
+
+
 def unpack(data: bytes, destination: str | Path) -> Path:
     """Validate every archive member before extracting to an empty directory.
 
@@ -898,10 +902,14 @@ def unpack(data: bytes, destination: str | Path) -> Path:
     ):
         error_message = "Archive destination must be an empty directory."
         raise PluginError(error_message)
-    for name, value in members.items():
-        path = destination.joinpath(*safe_name(name).parts)
+    staged = [
+        (destination.joinpath(*safe_name(name).parts), value)
+        for name, value in members.items()
+    ]
+    for path, _value in staged:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(value)
+    for result in map_io(_write_member, staged):
+        del result
     return destination
 
 
