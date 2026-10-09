@@ -549,7 +549,17 @@ async def _await_done(
         if op == "done":
             return frame
         if op in {"llm", "rlm"}:
+            # The exec timeout bounds the child's own computation. Time the
+            # host spends answering llm()/rlm() RPCs - a nested run can take
+            # minutes - must not count against it, or any delegating round
+            # times out by construction. The run-wide deadline still caps
+            # the extension.
+            serviced_from = time.monotonic()
             await _service_child_rpc(run, state, io_pair, frame)
+            exec_deadline = min(
+                exec_deadline + (time.monotonic() - serviced_from),
+                state.deadline,
+            )
             continue
         state.stopped = f"protocol error: bad child op {op!r}"
         return None
