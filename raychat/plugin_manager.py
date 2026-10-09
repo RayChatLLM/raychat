@@ -659,11 +659,19 @@ class PackageManager:
         *,
         trusted: bool = False,
         defer_state: bool = False,
+        contention_timeout: float = 1.0,
     ) -> None:
-        """Load receipts now, or on first use by a runtime with captured sources."""
+        """Load receipts now, or on first use by a runtime with captured sources.
+
+        ``contention_timeout`` bounds how long scope-lock acquisitions wait
+        for a cooperating writer (another session or the launch prewarmer)
+        before reporting contention; startup composition passes a patient
+        budget while short-lived tooling keeps the quick default.
+        """
         self.workspace = Path(workspace).resolve()
         self.home = Path(home).resolve()
         self.trusted = trusted
+        self.contention_timeout = contention_timeout
         self.runtime: Runtime | None = None
         self._stale_catalogs: set[str] = set()
         self.roots = {"workspace": self.workspace / ".raychat", "user": self.home}
@@ -703,9 +711,15 @@ class PackageManager:
         return lock
 
     @contextmanager
-    def _locked_scope(self, scope: str, *, timeout: float = 1.0) -> Iterator[None]:
+    def _locked_scope(
+        self,
+        scope: str,
+        *,
+        timeout: float | None = None,
+    ) -> Iterator[None]:
+        budget = self.contention_timeout if timeout is None else timeout
         with ExitStack() as held:
-            held.push(self._acquire_scope(scope, timeout=timeout))
+            held.push(self._acquire_scope(scope, timeout=budget))
             yield
 
     def state_file(self, scope: str) -> Path:

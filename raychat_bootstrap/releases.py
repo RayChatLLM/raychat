@@ -254,6 +254,19 @@ def seal(root: Path) -> str:
     return identity
 
 
+def prepared_initial(source: Path, directory: Path) -> tuple[Releases, Release]:
+    """Build the release owner and its sealed initial capture in one step.
+
+    Returns
+    -------
+    tuple[Releases, Release]
+        The releases owner bound to ``directory`` and the sealed capture.
+
+    """
+    releases = Releases(source, directory)
+    return releases, releases.initial()
+
+
 @dataclass(frozen=True)
 class Release:
     """Identify immutable code independently of its activation state."""
@@ -338,9 +351,14 @@ class Releases:
         target: Path,
         changes: Mapping[str, bytes] | None,
     ) -> None:
+        # The initial launch capture carries exactly what a running core
+        # imports; the evaluator-only trees (tests, tools, docs, examples,
+        # CI metadata) stay frozen in the trusted copy and are captured
+        # into a candidate only when proposal changes require validation.
+        fixed_roots = _FIXED_ROOTS if changes is not None else ("raychat_bootstrap",)
         for name in (*_RUNTIME_ROOTS, "harness.txt"):
             _copy(source / name, target / name)
-        for name in (*_FIXED_ROOTS, *_FIXED_FILES, "raychat.json"):
+        for name in (*fixed_roots, *_FIXED_FILES, "raychat.json"):
             _copy(self.trusted / name, target / name)
         paths = PortablePathIndex()
         for item, info in _entries(target):

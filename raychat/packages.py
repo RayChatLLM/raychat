@@ -561,7 +561,7 @@ def _package_entries(
                     ignore_finder_metadata=ignore_finder_metadata,
                 ):
                     continue
-                member_info = member.stat(follow_symlinks=False)
+                member_info = os.lstat(member.path)
                 directory = _checked_entry_info(member_info, member.path)
                 paths.add(relative, directory=directory)
                 entries.append((Path(member.path), member_info))
@@ -647,7 +647,10 @@ def _inventory(
                     ignore_finder_metadata=ignore_finder_metadata,
                 ):
                     continue
-                info = entry.stat(follow_symlinks=False)
+                # A full lstat keeps inode fields populated on every
+                # platform (scandir's cached Windows metadata zeroes them),
+                # so version vectors compare equal across collection sites.
+                info = os.lstat(entry.path)
                 if is_linked_stat(info):
                     raise PluginError(
                         "Package links or reparse points are not supported: "

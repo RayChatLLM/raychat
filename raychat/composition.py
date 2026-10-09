@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from .packages import dependency_order, read_manifest
 from .plugin_manager import PackageManager
 from .plugin_sources import SourceTree
 from .plugins import Runtime
+from .sdk import PluginError
 from .session import AgentSession
 from .session_options import (
     SEND_FIELDS,
@@ -54,10 +56,46 @@ def package_manager(
         Path.home() / SETTINGS.storage.home_directory,
         trusted=trusted,
         defer_state=defer_state,
+        contention_timeout=_PROFILE_PATIENCE_SECONDS,
     )
     if install_profile and SETTINGS.plugins.profile:
-        manager.ensure_profile(read_distribution(SETTINGS.plugins.profile))
+        _ensure_profile_with_patience(manager)
     return manager
+
+
+_PROFILE_PATIENCE_SECONDS = 30.0
+_PROFILE_RETRY_DELAY_SECONDS = 0.2
+
+
+def _retriable_contention(error: Exception, deadline: float) -> bool:
+    # Cooperating installers signal transient conditions with messages that
+    # end in "retry." by contract (scope lock contention, state advanced).
+    return str(error).endswith("retry.") and time.monotonic() < deadline
+
+
+def _ensure_profile_with_patience(manager: PackageManager) -> None:
+    """Reconcile the startup profile, waiting out cooperating installers.
+
+    A concurrent session or the launch prewarmer may hold a plugin scope or
+    advance its state mid-reconciliation; both raise transient, retriable
+    conditions, so startup retries them for a bounded period instead of
+    failing a launch that would succeed moments later. Non-transient
+    failures and exhausted patience re-raise the manager's own error.
+    """
+    distribution = read_distribution(SETTINGS.plugins.profile)
+    deadline = time.monotonic() + _PROFILE_PATIENCE_SECONDS
+
+    def attempt() -> bool:
+        try:
+            manager.ensure_profile(distribution)
+        except (PluginError, RuntimeError) as error:
+            if not _retriable_contention(error, deadline):
+                raise
+            return False
+        return True
+
+    while not attempt():
+        time.sleep(_PROFILE_RETRY_DELAY_SECONDS)
 
 
 @dataclass(frozen=True, kw_only=True)

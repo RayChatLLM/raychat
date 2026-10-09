@@ -6,6 +6,7 @@ import base64
 import importlib.abc
 import importlib.util
 import sys
+import tempfile
 import threading
 import uuid
 import weakref
@@ -53,6 +54,56 @@ def fingerprint(path: str | Path) -> str:
 
     """
     return _digest(source_files(path, validate_manifest=False))
+
+
+# Generations are content-addressed and shared across launches and between
+# the prewarmer and the core: creating hundreds of files is the expensive
+# operation (antivirus scans every new file), while re-reading existing
+# bytes is cheap. A stored tree is only ever used after byte-for-byte
+# comparison with the captured sources already held in memory, so a stale,
+# foreign or tampered entry can never be imported - it fails the comparison
+# and a fresh private tree is built and promoted with an atomic rename.
+_GENERATION_STORE = Path(tempfile.gettempdir()) / "raychat-generation-store"
+
+
+def _store_matches(directory: Path, sources: Mapping[str, bytes]) -> bool:
+    try:
+        for name, data in sources.items():
+            if directory.joinpath(*safe_name(name).parts).read_bytes() != data:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _write_sources(directory: Path, sources: Mapping[str, bytes]) -> None:
+    for name, data in sources.items():
+        target = directory.joinpath(*safe_name(name).parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+
+def _generation_directory(
+    digest_value: str,
+    sources: Mapping[str, bytes],
+) -> tuple[Path, OwnedTemporaryDirectory | None]:
+    stored = _GENERATION_STORE / digest_value
+    if _store_matches(stored, sources):
+        return stored.resolve(), None
+    temporary = OwnedTemporaryDirectory(prefix="raychat-generation-")
+    private = Path(temporary.name).resolve()
+    _write_sources(private, sources)
+    try:
+        _GENERATION_STORE.mkdir(parents=True, exist_ok=True)
+        Path(private).replace(stored)
+    except OSError:
+        # Another process promoted the same digest first, or the store is
+        # unavailable; use whichever verified tree exists.
+        if _store_matches(stored, sources):
+            temporary.cleanup()
+            return stored.resolve(), None
+        return private, temporary
+    return stored.resolve(), None
 
 
 class _Module(ModuleType):
@@ -175,13 +226,17 @@ class SourceTree:
         if len(sources) > MAX_FILES or sum(map(len, sources.values())) > MAX_BYTES:
             error_message = "Plugin source exceeds the configured size limit."
             raise ValueError(error_message)
-        self._temporary = OwnedTemporaryDirectory(prefix="raychat-generation-")
         self._retained = False
-        self.directory = Path(self._temporary.name).resolve()
+        self._temporary: OwnedTemporaryDirectory | None = None
         try:
+            self.directory, self._temporary = _generation_directory(
+                self.digest,
+                sources,
+            )
             self.code = self._compile_sources(sources)
         except BaseException as exc:
-            self._temporary.cleanup()
+            if self._temporary is not None:
+                self._temporary.cleanup()
             if isinstance(exc, Exception):
                 error_message = "compile"
                 raise self.failure(error_message, exc) from exc
@@ -190,10 +245,6 @@ class SourceTree:
             _FINDER.trees[self.prefix] = self
 
     def _compile_sources(self, sources: Mapping[str, bytes]) -> dict[str, CodeType]:
-        for name, data in sources.items():
-            target = self.directory.joinpath(*safe_name(name).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
         if "__init__.py" not in sources:
             sources = {**sources, "__init__.py": b""}
         return {
@@ -311,7 +362,8 @@ class SourceTree:
 
         """
         self._retained = True
-        self._temporary.retain(reason=reason)
+        if self._temporary is not None:
+            self._temporary.retain(reason=reason)
 
     def retire(self) -> None:
         """Remove generation modules, unregister its finder and release files."""
@@ -322,7 +374,8 @@ class SourceTree:
                 sys.modules.pop(name, None)
         with _FINDER.lock:
             _FINDER.trees.pop(self.prefix, None)
-        self._temporary.cleanup()
+        if self._temporary is not None:
+            self._temporary.cleanup()
 
 
 def _snapshot_text(value: object) -> str:

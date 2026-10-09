@@ -71,11 +71,18 @@ def main() -> int:
 
 
 def _launch(*, interactive: bool) -> int:
+    root = Path(__file__).resolve().parent
+    if interactive and "RAYCHAT_RECOVERY" not in os.environ:
+        # Launch preparation (release capture, plugin installation) overlaps
+        # the provider wizard and connection checks on background threads.
+        begin: object = importlib.import_module("raychat_bootstrap.prelaunch").begin
+        if callable(begin):
+            begin(root, Path.cwd())
     setup: object = importlib.import_module("raychat.provider_setup").prepare
     if not isinstance(setup, _ProviderSetup):
         message = "The provider setup entrypoint is unavailable."
         raise TypeError(message)
-    status = setup(Path(__file__).resolve().parent, interactive=interactive)
+    status = setup(root, interactive=interactive)
     if status is not None:
         return status
     module = "raychat_bootstrap.supervisor" if interactive else "raychat.entrypoint"

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +95,16 @@ class PluginRetirementTests(TypedTestCase):
         value: object = getattr(tree.load("later"), "VALUE", None)
         self.equal(value, "retained data")
 
+    def require_released(self, tree: SourceTree) -> None:
+        """A retired generation must stop serving modules and imports.
+
+        Captured files may outlive the generation inside the shared
+        content-addressed store; release is observable as the import
+        machinery refusing the generation's namespace.
+        """
+        self.require(importlib.util.find_spec(tree.prefix) is None)
+        self.require(tree.prefix not in sys.modules)
+
     def test_close_failure_keeps_source_files_and_delayed_imports(self) -> None:
         """A failed cleanup callback runs once and leaves its generation usable."""
         tree = self.capture("fixture", _FAILED_CLOSE)
@@ -179,7 +191,8 @@ class PluginRetirementTests(TypedTestCase):
         self.require_retained(old)
         current = list(runtime.source_trees)
         runtime.close()
-        self.require(all(not tree.directory.exists() for tree in current))
+        for tree in current:
+            self.require_released(tree)
 
     def test_transferred_resources_keep_old_files_until_runtime_shutdown(self) -> None:
         """Skipping cleanup for a handoff extends the captured source lifetime."""
@@ -194,8 +207,9 @@ class PluginRetirementTests(TypedTestCase):
         self.equal(value, "retained data")
         current = list(runtime.source_trees)
         runtime.close()
-        self.require(not old.directory.exists())
-        self.require(all(not tree.directory.exists() for tree in current))
+        self.require_released(old)
+        for tree in current:
+            self.require_released(tree)
 
     def test_rejected_handoff_keeps_candidate_files_until_runtime_shutdown(
         self,
@@ -218,8 +232,8 @@ class PluginRetirementTests(TypedTestCase):
         self.equal(len(staged), 1)
         self.require(staged[0].directory.is_dir())
         runtime.close()
-        self.require(not old.directory.exists())
-        self.require(not staged[0].directory.exists())
+        self.require_released(old)
+        self.require_released(staged[0])
 
     def test_registration_failure_does_not_close_a_transferred_resource(self) -> None:
         """A partly registered replacement must preserve existing resource owners."""
@@ -257,7 +271,7 @@ class PluginRetirementTests(TypedTestCase):
         calls: object = getattr(staged[0].entrypoint(), "calls", None)
         self.equal(calls, 0)
         runtime.close()
-        self.require(not staged[0].directory.exists())
+        self.require_released(staged[0])
 
 
 class PluginRuntimeTests(TypedTestCase):
