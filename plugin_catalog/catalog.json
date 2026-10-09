@@ -88,7 +88,7 @@
       "instructions": "Plugin instructions are assembled and conversation history is compacted to the configured character budget automatically. HOST_COMPACTION is a factual digest of older content: treat digested or remembered file contents as stale, and re-read a file before editing it or claiming exact details a digest omitted.",
       "requires": {},
       "sdk": 4,
-      "sha256": "78bf307c0f44ca8c39e1d76c289500be3da76106035e5789666184f4e31598f1",
+      "sha256": "b6c7c8b81227beea38d23399d2b1e74eee22358e3578dc04e395de362aa17c3c",
       "url": "context-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -106,7 +106,7 @@
       "instructions": "Inspect and modify workspace files with list, read, write and edit. Examples: {\"action\":\"list\",\"path\":\".\"}, {\"action\":\"read\",\"path\":\"notes.txt\"}, {\"action\":\"write\",\"path\":\"notes.txt\",\"content\":\"new text\"}. Read is paginated: follow next_offset when truncated. read limit is at most 16384 bytes and list limit at most 200 entries; larger requests are clamped to the maximum. The easiest edit is find/replace: {\"action\":\"edit\",\"path\":\"f.py\",\"find\":\"<exact current text>\",\"replace\":\"<new text>\"} replaces one unique occurrence - no offsets or hashes; if find matches several places, include more surrounding lines. The byte form (start/end/content/expected_sha256 from a fresh read) remains for precise ranges. Only enabled actions are available; writes and edits require the host approval policy. Paths are workspace-relative and confined to the workspace; an absolute path inside the workspace is accepted. list accepts cursor and limit; follow next_cursor. read offset/limit and edit start/end count bytes; edits require UTF-8 character boundaries. content_base64 is authoritative when present. write atomically replaces the whole file; edit atomically replaces [start,end) only if expected_sha256 still matches. Create long files in pieces: write the first part, then add each next part with {\"action\":\"write\",\"path\":...,\"content\":...,\"append\":true} - a single very long write risks a truncated reply.",
       "requires": {},
       "sdk": 4,
-      "sha256": "a047ddecfe96607edae09fb56e31e12d06aa28facc718db4e0822d4c5feaeddd",
+      "sha256": "5c3ab167cd157c4522d501e5dae39f8ad9692c6ca55dddee5d2efc0dbf73f292",
       "url": "filesystem-1.0.0.zip",
       "version": "1.0.0"
     },
@@ -298,11 +298,38 @@
       "description": "process capabilities",
       "entrypoint": "__init__:register",
       "id": "process",
-      "instructions": "Run tests or programs with {\"action\":\"run\",\"argv\":[\"python3\",\"-B\",\"-S\",\"script.py\"]}. Use argument arrays, never a shell command string. Optional cwd is workspace-relative. The host kills commands at its configured timeout (default 30 seconds; timed-out results say so in stderr) and keeps only the first 1536 bytes of each output stream, so run short, noninteractive commands that print little. A command that legitimately needs longer may set \"timeout\" (seconds, up to 120) on the run action. Inspect returncode and truncation metadata before reporting success.",
+      "instructions": "Run tests or programs with {\"action\":\"run\",\"argv\":[\"python3\",\"-B\",\"-S\",\"script.py\"]}. Use argument arrays, never a shell command string. Optional cwd is workspace-relative. The host kills commands at its configured timeout (default 30 seconds; timed-out results say so in stderr) and keeps only the first 1536 bytes of each output stream, so run short, noninteractive commands that print little. A command that legitimately needs longer may set \"timeout\" (seconds, up to 120) on the run action. Inspect returncode and truncation metadata before reporting success. Inline code in argv (such as python -c) mangles backslash escapes like \\n on this transport, so write code to a file with the write tool and run the file instead.",
       "requires": {},
       "sdk": 4,
-      "sha256": "539340a52a42796689aaad5aa312c2380d4ba8d0bb9ce545a557c739b15ba95e",
+      "sha256": "da34458cb88e5210834ca7dc126f4bddf9a4e4eb84c230c841e02dc1f66aecbe",
       "url": "process-1.0.0.zip",
+      "version": "1.0.0"
+    },
+    {
+      "cli": [],
+      "defaults": {
+        "exec_output_chars": 4096,
+        "exec_timeout_seconds": 60,
+        "max_depth": 1,
+        "max_final_chars": 65536,
+        "max_iterations": 24,
+        "max_llm_calls": 40,
+        "max_llm_chunk_chars": 60000,
+        "max_llm_reply_chars": 16384,
+        "max_prompt_bytes": 16777216,
+        "prompt_preview_chars": 400,
+        "total_timeout_seconds": 600,
+        "trace_enabled": true,
+        "trace_file": "rlm_trace.jsonl"
+      },
+      "description": "recursive language model capabilities",
+      "entrypoint": "__init__:register",
+      "id": "rlm",
+      "instructions": "Answer questions about very large data with {\"action\":\"rlm\",\"task\":\"...\"} plus optional \"prompt_file\":\"big.txt\" (workspace-relative) or inline \"prompt\". A sub-model works in a persistent Python REPL: the data stays in REPL variables, never in a context window. The REPL exposes `plugins`, a mapping of ALL currently installed plugin libraries keyed by plugin id (e.g. plugins[\"process\"]), so the sub-model can query live data itself. Prefer this over read for huge files. The result is {ok, answer, iterations, llm_calls, stopped}; each execution round is audit-logged to rlm_trace.jsonl in the workspace unless the operator disables tracing.",
+      "requires": {},
+      "sdk": 4,
+      "sha256": "39a60fa7e6c362ac29171b7bdb9255e523ccd90f6d06461fe7e6319bf24cacd7",
+      "url": "rlm-1.0.0.zip",
       "version": "1.0.0"
     },
     {

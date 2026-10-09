@@ -962,6 +962,29 @@ _ACTION_FIELD_CONTRACTS = {
     "forget": ("Forget memory", "id", 80),
 }
 
+# Action names with a dedicated :func:`format_action` rendering.  Anything
+# else is a registered plugin tool whose fields have no contract here.
+_BUILTIN_ACTION_NAMES = frozenset(_ACTION_FIELD_CONTRACTS) | frozenset(
+    {"write", "edit", "run", "memories", "done"},
+)
+_REGISTERED_ACTION_BODY_CELLS = 200
+_REGISTERED_ACTION_VALUE_CELLS = 80
+
+
+def _registered_action_body(action: Mapping[str, object]) -> str:
+    fields = {key: value for key, value in action.items() if key != "action"}
+    if not fields:
+        return ""
+    try:
+        rendered = json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        safe_fields = {
+            key: _safe_field(value, _REGISTERED_ACTION_VALUE_CELLS)
+            for key, value in fields.items()
+        }
+        rendered = json.dumps(safe_fields, ensure_ascii=False, separators=(",", ":"))
+    return truncate_display(rendered, _REGISTERED_ACTION_BODY_CELLS)
+
 
 def _file_action_summary(action: Mapping[str, object]) -> EventSummary:
     if action.get("action") == "write":
@@ -1756,9 +1779,20 @@ class TuiState:
         elif _is_text(name) and name != "done":
             # Every action gets a visible row as it executes; a transcript
             # that shows reasoning but hides successful work reads as a
-            # model that only thinks.
-            summary = format_action(action)
-            self._append("action", summary.title, summary.detail)
+            # model that only thinks. The verb is the row label.
+            if name in _BUILTIN_ACTION_NAMES:
+                summary = format_action(action)
+                body = summary.detail or summary.title
+            else:
+                # Registered plugin tools (e.g. "plugins", "rlm") have no
+                # field contract, so format_action would mislabel them as
+                # unsupported; show their fields verbatim instead.
+                body = _registered_action_body(action)
+            self._append(
+                "action",
+                _safe_field(name.upper(), 24),
+                body,
+            )
 
     def apply_worker_event(self, event: str, payload: Mapping[str, object]) -> None:
         """Apply one detached worker event on the main thread.
@@ -2179,6 +2213,9 @@ def _line_prefix(entry: TranscriptEntry) -> str:
         "system": "SYSTEM",
         "thinking": "THINKING",
     }[entry.kind]
+    if entry.kind == "action" and entry.title:
+        # The verb itself is the label: READ, WRITE, EDIT, SKILL...
+        label = entry.title
     if entry.kind not in {"user", "assistant"} and entry.step is not None:
         label += " " + str(entry.step)
         if entry.max_steps is not None:
@@ -2204,7 +2241,7 @@ def entry_lines(entry: TranscriptEntry, width: int) -> tuple[TranscriptLine, ...
         error_message = "entry must be a TranscriptEntry"
         raise TypeError(error_message)
     header = _line_prefix(entry)
-    if entry.kind not in {"user", "assistant"} and entry.title:
+    if entry.kind not in {"user", "assistant", "action"} and entry.title:
         header += "  " + entry.title
     rendered: list[TranscriptLine] = []
     rendered.extend(

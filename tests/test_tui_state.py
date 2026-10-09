@@ -769,6 +769,26 @@ class StateTests(TypedTestCase):
         self.equal([entry.kind for entry in state.entries], ["user", "command"])
         self.require(("very verbose output") not in (command.body))
 
+    def test_registered_tool_actions_render_their_fields(self) -> None:
+        """Check registered tool actions render their fields."""
+        state = tui_state.TuiState()
+        state.start("reload plugins")
+        state.apply_worker_event(
+            "request",
+            {"step": 1, "action": {"action": "plugins", "command": "reload"}},
+        )
+        entry = state.entries[-1]
+        self.equal(entry.kind, "action")
+        self.equal(entry.title, "PLUGINS")
+        self.require(("reload") in (entry.body))
+        self.require(("Unsupported") not in (entry.body))
+
+        state.apply_worker_event("request", {"step": 2, "action": {"action": "rlm"}})
+        bare = state.entries[-1]
+        self.equal(bare.kind, "action")
+        self.equal(bare.title, "RLM")
+        self.equal(bare.body, "")
+
     def test_command_format_is_exact_ascii_and_terminal_inert(self) -> None:
         """Check command format is exact ascii and terminal inert."""
         action = {

@@ -555,6 +555,17 @@ reserved for private stages and excluded from package source captures.
 
 Core, SDK and terminal-controller source changes still require a restart.
 
+### Building a package incrementally
+
+Assemble a package file by file in a plain workspace directory outside
+`.raychat/plugins`, then install it by copying the finished files into place
+with `plugin.json` last. Discovery keys on the manifest's presence, so the
+package stays invisible until the copy is complete. A broken workspace package
+is quarantined rather than loaded: it is skipped, recorded on
+`runtime.quarantined` and surfaced as a transcript notice; repair the source
+and reload. Earlier releases crashed at startup when composition scanned an
+incomplete package, so never assemble directly inside a watched directory.
+
 ## Standard distribution
 
 | Package | Responsibility |
@@ -570,6 +581,7 @@ Core, SDK and terminal-controller source changes still require a restart.
 | `optimization` | GEPA, evaluators, demos, benchmarks and reports |
 | `context` | Ordered instruction assembly and context compaction |
 | `plugin_manager` | Package commands, agent tool and plugin menu |
+| `rlm` | Recursive language model: isolated REPL child, sub-model calls, budgets and audit trace |
 | `self_harness` | Failure evidence, candidate evaluation and transactional promotion |
 
 ### Profile installation

@@ -1061,6 +1061,7 @@ class Runtime(_RuntimeRegistry):
         self.workspace = Path(workspace).resolve()
         self.session: SessionLifecycle | None = None
         self.workspace_trusted = False
+        self.quarantined: dict[str, str] = {}
         self.closed = False
         self._closing = False
         self.disabled: set[str] = set()

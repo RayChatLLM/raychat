@@ -1774,6 +1774,8 @@ class _TuiController:
         self.root_id = self.sessions.root_id
         self.focused_id = self.root_id
         self.views = {self.root_id: self.view}
+        for name, reason in sorted(resources.runtime.quarantined.items()):
+            self.view.state.notice("Plugin quarantined", f"{name}: {reason}")
         self.command_workers: list[AgentWorker] = []
         self.picker: Picker | None = None
         self.menu_name: str | None = None
@@ -1828,11 +1830,7 @@ class _TuiController:
         live = self.resources.live
         if live is not None and live.status:
             labels.append(live.status)
-        labels.extend(
-            record.item.text
-            for record in self._plugin_statuses()
-            if record.item is not None
-        )
+        labels.extend(record.item.text for record in self._plugin_statuses())
         return tuple(labels)
 
     def _plugin_statuses(self) -> tuple[StatusRecord, ...]:

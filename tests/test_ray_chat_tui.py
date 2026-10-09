@@ -574,7 +574,7 @@ class FrameCompositionTests(TypedTestCase):
 
         self.require(("YOU") in (plain))
         self.require(("Inspect the workspace") in (plain))
-        self.require(("ACTION") in (plain))
+        self.require(("LIST") in (plain))
         self.require(("RESULT") not in (plain))
         self.require(("alpha.py") not in (plain))
         self.require(("Inspection finished") in (plain))
