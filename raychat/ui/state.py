@@ -19,11 +19,12 @@ from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import ClassVar, TypeGuard, cast
+from typing import ClassVar, TypeGuard, cast, overload
 
 from raychat.configuration import SETTINGS
 from raychat.handoff import optional_index
 from raychat.text_store import TextRef, export_text, fetch, parse_text, spill
+from raychat.type_support import override
 from raychat.validation import (
     array_field,
     boolean_field,
@@ -1341,6 +1342,25 @@ class TuiState:
             self._entry_rows_memo[index] = rows
         return rows
 
+    def _reflow_row_ends(self, revision: int, width: int) -> list[int]:
+        """Return the live row index while a view's reflow is still current.
+
+        Returns
+        -------
+        list[int]
+            Cumulative row counts per entry, extended as entries append.
+
+        Raises
+        ------
+        RuntimeError
+            The transcript reflowed since the view was created.
+
+        """
+        if self._rows_revision != revision or self._rows_width != width:
+            message = "Transcript rows changed; request a fresh view."
+            raise RuntimeError(message)
+        return self._row_ends
+
     @property
     def rows_revision(self) -> int:
         """Identify the current reflow; it changes when earlier rows change."""
@@ -1946,7 +1966,12 @@ class TuiState:
                 total += len(entry_lines(self._display_entry(entry), width))
                 ends.append(total)
             self._rows_width, self._row_ends = width, ends
-        return TranscriptRows(self, width)
+        return TranscriptRows(
+            self._rows_revision,
+            width,
+            self._reflow_row_ends,
+            self._memoized_entry_rows,
+        )
 
     def viewport(
         self,
@@ -2027,37 +2052,53 @@ class TranscriptRows(Sequence["TranscriptLine"]):
     existing rows bumps the owning state's revision and invalidates it.
     """
 
-    __slots__ = ("_memo_index", "_memo_rows", "_revision", "_state", "_width")
+    __slots__ = ("_ends", "_memo_index", "_memo_rows", "_render", "_revision", "_width")
 
-    def __init__(self, state: TuiState, width: int) -> None:
+    def __init__(
+        self,
+        revision: int,
+        width: int,
+        ends: Callable[[int, int], list[int]],
+        render: Callable[[int, int], tuple[TranscriptLine, ...]],
+    ) -> None:
         """Bind the view to the state's current reflow at one width."""
-        self._state = state
+        self._revision = revision
         self._width = width
-        self._revision = state.rows_revision
+        self._ends = ends
+        self._render = render
         self._memo_index = -1
         self._memo_rows: tuple[TranscriptLine, ...] = ()
 
-    def _ends(self) -> list[int]:
-        state = self._state
-        if state.rows_revision != self._revision or state._rows_width != self._width:
-            message = "Transcript rows changed; request a fresh view."
-            raise RuntimeError(message)
-        return state._row_ends
-
+    @override
     def __len__(self) -> int:
-        ends = self._ends()
+        ends = self._ends(self._revision, self._width)
         return ends[-1] if ends else 0
 
     def _entry_rows(self, index: int) -> tuple[TranscriptLine, ...]:
         if index != self._memo_index:
-            self._memo_rows = self._state._memoized_entry_rows(index, self._width)
+            self._memo_rows = self._render(index, self._width)
             self._memo_index = index
         return self._memo_rows
 
-    def __getitem__(self, item: int | slice) -> TranscriptLine | tuple[TranscriptLine, ...]:
-        ends = self._ends()
+    @overload
+    def __getitem__(self, item: int, /) -> TranscriptLine: ...
+
+    @overload
+    def __getitem__(
+        self,
+        item: slice[int | None, int | None, int | None],
+        /,
+    ) -> tuple[TranscriptLine, ...]: ...
+
+    @override
+    def __getitem__(
+        self,
+        item: int | slice[int | None, int | None, int | None],
+        /,
+    ) -> TranscriptLine | tuple[TranscriptLine, ...]:
+        ends = self._ends(self._revision, self._width)
         total = ends[-1] if ends else 0
-        if isinstance(item, slice):
+        if not isinstance(item, int):
             start, stop, step = item.indices(total)
             return tuple(self[index] for index in range(start, stop, step))
         index = item + total if item < 0 else item
@@ -2087,15 +2128,29 @@ class RowTexts(Sequence[str]):
         """Wrap one lazy row view."""
         self._rows = rows
 
+    @override
     def __len__(self) -> int:
         return len(self._rows)
 
-    def __getitem__(self, item: int | slice) -> str | tuple[str, ...]:
-        if isinstance(item, slice):
+    @overload
+    def __getitem__(self, item: int, /) -> str: ...
+
+    @overload
+    def __getitem__(
+        self,
+        item: slice[int | None, int | None, int | None],
+        /,
+    ) -> tuple[str, ...]: ...
+
+    @override
+    def __getitem__(
+        self,
+        item: int | slice[int | None, int | None, int | None],
+        /,
+    ) -> str | tuple[str, ...]:
+        if not isinstance(item, int):
             return tuple(line.text for line in self._rows[item])
-        line = self._rows[item]
-        assert isinstance(line, TranscriptLine)
-        return line.text
+        return self._rows[item].text
 
     @property
     def revision(self) -> int:

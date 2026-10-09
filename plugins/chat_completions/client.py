@@ -112,7 +112,17 @@ def _worker_payload(
     ).private_payload()
 
 
-_NO_REDIRECTS: type[HTTPRedirectHandler] | None = None
+class _RedirectHandlerCache:
+    """Hold the redirect-rejecting handler class once it has been built."""
+
+    __slots__ = ("handler",)
+
+    def __init__(self) -> None:
+        """Start empty so the first provider request builds the handler."""
+        self.handler: type[HTTPRedirectHandler] | None = None
+
+
+_NO_REDIRECTS = _RedirectHandlerCache()
 
 
 def _no_redirects() -> type[HTTPRedirectHandler]:
@@ -124,8 +134,7 @@ def _no_redirects() -> type[HTTPRedirectHandler]:
         The ``NoRedirects`` handler class, created once per process.
 
     """
-    global _NO_REDIRECTS  # ruff: ignore[global-statement]
-    if _NO_REDIRECTS is None:
+    if _NO_REDIRECTS.handler is None:
         # Deferred: urllib.request drags http.client and ssl into every process.
         from urllib.request import HTTPRedirectHandler
 
@@ -138,8 +147,8 @@ def _no_redirects() -> type[HTTPRedirectHandler]:
                 """Reject every redirect without forwarding request credentials."""
                 return
 
-        _NO_REDIRECTS = NoRedirects
-    return _NO_REDIRECTS
+        _NO_REDIRECTS.handler = NoRedirects
+    return _NO_REDIRECTS.handler
 
 
 def __getattr__(name: str) -> type[HTTPRedirectHandler]:

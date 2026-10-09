@@ -63,6 +63,11 @@ class TextStore:
         TextRef
             The deduplicated row reference.
 
+        Raises
+        ------
+        ValueError
+            The row written in this transaction could not be read back.
+
         """
         digest = sha256(text.encode("utf-8")).digest()
         with self._lock, self._connection:
@@ -70,10 +75,13 @@ class TextStore:
                 "INSERT OR IGNORE INTO texts (digest, body) VALUES (?, ?)",
                 (digest, text),
             )
-            row = self._connection.execute(
+            row: tuple[int] | None = self._connection.execute(
                 "SELECT id FROM texts WHERE digest = ?",
                 (digest,),
             ).fetchone()
+        if row is None:
+            message = "The stored text row disappeared during its transaction."
+            raise ValueError(message)
         return TextRef(int(row[0]), len(text))
 
     def load(self, reference: TextRef) -> str:
@@ -91,7 +99,7 @@ class TextStore:
 
         """
         with self._lock:
-            row = self._connection.execute(
+            row: tuple[str] | None = self._connection.execute(
                 "SELECT body FROM texts WHERE id = ?",
                 (reference.rowid,),
             ).fetchone()
@@ -106,21 +114,30 @@ class TextStore:
             self._connection.close()
 
 
-_ACTIVE_LOCK = threading.Lock()
-_ACTIVE: TextStore | None = None
-_ACTIVE_PATH: str | None = None
+class _ActiveStore:
+    """Cache the launch text store opened for the active database path."""
+
+    __slots__ = ("lock", "path", "store")
+
+    def __init__(self) -> None:
+        """Start without a store so the first spill opens the database."""
+        self.lock = threading.Lock()
+        self.store: TextStore | None = None
+        self.path: str | None = None
+
+
+_ACTIVE = _ActiveStore()
 
 
 def _active() -> TextStore | None:
-    global _ACTIVE, _ACTIVE_PATH  # noqa: PLW0603
     path = os.environ.get(_ENVIRONMENT)
     if path is None:
         return None
-    with _ACTIVE_LOCK:
-        if _ACTIVE is None or _ACTIVE_PATH != path:
-            _ACTIVE = TextStore(path)
-            _ACTIVE_PATH = path
-        return _ACTIVE
+    with _ACTIVE.lock:
+        if _ACTIVE.store is None or _ACTIVE.path != path:
+            _ACTIVE.store = TextStore(path)
+            _ACTIVE.path = path
+        return _ACTIVE.store
 
 
 def spill(text: str, minimum: int = SPILL_MIN_CHARS) -> str | TextRef:

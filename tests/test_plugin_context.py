@@ -43,11 +43,11 @@ def _json(
 
 
 def _reset_active_store() -> None:
-    with _rc_text_store._ACTIVE_LOCK:
-        if _rc_text_store._ACTIVE is not None:
-            _rc_text_store._ACTIVE.close()
-        _rc_text_store._ACTIVE = None
-        _rc_text_store._ACTIVE_PATH = None
+    with _rc_text_store._ACTIVE.lock:
+        if _rc_text_store._ACTIVE.store is not None:
+            _rc_text_store._ACTIVE.store.close()
+        _rc_text_store._ACTIVE.store = None
+        _rc_text_store._ACTIVE.path = None
 
 
 @contextmanager

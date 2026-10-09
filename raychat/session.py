@@ -43,8 +43,6 @@ from raychat.configuration import SETTINGS
 from raychat.service_contracts import CONTEXT_FACTORY
 from raychat.text_store import TextRef, export_text, fetch, parse_text, spill
 
-_HEAD_CHARS = 1024
-
 from ._common import (
     DEFAULT_CONTEXT_CHARS,
     DEFAULT_INSTRUCTION_ROLE,
@@ -83,6 +81,7 @@ from .validation import (
     text_field,
 )
 
+_HEAD_CHARS = 1024
 _CORE_REVIEW_STEPS = 20
 # Reply-shaped provider failures become model-visible feedback this many
 # consecutive times per prompt before the failure escapes to outer recovery.

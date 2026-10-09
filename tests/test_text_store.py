@@ -21,6 +21,7 @@ from raychat.text_store import (
     parse_text,
     spill,
 )
+from raychat.validation import array_field, configuration_fields
 from tests.assertions import TypedTestCase
 
 if TYPE_CHECKING:
@@ -37,7 +38,8 @@ def _active_database(path: Path) -> Iterator[None]:
         Control while spilling targets the temporary database.
 
     """
-    with mock.patch.dict(os.environ, {"RAYCHAT_TEXT_DB": str(path)}):
+    environment: dict[str, str] = {"RAYCHAT_TEXT_DB": str(path)}
+    with mock.patch.dict(os.environ, environment):
         _reset_active()
         try:
             yield
@@ -46,11 +48,11 @@ def _active_database(path: Path) -> Iterator[None]:
 
 
 def _reset_active() -> None:
-    with text_store._ACTIVE_LOCK:
-        if text_store._ACTIVE is not None:
-            text_store._ACTIVE.close()
-        text_store._ACTIVE = None
-        text_store._ACTIVE_PATH = None
+    with text_store._ACTIVE.lock:
+        if text_store._ACTIVE.store is not None:
+            text_store._ACTIVE.store.close()
+        text_store._ACTIVE.store = None
+        text_store._ACTIVE.path = None
 
 
 class TextStoreTests(TypedTestCase):
@@ -147,10 +149,8 @@ class TextStoreTests(TypedTestCase):
                     snapshot = session.export_snapshot()
                 finally:
                     session.close()
-                history = snapshot["history"]
-                self.require(isinstance(history, list))
-                first = history[0]
-                self.require(isinstance(first, dict))
+                history = array_field(snapshot["history"], "history")
+                first = configuration_fields(history[0], "history[0]")
                 self.require("content_ref" in first)
                 self.require("content" not in first)
                 restored = AgentSession(
