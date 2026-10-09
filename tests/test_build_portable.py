@@ -264,18 +264,32 @@ class PortableBuildTests(PackageTestCase):
         require("tools/smoke_process.py" in sources)
         require(("tests/test_build_portable.py") in (sources))
         require(("tests/test_release.py") in (sources))
-        require(("plugins/optimization/optimize_chat_prompt.py") in (set(sources)))
         require(("raychat/entrypoint.py") in (set(sources)))
         require(("raychat/storage.py") in (sources))
         require(("tests/test_plugin_sessions.py") in (sources))
-        require(("plugins/optimization/GEPA_LICENSE") in (sources))
-        require(("plugins/optimization/gepa/optimize_anything.py") in (sources))
         require(not (any(path.startswith("gepa/") for path in sources)))
+        packaged = (
+            "chat_completions",
+            "context",
+            "filesystem",
+            "goals",
+            "plugin_manager",
+            "process",
+            "skills",
+            "subagents",
+            "workflows",
+        )
+        for name in packaged:
+            require(f"plugins/{name}/plugin.json" in sources)
+            require(f"plugin_catalog/{name}-1.0.0.zip" in sources)
+        # The development-only plugins stay out of the shipped release.
+        for name in ("memory", "optimization", "self_harness"):
+            require(not any(path.startswith(f"plugins/{name}/") for path in sources))
+            require(f"plugin_catalog/{name}-1.0.0.zip" not in sources)
         for driver in (
             "accept_tui",
             "features_tui",
             "collective_tui",
-            "optimization_tui",
             "persistence_tui",
             "package_download_tui",
         ):

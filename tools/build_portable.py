@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import stat
 import sys
 import zipfile
@@ -200,6 +201,60 @@ def _zip_info(relative: str) -> zipfile.ZipInfo:
     return info
 
 
+_CATALOG_ARCHIVE_PATTERN = re.compile(
+    r"^plugin_catalog/(?P<id>[A-Za-z0-9_]+)-(?P<version>[0-9][0-9A-Za-z.+-]*)\.zip$",
+)
+
+
+def _slim_catalog(sources: dict[str, bytes]) -> None:
+    """Restrict the staged catalog and profile to the packaged plugins.
+
+    The development tree keeps the complete catalog; the release ships
+    only the plugin archives named in the source allowlist. The staged
+    catalog.json and profile.json are regenerated here from the shipped
+    set, so the allowlist stays the single source of truth and the
+    packaged application never references a plugin it does not carry.
+
+    Raises
+    ------
+    RuntimeError
+        If a shipped archive has no catalog record, or a shipped plugin
+        depends on one that is not packaged.
+
+    """
+    shipped: dict[str, str] = {}
+    for relative in sources:
+        match = _CATALOG_ARCHIVE_PATTERN.match(relative)
+        if match is not None:
+            shipped[match.group("id")] = match.group("version")
+    catalog = json.loads(sources["plugin_catalog/catalog.json"].decode("utf-8"))
+    records = [item for item in catalog["plugins"] if item["id"] in shipped]
+    missing = sorted(set(shipped) - {item["id"] for item in records})
+    if missing:
+        error_message = (
+            "Packaged plugin archives without catalog records: " + ", ".join(missing)
+        )
+        raise RuntimeError(error_message)
+    for item in records:
+        absent = sorted(set(item.get("requires", {})) - set(shipped))
+        if absent:
+            error_message = (
+                f"Packaged plugin {item['id']!r} requires unpackaged"
+                " plugins: " + ", ".join(absent)
+            )
+            raise RuntimeError(error_message)
+    catalog["plugins"] = records
+    profile = json.loads(sources["plugin_catalog/profile.json"].decode("utf-8"))
+    profile["packages"] = [item["id"] + "@" + item["version"] for item in records]
+    for name, document in (
+        ("plugin_catalog/catalog.json", catalog),
+        ("plugin_catalog/profile.json", profile),
+    ):
+        sources[name] = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8",
+        )
+
+
 def build_archive(root: Path) -> tuple[bytes, dict[str, bytes]]:
     """Return deterministic archive bytes and the expected member mapping.
 
@@ -210,6 +265,7 @@ def build_archive(root: Path) -> tuple[bytes, dict[str, bytes]]:
 
     """
     sources = source_data(root)
+    _slim_catalog(sources)
     members = {MANIFEST_NAME: _manifest(sources), **sources}
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -463,6 +519,11 @@ def smoke_archive(raw: bytes, *, output: Path | None = None) -> SmokeReport:
                 ),
                 ("tools.optimization_tui", "optimization", []),
             ):
+                # The battery follows the shipped allowlist: a scenario
+                # whose driver is not packaged has nothing to verify.
+                driver = root / Path(*module.split(".")).with_suffix(".py")
+                if not driver.is_file():
+                    continue
                 run_checked(
                     SmokeCommand(
                         (

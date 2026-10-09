@@ -8,11 +8,52 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
+from raychat.configuration import SETTINGS
+from raychat.distribution import read_distribution
 from raychat.validation import array_field, json_object, object_field, text_field
 
 if TYPE_CHECKING:
     import argparse
     import re
+
+
+def profile_has_plugin(name: str) -> bool:
+    """Whether the active profile distribution pins the named plugin.
+
+    Plugin-contributed CLI flags and plugin-specific scenarios exist
+    only when the plugin itself is packaged, so acceptance tooling asks
+    the profile instead of assuming the full development plugin set.
+
+    Returns
+    -------
+    bool
+        True when the profile lists the plugin.
+
+    """
+    profile = SETTINGS.plugins.profile
+    if not profile:
+        return False
+    try:
+        manifests = read_distribution(profile).manifests
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return any(manifest.id == name for manifest in manifests)
+
+
+def memory_toggle_arguments() -> list[str]:
+    """Disable the memory plugin's recall only where that plugin exists.
+
+    The --no-memory flag is contributed by the memory plugin's manifest,
+    not by the core CLI. A slim release without the plugin accepts no
+    such flag — and needs no disabling either.
+
+    Returns
+    -------
+    list[str]
+        ["--no-memory"] when the profile pins the memory plugin, else [].
+
+    """
+    return ["--no-memory"] if profile_has_plugin("memory") else []
 
 
 @dataclass(frozen=True)
