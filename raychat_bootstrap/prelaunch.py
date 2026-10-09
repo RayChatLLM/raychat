@@ -48,6 +48,7 @@ class _Prepared(Protocol):
         self,
         source: Path,
         directory: Path,
+        store: Path | None = None,
     ) -> tuple[Releases, Release]: ...
 
 
@@ -65,7 +66,11 @@ def _build_release(source: Path) -> tuple[Releases, Release]:
         message = "The release module does not provide a prepared capture."
         raise TypeError(message)
     home = Path.home() / settings.storage.home_directory
-    return prepared(source, home / "live" / uuid.uuid4().hex)
+    return prepared(
+        source,
+        home / "live" / uuid.uuid4().hex,
+        store=home / "cores",
+    )
 
 
 def begin(source: Path, workspace: Path) -> None:

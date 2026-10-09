@@ -80,6 +80,7 @@ class Supervisor:
         argv: Sequence[str],
         directory: Path,
         prepared: tuple[Releases, Release] | None = None,
+        store: Path | None = None,
     ) -> None:
         """Capture the evaluator and establish persistent recovery metadata.
 
@@ -94,7 +95,7 @@ class Supervisor:
         if prepared is not None:
             self.releases, self.initial = prepared
         else:
-            self.releases = Releases(source, directory)
+            self.releases = Releases(source, directory, store=store)
             self.initial = self.releases.initial()
         self.start_release = self.initial
         self.recovering_start = False
@@ -1063,6 +1064,7 @@ def main() -> int:
         return 1
     operator_home = Path.home() / SETTINGS.storage.home_directory
     directory = operator_home / "live" / uuid.uuid4().hex
+    store = operator_home / "cores"
     manifest = os.environ.get("RAYCHAT_RECOVERY")
     version = os.environ.get("RAYCHAT_RECOVERY_VERSION", "known-good")
     source = Path(__file__).resolve().parents[1]
@@ -1076,7 +1078,13 @@ def main() -> int:
     prepared = prelaunch.take(source)
     if prepared is not None:
         directory = prepared[0].directory
-    supervisor = Supervisor(source, sys.argv[1:], directory, prepared=prepared)
+    supervisor = Supervisor(
+        source,
+        sys.argv[1:],
+        directory,
+        prepared=prepared,
+        store=store,
+    )
     if manifest is not None:
         supervisor.restore_recovery(Path(manifest), version)
     return supervisor.run()

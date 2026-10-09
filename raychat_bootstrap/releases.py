@@ -8,6 +8,7 @@ import logging
 import os
 import stat
 import sys
+import uuid
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -26,7 +27,7 @@ from raychat.filesystem import (
     run_filesystem_task,
 )
 
-from .wire import decode, encode, fields
+from .wire import MAX_MESSAGE, decode, encode, fields
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -289,7 +290,11 @@ def seal(root: Path, recorded: Mapping[str, bytes] | None = None) -> str:
     return identity
 
 
-def prepared_initial(source: Path, directory: Path) -> tuple[Releases, Release]:
+def prepared_initial(
+    source: Path,
+    directory: Path,
+    store: Path | None = None,
+) -> tuple[Releases, Release]:
     """Build the release owner and its sealed initial capture in one step.
 
     Returns
@@ -298,7 +303,7 @@ def prepared_initial(source: Path, directory: Path) -> tuple[Releases, Release]:
         The releases owner bound to ``directory`` and the sealed capture.
 
     """
-    releases = Releases(source, directory)
+    releases = Releases(source, directory, store=store)
     return releases, releases.initial()
 
 
@@ -341,11 +346,128 @@ def _proposal_paths(changes: Mapping[str, bytes]) -> dict[str, bytes]:
     return result
 
 
+def _tree_vector(source: Path, names: tuple[str, ...]) -> str:
+    """Fingerprint source metadata for store lookups, never for trust.
+
+    Returns
+    -------
+    str
+        Digest over every member's path and complete stat version. Any
+        change - content, metadata or inode - forces a fresh capture; a
+        stored tree is additionally verified against its sealed content
+        digest before use.
+
+    """
+    value = hashlib.sha256()
+    for name in names:
+        root = source / name
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            continue
+        for path, info in _entries(root, ignore_scratch=True):
+            value.update(str(path.relative_to(source)).encode() + b"\0")
+            value.update(repr(_version(info)).encode() + b"\0")
+    return value.hexdigest()
+
+
+class _Store:
+    """Reuse sealed trees across launches, verified by digest before use.
+
+    The index records path and identity exactly like recovery manifests do;
+    a tree is only handed out after its full content digest matches the
+    recorded identity, so a stale, pruned or edited entry is rebuilt,
+    never run.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory.resolve()
+        self.index = self.directory / "index.json"
+
+    def _load(self) -> dict[str, dict[str, dict[str, str]]]:
+        try:
+            raw = fields(
+                decode(read_regular(self.index, MAX_MESSAGE, follow_symlinks=False)),
+            )
+        except (OSError, ValueError, TypeError, KeyError):
+            return {}
+        result: dict[str, dict[str, dict[str, str]]] = {}
+        for kind in ("trusted", "candidate"):
+            entries = raw.get(kind)
+            if not isinstance(entries, dict):
+                continue
+            section: dict[str, dict[str, str]] = {}
+            for vector, record in entries.items():
+                if (
+                    isinstance(vector, str)
+                    and isinstance(record, dict)
+                    and isinstance(record.get("path"), str)
+                    and isinstance(record.get("identity"), str)
+                ):
+                    section[vector] = {
+                        "path": record["path"],
+                        "identity": record["identity"],
+                    }
+            result[kind] = section
+        return result
+
+    def lookup(self, kind: str, vector: str) -> tuple[Path, str] | None:
+        """Return a stored sealed tree only after its digest verifies.
+
+        Returns
+        -------
+        tuple[Path, str] | None
+            The verified tree and its identity, or None when absent,
+            changed or unreadable.
+
+        """
+        record = self._load().get(kind, {}).get(vector)
+        if record is None:
+            return None
+        path = Path(record["path"])
+        try:
+            if digest(path) != record["identity"]:
+                return None
+        except (OSError, ValueError):
+            return None
+        return path, record["identity"]
+
+    def record(self, kind: str, vector: str, path: Path, identity: str) -> None:
+        """Durably associate a vector with a sealed tree for later reuse."""
+        index = self._load()
+        index.setdefault(kind, {})[vector] = {
+            "path": str(path),
+            "identity": identity,
+        }
+        scratch = self.index.with_name("index-" + uuid.uuid4().hex + ".json")
+        try:
+            self.directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+            scratch.write_bytes(encode(index))
+            scratch.replace(self.index)
+        except OSError:
+            logging.getLogger(__name__).debug(
+                "Core store index update skipped",
+                exc_info=True,
+            )
+
+
 class Releases:
     """Own a fixed evaluator and per-candidate source copies for one terminal."""
 
-    def __init__(self, source: Path, directory: Path) -> None:
-        """Capture evaluator code before any self-generated proposal can run."""
+    def __init__(
+        self,
+        source: Path,
+        directory: Path,
+        store: Path | None = None,
+    ) -> None:
+        """Capture evaluator code before any self-generated proposal can run.
+
+        With a store, an identical earlier freeze - keyed on every fixed
+        member's full stat version and verified against its sealed digest -
+        is reused; it was captured strictly before this launch, so the
+        freeze-before-proposals ordering is preserved. Without a store the
+        evaluator is always captured here, synchronously.
+        """
         self.source = source.resolve()
         environment_python = self.source / ".venv" / "bin" / "python"
         self.python = (
@@ -353,13 +475,26 @@ class Releases:
         )
         self.directory = directory.resolve()
         self.directory.mkdir(parents=True, mode=0o700)
+        self.config = self.source / "raychat.json"
+        self.store = _Store(store) if store is not None else None
+        self._fixed_vector = ""
+        if self.store is not None:
+            self._fixed_vector = _tree_vector(
+                self.source,
+                (*_FIXED_ROOTS, *_FIXED_FILES, "raychat.json"),
+            )
+            stored = self.store.lookup("trusted", self._fixed_vector)
+            if stored is not None:
+                self.trusted = stored[0]
+                return
         self.trusted = self.directory / "evaluator"
         self.trusted.mkdir()
         for name in (*_FIXED_ROOTS, *_FIXED_FILES):
             _copy(self.source / name, self.trusted / name)
-        self.config = self.source / "raychat.json"
         _copy(self.config, self.trusted / "raychat.json")
-        seal(self.trusted)
+        identity = seal(self.trusted)
+        if self.store is not None:
+            self.store.record("trusted", self._fixed_vector, self.trusted, identity)
 
     def capture(self, source: Path, changes: Mapping[str, bytes] | None = None) -> Path:
         """Copy candidate runtime files while retaining the fixed evaluator.
@@ -439,8 +574,22 @@ class Releases:
             The immutable initial core.
 
         """
+        vector = ""
+        if self.store is not None:
+            vector = self._fixed_vector + _tree_vector(
+                self.source,
+                (*_RUNTIME_ROOTS, "harness.txt"),
+            )
+            stored = self.store.lookup("candidate", vector)
+            if stored is not None:
+                # The stored tree's complete digest was just re-verified, so
+                # the launch integrity check is identical to a fresh capture.
+                return Release(stored[0], stored[1], fresh=True)
         root, recorded = self._capture_with_record(self.source, None, record=True)
-        return Release(root, seal(root, recorded), fresh=True)
+        release = Release(root, seal(root, recorded), fresh=True)
+        if self.store is not None:
+            self.store.record("candidate", vector, root, release.identity)
+        return release
 
     @staticmethod
     async def validate(root: Path, log: Path, *, python: str | None = None) -> Release:
