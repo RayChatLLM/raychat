@@ -6,6 +6,7 @@ import base64
 import importlib.abc
 import importlib.util
 import sys
+import tempfile
 import threading
 import uuid
 import weakref
@@ -15,7 +16,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, TypedDict
 
-from raychat.filesystem import OwnedTemporaryDirectory
+from raychat.filesystem import OwnedTemporaryDirectory, map_io
 from raychat.packages import MAX_BYTES, MAX_FILES, Manifest, safe_name
 from raychat.packages import digest as _digest
 from raychat.packages import files as source_files
@@ -53,6 +54,64 @@ def fingerprint(path: str | Path) -> str:
 
     """
     return _digest(source_files(path, validate_manifest=False))
+
+
+# Generations are content-addressed and shared across launches and between
+# the prewarmer and the core: creating hundreds of files is the expensive
+# operation (antivirus scans every new file), while re-reading existing
+# bytes is cheap. A stored tree is only ever used after byte-for-byte
+# comparison with the captured sources already held in memory, so a stale,
+# foreign or tampered entry can never be imported - it fails the comparison
+# and a fresh private tree is built and promoted with an atomic rename.
+_GENERATION_STORE = Path(tempfile.gettempdir()) / "raychat-generation-store"
+
+
+def _store_matches(directory: Path, sources: Mapping[str, bytes]) -> bool:
+    try:
+        for name, data in sources.items():
+            if directory.joinpath(*safe_name(name).parts).read_bytes() != data:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _write_generation_member(item: tuple[Path, bytes]) -> None:
+    item[0].write_bytes(item[1])
+
+
+def _write_sources(directory: Path, sources: Mapping[str, bytes]) -> None:
+    staged = [
+        (directory.joinpath(*safe_name(name).parts), data)
+        for name, data in sources.items()
+    ]
+    for target, _data in staged:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    for result in map_io(_write_generation_member, staged):
+        del result
+
+
+def _generation_directory(
+    digest_value: str,
+    sources: Mapping[str, bytes],
+) -> tuple[Path, OwnedTemporaryDirectory | None]:
+    stored = _GENERATION_STORE / digest_value
+    if _store_matches(stored, sources):
+        return stored.resolve(), None
+    temporary = OwnedTemporaryDirectory(prefix="raychat-generation-")
+    private = Path(temporary.name).resolve()
+    _write_sources(private, sources)
+    try:
+        _GENERATION_STORE.mkdir(parents=True, exist_ok=True)
+        Path(private).replace(stored)
+    except OSError:
+        # Another process promoted the same digest first, or the store is
+        # unavailable; use whichever verified tree exists.
+        if _store_matches(stored, sources):
+            temporary.cleanup()
+            return stored.resolve(), None
+        return private, temporary
+    return stored.resolve(), None
 
 
 class _Module(ModuleType):
@@ -149,10 +208,14 @@ class _Generation:
     """Immutable shared parts of every tree built from one source digest.
 
     Trees captured from identical bytes share one generation: the source
-    mapping, the compiled code objects and the extracted temporary files.
-    The directory lives until the last owning tree retires; retention of any
-    owner keeps the files permanently. The owned directory's own finalizer is
-    the __del__-free fallback for owners abandoned without retirement.
+    mapping, the compiled code objects and the extracted files. The directory
+    comes from the cross-launch content-addressed store when its bytes verify,
+    so repeated launches reuse one extracted tree; only a private directory
+    the generation itself created is ever deleted - store entries persist for
+    later launches and are revalidated byte-for-byte before reuse.
+    In-memory sharing lives until the last owning tree retires; retention of
+    any owner keeps the files permanently. A private directory's own finalizer
+    is the __del__-free fallback for owners abandoned without retirement.
     """
 
     __slots__ = (
@@ -171,19 +234,15 @@ class _Generation:
         self.sources: dict[str, bytes] = dict(sources)
         self.retained = False
         self.active = 0
-        self.temporary = OwnedTemporaryDirectory(prefix="raychat-generation-")
-        self.directory = Path(self.temporary.name).resolve()
+        self.directory, self.temporary = _generation_directory(digest_value, sources)
         try:
             self.code = self._compile()
         except BaseException:
-            self.temporary.cleanup()
+            if self.temporary is not None:
+                self.temporary.cleanup()
             raise
 
     def _compile(self) -> dict[str, CodeType]:
-        for name, data in self.sources.items():
-            target = self.directory.joinpath(*safe_name(name).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
         sources: Mapping[str, bytes] = self.sources
         if "__init__.py" not in sources:
             sources = {**sources, "__init__.py": b""}
@@ -194,27 +253,31 @@ class _Generation:
         }
 
     def retain(self, *, reason: str) -> None:
-        # Retaining any owner keeps the shared files; the directory finalizer
-        # is detached so later releases and finalization never delete them.
-        # Retention relinquishes file ownership, so the digest is unpublished:
-        # new captures must rebuild rather than share unprovable files.
+        # Retaining any owner keeps the shared files: a private directory
+        # detaches its finalizer so later releases and finalization never
+        # delete it, while a store-owned directory already persists. Retention
+        # relinquishes in-memory ownership, so the digest is unpublished: new
+        # captures must rebuild or re-verify rather than share unprovable state.
         with _GENERATIONS_LOCK:
             if self.retained:
                 return
             self.retained = True
             if _GENERATIONS.get(self.digest) is self:
                 del _GENERATIONS[self.digest]
-        self.temporary.retain(reason=reason)
+        if self.temporary is not None:
+            self.temporary.retain(reason=reason)
 
     def release(self) -> None:
-        # The last owner's retirement removes the shared files promptly and
-        # unpublishes the digest so a later capture rebuilds from scratch.
+        # The last owner's retirement unpublishes the digest so a later
+        # capture reconstructs the generation. Only a private, unpromoted
+        # directory is removed; verified store entries stay on disk for
+        # later launches and the prewarmer.
         with _GENERATIONS_LOCK:
             self.active -= 1
             last = self.active == 0 and not self.retained
             if last and _GENERATIONS.get(self.digest) is self:
                 del _GENERATIONS[self.digest]
-        if last:
+        if last and self.temporary is not None:
             self.temporary.cleanup()
 
 

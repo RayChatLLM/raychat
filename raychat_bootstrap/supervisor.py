@@ -29,6 +29,7 @@ from raychat.ui.terminal import TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
 from raychat.validation import configuration_fields, text_field
 
+from . import prelaunch
 from .recovery import release as recovery_release
 from .recovery import retained_state
 from .releases import Release, Releases, digest
@@ -73,7 +74,14 @@ class Core:
 class Supervisor:
     """Keep the terminal usable through validation, activation and core failures."""
 
-    def __init__(self, source: Path, argv: Sequence[str], directory: Path) -> None:
+    def __init__(
+        self,
+        source: Path,
+        argv: Sequence[str],
+        directory: Path,
+        prepared: tuple[Releases, Release] | None = None,
+        store: Path | None = None,
+    ) -> None:
         """Capture the evaluator and establish persistent recovery metadata.
 
         Raises
@@ -84,8 +92,11 @@ class Supervisor:
         """
         self.argv = list(argv)
         self.workspace = _workspace(argv)
-        self.releases = Releases(source, directory)
-        self.initial = self.releases.initial()
+        if prepared is not None:
+            self.releases, self.initial = prepared
+        else:
+            self.releases = Releases(source, directory, store=store)
+            self.initial = self.releases.initial()
         self.start_release = self.initial
         self.recovering_start = False
         self.current: Core | None = None
@@ -305,7 +316,8 @@ class Supervisor:
         recover_history: bool | Literal["retained"] = False,
         safe: bool = False,
     ) -> Core:
-        await run_filesystem_task(release.verify)
+        if not release.fresh:
+            await run_filesystem_task(release.verify)
         changed_plugins = await run_filesystem_task(
             partial(self._changed_plugins, release),
         )
@@ -1055,6 +1067,7 @@ def main() -> int:
         return 1
     operator_home = Path.home() / SETTINGS.storage.home_directory
     directory = operator_home / "live" / uuid.uuid4().hex
+    store = operator_home / "cores"
     manifest = os.environ.get("RAYCHAT_RECOVERY")
     version = os.environ.get("RAYCHAT_RECOVERY_VERSION", "known-good")
     source = Path(__file__).resolve().parents[1]
@@ -1065,7 +1078,16 @@ def main() -> int:
         source = recovery_release(
             saved["previous" if version == "previous" else "known_good"],
         ).path
-    supervisor = Supervisor(source, sys.argv[1:], directory)
+    prepared = prelaunch.take(source)
+    if prepared is not None:
+        directory = prepared[0].directory
+    supervisor = Supervisor(
+        source,
+        sys.argv[1:],
+        directory,
+        prepared=prepared,
+        store=store,
+    )
     if manifest is not None:
         supervisor.restore_recovery(Path(manifest), version)
     return supervisor.run()

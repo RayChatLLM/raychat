@@ -524,6 +524,7 @@
       "raychat/workspace_transactions.py",
       "raychat/workspace_trust.py",
       "raychat_bootstrap/__init__.py",
+      "raychat_bootstrap/prelaunch.py",
       "raychat_bootstrap/recovery.py",
       "raychat_bootstrap/releases.py",
       "raychat_bootstrap/supervisor.py",

@@ -23,6 +23,7 @@ import threading
 import time
 import unicodedata
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from io import FileIO, TextIOWrapper
@@ -241,6 +242,52 @@ def is_link_or_reparse_point(path: Path) -> bool:
 
     """
     return _linked_metadata(path.lstat())
+
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+# Parallel reads and writes overlap storage, antivirus and filesystem
+# latency on every platform. Work is handed out in contiguous batches (one
+# task per worker) so per-item dispatch overhead stays negligible even when
+# the data is already in the page cache.
+_IO_WORKERS = 8
+
+
+# Worker threads start lazily on first submission, so creating the pool at
+# import time costs nothing until parallel file work actually happens.
+_IO_POOL = ThreadPoolExecutor(max_workers=_IO_WORKERS, thread_name_prefix="file-io")
+
+
+def map_io(function: Callable[[_T], _R], items: list[_T]) -> Iterator[_R]:
+    """Apply an I/O-bound function to every item, yielding in input order.
+
+    Small batches run inline; larger ones are split into one contiguous
+    chunk per pool worker, so results arrive in the same order as a plain
+    map and callers keep sequential error semantics.
+
+    Returns
+    -------
+    Iterator[_R]
+        Results in the order of ``items``.
+
+    """
+    if len(items) <= _IO_WORKERS:
+        return iter(list(map(function, items)))
+    chunk = -(-len(items) // _IO_WORKERS)
+    return _IO_POOL.map(function, items, chunksize=chunk)
+
+
+def is_linked_stat(metadata: os.stat_result) -> bool:
+    """Check already-collected metadata for symlinks or reparse points.
+
+    Returns
+    -------
+    bool
+        Whether the metadata describes a symlink or a reparse point.
+
+    """
+    return _linked_metadata(metadata)
 
 
 def _linked_metadata(metadata: os.stat_result) -> bool:

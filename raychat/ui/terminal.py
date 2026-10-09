@@ -7,6 +7,7 @@ Agent execution lives independently in raychat.workers.
 
 from __future__ import annotations
 
+import atexit
 import base64
 import codecs
 import contextlib
@@ -703,6 +704,33 @@ class InteractiveTerminal(Protocol):
         """Copy selected text and return a status message."""
 
 
+_RETAINED_LOCK = threading.Lock()
+_RETAINED: list[TerminalSession] = []
+
+
+def _retain_session(session: TerminalSession) -> None:
+    with _RETAINED_LOCK:
+        _RETAINED.clear()
+        _RETAINED.append(session)
+    atexit.register(_restore_retained)
+
+
+def _adopt_session() -> TerminalSession | None:
+    with _RETAINED_LOCK:
+        if _RETAINED:
+            return _RETAINED.pop()
+    return None
+
+
+def _restore_retained() -> None:
+    # Failsafe for a launch that retained the screen but never reached the
+    # next session: restore the terminal instead of leaving it in the
+    # alternate screen with raw input.
+    session = _adopt_session()
+    if session is not None:
+        session.restore_now()
+
+
 class TerminalSession:
     """Restore-safe alternate-screen terminal session for POSIX and Windows."""
 
@@ -726,6 +754,7 @@ class TerminalSession:
         self.is_tty = self._detect_tty()
         self._entered = False
         self._active = False
+        self._relinquished = False
         self._backend = backend
         self._write_lock = threading.Lock()
 
@@ -755,6 +784,18 @@ class TerminalSession:
         self._entered = True
         if not self.is_tty:
             return self
+        retained = _adopt_session()
+        if retained is not None:
+            # Continue the alternate-screen session a predecessor (the
+            # provider wizard) handed off: the terminal never flips back to
+            # the shell, the predecessor's holding frame stays visible until
+            # the first real frame, and this session inherits the backend so
+            # the final restore returns to the original terminal state.
+            inherited = retained.surrender()
+            if inherited is not None:
+                self._backend = inherited
+                self._active = True
+                return self
         try:
             self._activate()
         except BaseException:
@@ -794,6 +835,12 @@ class TerminalSession:
         """Restore screen and terminal modes, including after output failure."""
         if not self._entered:
             return
+        if self._relinquished:
+            # Ownership moves to the adopting session, which inherits the
+            # live backend through surrender() and restores the terminal;
+            # the active state stays with this object until then.
+            self._entered = False
+            return
         try:
             if self._active:
                 self._write_once(self.EXIT_SEQUENCE)
@@ -812,6 +859,48 @@ class TerminalSession:
         with self._write_lock:
             self.output.write(value)
             self.output.flush()
+
+    def surrender(self) -> TerminalBackend | None:
+        """Yield the active backend to an adopting successor session.
+
+        Returns
+        -------
+        TerminalBackend | None
+            The live backend, or None when this session was not active.
+
+        """
+        if not self._active:
+            return None
+        backend = self._backend
+        self._active = False
+        self._backend = None
+        return backend
+
+    def restore_now(self) -> None:
+        """Restore the terminal immediately, cancelling a pending handoff."""
+        self._relinquished = False
+        if self._active:
+            self._entered = True
+        self.__exit__(None, None, None)
+
+    def handoff(self) -> None:
+        """Keep this entered session alive for the next session to adopt.
+
+        The caller's context exit becomes a no-op; the adopter inherits the
+        active backend and with it the duty to restore the terminal. An
+        atexit failsafe restores the terminal when nothing ever adopts.
+
+        Raises
+        ------
+        RuntimeError
+            The session is not active.
+
+        """
+        if not self._entered or not self._active:
+            error_message = "Only an active TerminalSession can be handed off."
+            raise RuntimeError(error_message)
+        self._relinquished = True
+        _retain_session(self)
 
     def present(self, frame: str) -> None:
         """Present a full frame or cell update with one stream ``write`` call.

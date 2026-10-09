@@ -138,7 +138,9 @@ class SessionCleanupTests(TypedTestCase):
                 self.require(runtime.closed)
                 self.equal(len(runtime.source_trees), 1)
                 self.require(
-                    all(not tree.directory.exists() for tree in runtime.source_trees),
+                    all(
+                        tree.prefix not in sys.modules for tree in runtime.source_trees
+                    ),
                 )
                 self.require(runtime.session is None)
             finally:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import os
 import sys
@@ -52,7 +53,11 @@ class _Harness(RecoveryHarness):
         await self._validate_candidate(message)
 
     async def launch_core(self) -> Core:
-        return await self._launch(self.initial, None)
+        # Exercise the verified-at-launch path: a release this process just
+        # sealed skips the redundant re-hash, so the integrity join contract
+        # is observed through a reconstructed (non-fresh) release.
+        release = dataclasses.replace(self.initial, fresh=False)
+        return await self._launch(release, None)
 
 
 class _CloseFailingLog(io.BytesIO):

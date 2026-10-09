@@ -21,6 +21,7 @@ from raychat.event_types import CONFIGURE, Lifecycle
 from .filesystem import (
     FileLock,
     OwnedTemporaryDirectory,
+    map_io,
     read_regular,
     write_bytes,
 )
@@ -644,6 +645,10 @@ class _SourceOwnership(threading.local):
         self.held = ExitStack()
 
 
+def _write_staged(item: tuple[Path, bytes]) -> None:
+    item[0].write_bytes(item[1])
+
+
 class PackageManager:
     """Manage pinned package releases and atomic plugin generation updates."""
 
@@ -666,11 +671,19 @@ class PackageManager:
         *,
         trusted: bool = False,
         defer_state: bool = False,
+        contention_timeout: float = 1.0,
     ) -> None:
-        """Load receipts now, or on first use by a runtime with captured sources."""
+        """Load receipts now, or on first use by a runtime with captured sources.
+
+        ``contention_timeout`` bounds how long scope-lock acquisitions wait
+        for a cooperating writer (another session or the launch prewarmer)
+        before reporting contention; startup composition passes a patient
+        budget while short-lived tooling keeps the quick default.
+        """
         self.workspace = Path(workspace).resolve()
         self.home = Path(home).resolve()
         self.trusted = trusted
+        self.contention_timeout = contention_timeout
         self.runtime: Runtime | None = None
         self._stale_catalogs: set[str] = set()
         self.roots = {"workspace": self.workspace / ".raychat", "user": self.home}
@@ -710,9 +723,15 @@ class PackageManager:
         return lock
 
     @contextmanager
-    def _locked_scope(self, scope: str, *, timeout: float = 1.0) -> Iterator[None]:
+    def _locked_scope(
+        self,
+        scope: str,
+        *,
+        timeout: float | None = None,
+    ) -> Iterator[None]:
+        budget = self.contention_timeout if timeout is None else timeout
         with ExitStack() as held:
-            held.push(self._acquire_scope(scope, timeout=timeout))
+            held.push(self._acquire_scope(scope, timeout=budget))
             yield
 
     def state_file(self, scope: str) -> Path:
@@ -1287,10 +1306,11 @@ class PackageManager:
         path = Path(resolved)
         if not _has_url_scheme(resolved) and path.is_dir():
             members = files(path)
-            for name, data in members.items():
-                destination = target / name
+            staged = [(target / name, data) for name, data in members.items()]
+            for destination, _data in staged:
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(data)
+            for result in map_io(_write_staged, staged):
+                del result
             archive_hash = hashlib.sha256(pack(path)).hexdigest()
         else:
             data = download(resolved) if _has_url_scheme(resolved) else read_bytes(path)
@@ -1352,14 +1372,20 @@ class PackageManager:
             ),
         )
 
-    def _stage_install(
+    def _stage_prepared(
         self,
-        spec: str,
+        prepared: tuple[str, Path],
+    ) -> tuple[Manifest, PackageRecord]:
+        return self._stage(prepared[0], prepared[1])
+
+    def _adopt_staged(
+        self,
         plan: _Staging,
+        target: Path,
+        manifest: Manifest,
+        record: PackageRecord,
         expected: tuple[str, str] | None = None,
     ) -> Manifest:
-        target = Path(plan.temporary.name) / ("package-" + str(len(plan.staged)))
-        manifest, record = self._stage(spec, target)
         if expected is not None and (manifest.id, manifest.version) != expected:
             message = "Dependency resolved to an unexpected version."
             raise PluginError(message)
@@ -1375,6 +1401,18 @@ class PackageManager:
         plan.staged[manifest.id], plan.records[manifest.id] = target, record
         plan.manifests[manifest.id] = manifest
         return manifest
+
+    def _stage_install(
+        self,
+        spec: str,
+        plan: _Staging,
+        expected: tuple[str, str] | None = None,
+    ) -> Manifest:
+        # Dependency staging names stay disjoint from the enumerate-indexed
+        # root directories even when duplicate root specs leave gaps.
+        target = Path(plan.temporary.name) / f"dependency-{len(plan.staged)}"
+        manifest, record = self._stage(spec, target)
+        return self._adopt_staged(plan, target, manifest, record, expected)
 
     def _collect_install(self, identifier: str, plan: _Staging) -> None:
         if identifier in plan.complete:
@@ -1438,11 +1476,23 @@ class PackageManager:
         plan.records[primary]["path"] = str(Path(sources[0]).expanduser().resolve())
 
     def _stage_roots(self, plan: _Staging) -> _PackageChange:
-        primary = self._stage_install(plan.request.sources[0], plan)
         # Stage every requested root before collecting dependencies so an entire
-        # profile upgrade is checked as one candidate generation.
-        for source in plan.request.sources[1:]:
-            self._stage_install(source, plan)
+        # profile upgrade is checked as one candidate generation. Materializing
+        # each root (extract, hash, manifest) is independent per target
+        # directory, so the heavy work runs on the shared pool; every check
+        # and plan mutation stays sequential in request order below.
+        prepared = [
+            (source, Path(plan.temporary.name) / f"package-{index}")
+            for index, source in enumerate(plan.request.sources)
+        ]
+        staged_roots = list(map_io(self._stage_prepared, prepared))
+        primary = self._adopt_staged(plan, prepared[0][1], *staged_roots[0])
+        for (_, target), (manifest, record) in zip(
+            prepared[1:],
+            staged_roots[1:],
+            strict=True,
+        ):
+            self._adopt_staged(plan, target, manifest, record)
         for identifier in list(plan.staged):
             self._collect_install(identifier, plan)
         expected_sources = self._replacement_sources(plan)

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
 import stat
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -15,6 +17,8 @@ from .filesystem import (
     WORKSPACE_STAGE_PREFIX,
     PortablePathIndex,
     is_link_or_reparse_point,
+    is_linked_stat,
+    map_io,
     portable_relative_path,
     read_regular,
 )
@@ -30,7 +34,6 @@ from .validation import (
 )
 
 if TYPE_CHECKING:
-    import os
     from collections.abc import Iterable, Mapping
     from re import Pattern
 
@@ -500,6 +503,10 @@ def _check_member(item: Path, expected: os.stat_result) -> None:
         raise PluginError("Package source changed during capture: " + str(item))
 
 
+def _read_member_entry(entry: tuple[Path, os.stat_result]) -> bytes:
+    return _read_member(entry[0], MAX_BYTES, entry[1])
+
+
 def _read_member(item: Path, remaining: int, expected: os.stat_result) -> bytes:
     if not stat.S_ISREG(expected.st_mode):
         message = "Package members must be regular files."
@@ -514,39 +521,53 @@ def _read_member(item: Path, remaining: int, expected: os.stat_result) -> bytes:
     return data
 
 
+def _checked_entry_info(info: os.stat_result, location: str) -> bool:
+    if is_linked_stat(info):
+        raise PluginError(
+            "Package links or reparse points are not supported: " + location,
+        )
+    directory = stat.S_ISDIR(info.st_mode)
+    if not directory and not stat.S_ISREG(info.st_mode):
+        raise PluginError(
+            "Package entries must be regular files or directories: " + location,
+        )
+    return directory
+
+
 def _package_entries(
     root: Path,
     *,
     ignore_finder_metadata: bool,
 ) -> list[tuple[Path, os.stat_result]]:
-    pending = [root]
-    entries: list[tuple[Path, os.stat_result]] = []
+    # scandir hands back each child's metadata with the directory listing
+    # (free on Windows, one cached fstatat elsewhere), replacing a separate
+    # lstat per member while keeping the same checks, limits and ordering.
+    info = _member_info(root)
+    if not stat.S_ISDIR(info.st_mode):
+        message = "Plugins must be SDK v4 package directories containing plugin.json."
+        raise PluginError(message)
+    entries: list[tuple[Path, os.stat_result]] = [(root, info)]
     paths = PortablePathIndex()
+    pending: list[tuple[str, str]] = [("", str(root))]
     while pending:
-        item = pending.pop()
-        info = _member_info(item)
-        directory = stat.S_ISDIR(info.st_mode)
-        if item != root:
-            paths.add(item.relative_to(root).as_posix(), directory=directory)
-        elif not directory:
-            message = (
-                "Plugins must be SDK v4 package directories containing plugin.json."
-            )
-            raise PluginError(message)
-        entries.append((item, info))
-        if len(entries) > MAX_ENTRIES:
-            message = "Package exceeds its entry limit."
-            raise PluginError(message)
-        if directory:
-            for child in item.iterdir():
-                if not _ignored_member(
-                    child.relative_to(root),
+        prefix, location = pending.pop()
+        with os.scandir(location) as scan:
+            for member in scan:
+                relative = member.name if not prefix else prefix + "/" + member.name
+                if _ignored_member(
+                    Path(relative),
                     ignore_finder_metadata=ignore_finder_metadata,
                 ):
-                    pending.append(child)
-                    if len(entries) + len(pending) > MAX_ENTRIES:
-                        message = "Package exceeds its entry limit."
-                        raise PluginError(message)
+                    continue
+                member_info = os.lstat(member.path)
+                directory = _checked_entry_info(member_info, member.path)
+                paths.add(relative, directory=directory)
+                entries.append((Path(member.path), member_info))
+                if len(entries) > MAX_ENTRIES:
+                    message = "Package exceeds its entry limit."
+                    raise PluginError(message)
+                if directory:
+                    pending.append((relative, member.path))
     return sorted(entries, key=_entry_path)
 
 
@@ -556,6 +577,98 @@ def _entry_path(entry: tuple[Path, os.stat_result]) -> PurePosixPath:
 
 def _portable_path(item: Path) -> PurePosixPath:
     return PurePosixPath(item.as_posix())
+
+
+_MANIFEST_OK_LIMIT = 256
+_manifest_ok: set[bytes] = set()
+
+
+def _validated_manifest(data: bytes) -> None:
+    if data in _manifest_ok:
+        return
+    Manifest.parse(json_object(data))
+    if len(_manifest_ok) >= _MANIFEST_OK_LIMIT:
+        _manifest_ok.clear()
+    _manifest_ok.add(data)
+
+
+_FILES_CACHE_LIMIT = 64
+_files_cache: dict[
+    tuple[str, bool],
+    tuple[tuple[tuple[str, tuple[int, ...]], ...], dict[str, bytes]],
+] = {}
+_files_cache_lock = threading.Lock()
+
+
+def _ignored_name(name: str, *, ignore_finder_metadata: bool) -> bool:
+    # Pruning per name while descending matches _ignored_member, which tests
+    # every part of a relative path: ancestors were already screened.
+    if name.casefold().startswith(WORKSPACE_STAGE_PREFIX):
+        return True
+    return name in {".git", "__pycache__", ".venv"} or (
+        ignore_finder_metadata and name == ".DS_Store"
+    )
+
+
+def _inventory(
+    path: Path,
+    *,
+    ignore_finder_metadata: bool,
+) -> tuple[tuple[str, tuple[int, ...]], ...]:
+    """Collect a stat identity vector with one scandir pass per directory.
+
+    Serves cache validation only: structural rules (collisions, manifest
+    shape, size budgets) are enforced by the full read in _files, and any
+    tree change shifts this vector, forcing that full read.
+
+    Returns
+    -------
+    tuple[tuple[str, tuple[int, ...]], ...]
+        Sorted (relative path, version) pairs including the root as ".".
+
+    Raises
+    ------
+    PluginError
+        If an entry is a link, a special file, or exceeds the entry limit.
+
+    """
+    root_info = _member_info(path)
+    results = [(".", _member_version(root_info))]
+    pending: list[tuple[str, str]] = [("", str(path))]
+    while pending:
+        prefix, directory = pending.pop()
+        with os.scandir(directory) as scan:
+            for entry in scan:
+                name = entry.name
+                if _ignored_name(
+                    name,
+                    ignore_finder_metadata=ignore_finder_metadata,
+                ):
+                    continue
+                # A full lstat keeps inode fields populated on every
+                # platform (scandir's cached Windows metadata zeroes them),
+                # so version vectors compare equal across collection sites.
+                info = os.lstat(entry.path)
+                if is_linked_stat(info):
+                    raise PluginError(
+                        "Package links or reparse points are not supported: "
+                        + entry.path,
+                    )
+                is_directory = stat.S_ISDIR(info.st_mode)
+                if not is_directory and not stat.S_ISREG(info.st_mode):
+                    raise PluginError(
+                        "Package entries must be regular files or directories: "
+                        + entry.path,
+                    )
+                relative = name if not prefix else prefix + "/" + name
+                results.append((relative, _member_version(info)))
+                if len(results) > MAX_ENTRIES:
+                    message = "Package exceeds its entry limit."
+                    raise PluginError(message)
+                if is_directory:
+                    pending.append((relative, entry.path))
+    results.sort()
+    return tuple(results)
 
 
 def files(
@@ -572,6 +685,11 @@ def files(
     detects observed changes; it is not a transaction with nonparticipating
     editors or protection against hostile pathname substitution.
 
+    One composition reads the same package several times (fingerprint,
+    capture, watch registration), so results are memoized per process and
+    revalidated with a fresh stat inventory - exactly the quiescence check
+    the uncached path performs - before any cached bytes are returned.
+
     Returns
     -------
     dict[str, bytes]
@@ -584,14 +702,45 @@ def files(
 
     """
     try:
-        path = Path(path).resolve(strict=True)
-        return _files(
-            path,
+        resolved = Path(path).resolve(strict=True)
+        result = _cached_files(
+            resolved,
             validate_manifest=validate_manifest,
             ignore_finder_metadata=ignore_finder_metadata,
         )
     except (OSError, ValueError) as error:
         raise PluginError("Cannot capture package source: " + str(path)) from error
+    return result
+
+
+def _cached_files(
+    path: Path,
+    *,
+    validate_manifest: bool,
+    ignore_finder_metadata: bool,
+) -> dict[str, bytes]:
+    # Manifest validation is a pure function of the returned bytes, so the
+    # cache is keyed on content identity alone and validation is reapplied
+    # to cached results when the caller asks for it.
+    key = (str(path), ignore_finder_metadata)
+    observed = _inventory(path, ignore_finder_metadata=ignore_finder_metadata)
+    with _files_cache_lock:
+        cached = _files_cache.get(key)
+    if cached is not None and cached[0] == observed:
+        result = dict(cached[1])
+        if validate_manifest:
+            _validated_manifest(result.get("plugin.json", b"{}"))
+        return result
+    result = _files(
+        path,
+        validate_manifest=validate_manifest,
+        ignore_finder_metadata=ignore_finder_metadata,
+    )
+    with _files_cache_lock:
+        if len(_files_cache) >= _FILES_CACHE_LIMIT:
+            _files_cache.pop(next(iter(_files_cache)))
+        _files_cache[key] = (observed, dict(result))
+    return result
 
 
 def _files(
@@ -603,13 +752,18 @@ def _files(
     result: dict[str, bytes] = {}
     remaining = MAX_BYTES
     entries = _package_entries(path, ignore_finder_metadata=ignore_finder_metadata)
-    for item, info in entries:
-        if stat.S_ISDIR(info.st_mode):
-            continue
-        if len(result) >= MAX_FILES:
-            error_message = "Package exceeds its file limit."
+    members = [entry for entry in entries if not stat.S_ISDIR(entry[1].st_mode)]
+    if len(members) > MAX_FILES:
+        error_message = "Package exceeds its file limit."
+        raise PluginError(error_message)
+    # Reads overlap storage latency; the byte budget, enforced in the same
+    # deterministic order as a sequential loop, cannot overshoot because
+    # every member was already size-checked against the remaining budget.
+    contents = map_io(_read_member_entry, members)
+    for (item, _info), data in zip(members, contents, strict=True):
+        if len(data) > remaining:
+            error_message = "Package exceeds its byte limit."
             raise PluginError(error_message)
-        data = _read_member(item, remaining, info)
         remaining -= len(data)
         result[item.relative_to(path).as_posix()] = data
     observed = _package_entries(path, ignore_finder_metadata=ignore_finder_metadata)
@@ -626,7 +780,7 @@ def _files(
             "Package source inventory changed during capture: " + str(path),
         )
     if validate_manifest:
-        Manifest.parse(json_object(result.get("plugin.json", b"{}")))
+        _validated_manifest(result.get("plugin.json", b"{}"))
     return result
 
 
@@ -701,6 +855,10 @@ def _archive_members(data: bytes) -> dict[str, bytes]:
     return members
 
 
+def _write_member(item: tuple[Path, bytes]) -> None:
+    item[0].write_bytes(item[1])
+
+
 def unpack(data: bytes, destination: str | Path) -> Path:
     """Validate every archive member before extracting to an empty directory.
 
@@ -728,7 +886,7 @@ def unpack(data: bytes, destination: str | Path) -> Path:
             raise PluginError(error_message)
         prefix = next(iter(prefixes)) + "/"
         members = {name.removeprefix(prefix): value for name, value in members.items()}
-    Manifest.parse(json_object(members.get("plugin.json", b"{}")))
+    _validated_manifest(members.get("plugin.json", b"{}"))
     names = {name.casefold() for name in members}
     for name in members:
         if any(
@@ -742,10 +900,14 @@ def unpack(data: bytes, destination: str | Path) -> Path:
     ):
         error_message = "Archive destination must be an empty directory."
         raise PluginError(error_message)
-    for name, value in members.items():
-        path = destination.joinpath(*safe_name(name).parts)
+    staged = [
+        (destination.joinpath(*safe_name(name).parts), value)
+        for name, value in members.items()
+    ]
+    for path, _value in staged:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(value)
+    for result in map_io(_write_member, staged):
+        del result
     return destination
 
 

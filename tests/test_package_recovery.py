@@ -17,6 +17,7 @@ from unittest import mock
 from raychat.application import build_runtime
 from raychat.composition import create_runtime
 from raychat.configuration import SETTINGS
+from raychat.distribution import read_distribution
 from raychat.filesystem import FileLock
 from raychat.package_transactions import PackageTransaction
 from raychat.packages import files, pack, read_manifest
@@ -24,7 +25,7 @@ from raychat.plugin_arguments import add_plugin_arguments
 from raychat.plugin_manager import PackageManager, scaffold
 from raychat.plugin_sources import SourceTree
 from raychat.sdk import PluginError
-from raychat.validation import json_object, object_field
+from raychat.validation import json_object, object_field, text_field
 from tests.assertions import TypedTestCase
 
 if TYPE_CHECKING:
@@ -219,7 +220,18 @@ class PackageRecoveryTests(TypedTestCase):
                     )
                     runtime.close()
             self.require(captured)
-            self.equal(consumed, ["example"])
+            if operation == "cli":
+                # Catalog manifests for the configured profile are declared
+                # after the read locks are released, without installation.
+                profile_ids = [
+                    manifest.id
+                    for manifest in read_distribution(
+                        text_field(SETTINGS.plugins.profile, "plugins.profile"),
+                    ).manifests
+                ]
+                self.equal(consumed, ["example", *profile_ids])
+            else:
+                self.equal(consumed, ["example"])
 
     def test_snapshot_worker_starts_without_reading_locked_receipts(self) -> None:
         """Captured children skip disabled watching but enforce live source locks."""
