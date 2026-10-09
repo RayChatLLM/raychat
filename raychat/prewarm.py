@@ -12,8 +12,6 @@ import logging
 from typing import TYPE_CHECKING
 
 from raychat.composition import package_manager
-from raychat.packages import files
-from raychat.plugin_sources import SourceTree
 from raychat.sdk import PluginError
 from raychat.startup_trace import mark
 
@@ -24,22 +22,16 @@ _LOG = logging.getLogger(__name__)
 
 
 def warm(workspace: Path) -> None:
-    """Install the configured profile and materialize plugin generations."""
+    """Install the configured profile before the core composes its runtime.
+
+    Generation materialization is deliberately left to the core: building
+    trees here would race the core for the same content-addressed store
+    entries moments later without making the launch any faster.
+    """
     mark("prewarm-begin")
     try:
-        manager = package_manager(workspace)
-        installed = manager.paths(include_disabled=True)
+        package_manager(workspace)
     except (PluginError, OSError, RuntimeError, ValueError) as error:
         _LOG.debug("Plugin prewarm skipped: %s", error)
         return
     mark("prewarm-installed")
-    for identifier, path in installed.items():
-        _materialize(identifier, path)
-    mark("prewarm-done")
-
-
-def _materialize(identifier: str, path: Path) -> None:
-    try:
-        SourceTree(path, sources=files(path)).retire()
-    except (PluginError, OSError, RuntimeError, ValueError) as error:
-        _LOG.debug("Prewarm skipped plugin %s: %s", identifier, error)
