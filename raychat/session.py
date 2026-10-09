@@ -43,6 +43,8 @@ from raychat.configuration import SETTINGS
 from raychat.service_contracts import CONTEXT_FACTORY
 from raychat.text_store import TextRef, export_text, fetch, parse_text, spill
 
+_HEAD_CHARS = 1024
+
 from ._common import (
     DEFAULT_CONTEXT_CHARS,
     DEFAULT_INSTRUCTION_ROLE,
@@ -136,6 +138,9 @@ class _StoredMessage:
     payload: str | TextRef
     kind: str
     prompt_id: int
+    # The first stored characters let compaction digests clip spilled prompts
+    # without rereading complete bodies from the launch database.
+    head: str = ""
 
     @property
     def content(self) -> str:
@@ -195,7 +200,8 @@ def _history_message(value: object) -> _StoredMessage:
         kind=_text(fields["kind"]),
         prompt_id=integer_field(fields["prompt_id"], "history prompt identifier"),
     )
-    return _StoredMessage(message.role, payload, message.kind, message.prompt_id)
+    head = fetch(payload)[:_HEAD_CHARS] if isinstance(payload, TextRef) else ""
+    return _StoredMessage(message.role, payload, message.kind, message.prompt_id, head)
 
 
 def _snapshot_parts(
@@ -776,7 +782,9 @@ class AgentSession:
         log: bool = True,
     ) -> None:
         message = SessionMessage(role, content, kind, prompt_id)
-        self._history.append(_StoredMessage(role, spill(content), kind, prompt_id))
+        payload = spill(content)
+        head = content[:_HEAD_CHARS] if isinstance(payload, TextRef) else ""
+        self._history.append(_StoredMessage(role, payload, kind, prompt_id, head))
         if self.store is not None:
             self.store.append("message", _history_record(message))
         if log:

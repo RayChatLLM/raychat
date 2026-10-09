@@ -74,6 +74,21 @@ def digest_header(message_count: int) -> str:
     )
 
 
+def _prompt_source(message: SessionMessage, limit: int) -> str:
+    """Prefer a stored head when it provably yields the exact clipped excerpt.
+
+    Returns
+    -------
+    str
+        Enough leading text for an exact clip, or the complete content.
+
+    """
+    head: str = getattr(message, "head", "")
+    if head and len(" ".join(head.split())) > limit:
+        return head
+    return message.content
+
+
 def session_digest(messages: list[SessionMessage], limit: int) -> str:
     """Summarize session history without mistaking user text for host traffic.
 
@@ -98,7 +113,10 @@ def session_digest(messages: list[SessionMessage], limit: int) -> str:
     while index < len(messages):
         message = messages[index]
         if message.kind == "prompt":
-            groups.append(["User request: " + clip(message.content)])
+            groups.append([
+                "User request: "
+                + clip(_prompt_source(message, _PLUGIN_SETTINGS.summary_clip_chars)),
+            ])
             index += 1
             continue
 
@@ -521,7 +539,7 @@ class _Compaction:
         total = 0
         for message in items:
             line = f"[{message.kind}] " + clip(
-                message.content,
+                _prompt_source(message, _MODEL_DIGEST_MESSAGE_CHARS),
                 _MODEL_DIGEST_MESSAGE_CHARS,
             )
             total += len(line)
