@@ -92,10 +92,31 @@ class _Plugins:
             )
         import importlib
         import os
-        parent = os.path.dirname(self._roots[name])
+        root = self._roots[name]
+        parent = os.path.dirname(root)
         if parent and parent not in sys.path:
             sys.path.insert(0, parent)
         module = importlib.import_module(name)
+        # Eagerly attach every top-level submodule: the intuitive
+        # lib.some_module access pattern must work right after the first
+        # plugins[name] access, not raise AttributeError because only the
+        # lazy package __init__ was imported.  Per-module failures are
+        # ignored so one broken file cannot hide its siblings.
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            entries = []
+        for entry in entries:
+            if entry.endswith(".py") and not entry.startswith("_"):
+                submodule = entry[:-3]
+                try:
+                    setattr(
+                        module,
+                        submodule,
+                        importlib.import_module(name + "." + submodule),
+                    )
+                except Exception:
+                    pass
         self._cache[name] = module
         return module
 
@@ -136,10 +157,15 @@ def rlm(task, text):
 
     When recursion is disabled at this depth the call degrades to a
     plain llm() completion over the task and text, mirroring the
-    reference implementation.  Failures return "Error:" strings.
+    reference implementation; the degraded reply carries a visible
+    bracketed marker so no caller mistakes it for a real nested run.
+    Failures return "Error:" strings.
     """
     if not STATE["allow_rlm"]:
-        return llm("Task: %s\n\nContext:\n%s" % (task, text))
+        return (
+            "[rlm unavailable at this depth; plain completion follows] "
+            + llm("Task: %s\n\nContext:\n%s" % (task, text))
+        )
     _send({"op": "rlm", "task": str(task), "prompt": str(text)})
     reply = _recv()
     if not reply.get("ok"):

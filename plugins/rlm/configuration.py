@@ -36,7 +36,7 @@ DEFAULT_BUDGET: dict[str, int] = {
     "max_llm_calls": 40,
     "max_llm_chunk_chars": 60000,
     "max_llm_reply_chars": 16384,
-    "max_depth": 1,
+    "max_depth": 2,
     "max_prompt_bytes": 16777216,
     "max_final_chars": 65536,
     "prompt_preview_chars": 400,
@@ -277,8 +277,60 @@ class TraceSettings:
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class NotesSettings:
+    """Checked cross-run API-notes policy for one plugin generation.
+
+    Attributes
+    ----------
+    enabled : bool
+        Whether successful top-level runs persist their code for reuse.
+    filename : str
+        Workspace-relative notes file name (one JSON document).
+
+    """
+
+    enabled: bool
+    filename: str
+
+    @classmethod
+    def parse(
+        cls,
+        fields: Mapping[str, object],
+        path: str = "rlm",
+    ) -> NotesSettings:
+        """Validate the notes fields before constructing the immutable record.
+
+        Parameters
+        ----------
+        fields : Mapping[str, object]
+            Plugin settings as provided by the host; missing notes fields
+            fall back to notes ON in ``rlm_api_notes.json``.
+        path : str, optional
+            Schema path prefix used in error messages.
+
+        Returns
+        -------
+        NotesSettings
+            Concrete fields detached from mutable configuration input.
+
+        """
+        return cls(
+            enabled=boolean_field(
+                fields.get("notes_enabled", True),
+                f"{path}.notes_enabled",
+            ),
+            filename=text_field(
+                fields.get("notes_file", "rlm_api_notes.json"),
+                f"{path}.notes_file",
+            ),
+        )
+
+
 _SETTING_NAMES: tuple[str, ...] = (
     *sorted(DEFAULT_BUDGET),
+    "notes_enabled",
+    "notes_file",
     "trace_enabled",
     "trace_file",
 )
@@ -289,3 +341,4 @@ def validate(raw: object) -> None:
     fields = settings_fields(raw, "rlm", required=_SETTING_NAMES)
     Budget.from_settings(fields)
     TraceSettings.parse(fields)
+    NotesSettings.parse(fields)

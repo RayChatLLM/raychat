@@ -7,16 +7,18 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 from unittest import mock
 
 from raychat.service_contracts import ChatService
-from raychat.validation import object_field
+from raychat.validation import array_field, object_field
 from tests.assertions import TypedTestCase
 from tests.plugin_support import ScriptedChat, plugin_module
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from typing_extensions import Unpack
 
     from plugins.rlm import configuration as _rlm_configuration
     from plugins.rlm import loop as _rlm_loop
@@ -25,16 +27,24 @@ else:
     _rlm_loop = plugin_module("rlm.loop")
 
 _TRACE_NAME = "rlm_trace.jsonl"
+_NOTES_NAME = "rlm_api_notes.json"
 _SENTINEL_ENVIRONMENT: dict[str, str] = {"RAYCHAT_SENTINEL": "secret"}
+
+
+class _RunOptions(TypedDict, total=False):
+    """Optional run inputs accepted by the scripted-execution helper."""
+
+    trace: bool
+    notes: bool
+    depth: int
+    plugin_roots: Mapping[str, str]
 
 
 def _execute(
     workspace: Path,
     replies: Sequence[str],
     overrides: Mapping[str, object] | None = None,
-    *,
-    trace: bool = False,
-    plugin_roots: Mapping[str, str] | None = None,
+    **options: Unpack[_RunOptions],
 ) -> tuple[_rlm_loop.RlmResult, ScriptedChat[str]]:
     """Run one rlm conversation against the real child with scripted replies.
 
@@ -51,8 +61,10 @@ def _execute(
         chat_service=service,
         budget=budget,
         workspace=workspace,
-        plugin_roots=dict(plugin_roots or {}),
-        trace_path=workspace / _TRACE_NAME if trace else None,
+        plugin_roots=dict(options.get("plugin_roots") or {}),
+        trace_path=workspace / _TRACE_NAME if options.get("trace") else None,
+        notes_path=workspace / _NOTES_NAME if options.get("notes") else None,
+        depth=options.get("depth", 1),
     )
     result = asyncio.run(_rlm_loop.run_rlm(run, task="answer the task"))
     return result, chat
@@ -218,3 +230,187 @@ class RlmLoopTests(TypedTestCase):
             )
         self.require(result["ok"])
         self.equal(result["answer"], "7")
+
+    def test_plugins_mapping_attaches_submodules(self) -> None:
+        """First mapping access eagerly attaches top-level submodules."""
+        code = 'lib = plugins["tinyplug"]\nfinal(str(lib.toolbox.measure(3)))'
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            package = workspace / "installed" / "tinyplug"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "toolbox.py").write_text(
+                "def measure(value):\n    return value * 2\n",
+                encoding="utf-8",
+            )
+            result, _ = _execute(
+                workspace,
+                [code],
+                plugin_roots={"tinyplug": str(package)},
+            )
+        self.require(result["ok"])
+        self.equal(result["answer"], "6")
+
+    def test_api_digest_in_first_message(self) -> None:
+        """The first message carries a signature digest of each plugin."""
+        source = (
+            "GREETING = 'hi'\n"
+            "VERSION = 3\n"
+            "_PRIVATE_LIMIT = 9\n"
+            "def fetch_rows(query, limit=5):\n    return []\n"
+            "def _hidden(value):\n    return value\n"
+            "class Client:\n"
+            "    def __init__(self, host):\n        self.host = host\n"
+            "    def connect(self, host, port):\n        return host\n"
+            "    def send(self, payload):\n        return payload\n"
+            "    def _internal(self):\n        return None\n"
+        )
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            package = workspace / "installed" / "tinyapi"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "toolbox.py").write_text(source, encoding="utf-8")
+            result, chat = _execute(
+                workspace,
+                ['final("x")'],
+                plugin_roots={"tinyapi": str(package)},
+            )
+        self.require(result["ok"])
+        first = chat.calls[0][1]["content"]
+        self.require("Plugin API digest" in first, first)
+        self.require("toolbox.fetch_rows(query, limit)" in first, first)
+        self.require("toolbox.Client.connect(host, port)" in first, first)
+        self.require("toolbox.Client.send(payload)" in first, first)
+        self.require("toolbox constants: GREETING, VERSION" in first, first)
+        self.require("_hidden" not in first, first)
+        self.require("_internal" not in first, first)
+        self.require("_PRIVATE_LIMIT" not in first, first)
+
+    def test_api_digest_respects_line_cap(self) -> None:
+        """A plugin's digest never exceeds the per-plugin line cap."""
+        source = "".join(
+            f"def tool_{index}(alpha, beta):\n    return alpha\n" for index in range(30)
+        )
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            package = workspace / "installed" / "bigapi"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "many.py").write_text(source, encoding="utf-8")
+            result, chat = _execute(
+                workspace,
+                ['final("x")'],
+                plugin_roots={"bigapi": str(package)},
+            )
+        self.require(result["ok"])
+        first = chat.calls[0][1]["content"]
+        digest_lines = [line for line in first.splitlines() if line.startswith("    ")]
+        self.equal(len(digest_lines), 15)
+        self.require("... (+16 more)" in first, first)
+
+    def test_notes_round_trip(self) -> None:
+        """A successful run records its code; the next run sees it."""
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            first_run, _ = _execute(
+                workspace,
+                ["x = 1", 'final("done")'],
+                notes=True,
+            )
+            raw: object = json.loads(
+                (workspace / _NOTES_NAME).read_text(encoding="utf-8"),
+            )
+            second_run, chat = _execute(workspace, ['final("second")'], notes=True)
+        self.require(first_run["ok"])
+        rows = array_field(raw, "notes document")
+        self.equal(len(rows), 1)
+        entry = object_field(rows[0], "note")
+        self.equal(entry["task"], "answer the task")
+        code = str(entry["code"])
+        self.require("x = 1" in code, code)
+        self.require('final("done")' in code, code)
+        self.require(second_run["ok"])
+        first_message = chat.calls[0][1]["content"]
+        self.require(
+            "Previously successful code in this workspace (newest first):"
+            in first_message,
+            first_message,
+        )
+        self.require("x = 1" in first_message, first_message)
+
+    def test_corrupt_notes_file_is_ignored(self) -> None:
+        """A run survives an unparsable notes file and replaces it."""
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / _NOTES_NAME).write_text("not json{{", encoding="utf-8")
+            result, chat = _execute(workspace, ['final("ok")'], notes=True)
+            rewritten: object = json.loads(
+                (workspace / _NOTES_NAME).read_text(encoding="utf-8"),
+            )
+        self.require(result["ok"])
+        self.equal(result["answer"], "ok")
+        first_message = chat.calls[0][1]["content"]
+        self.require("Previously successful" not in first_message, first_message)
+        self.require(isinstance(rewritten, list), rewritten)
+
+    def test_nested_runs_write_no_notes(self) -> None:
+        """Only depth-1 runs persist cross-run notes."""
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            result, _ = _execute(
+                workspace,
+                ['final("nested")'],
+                notes=True,
+                depth=2,
+            )
+            notes_exists = (workspace / _NOTES_NAME).exists()
+        self.require(result["ok"])
+        self.require(not notes_exists)
+
+    def test_exec_timeout_round_is_traced(self) -> None:
+        """A round that dies on exec timeout still lands in the trace."""
+        code = "import time\ntime.sleep(30)"
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            result, _ = _execute(
+                workspace,
+                [code],
+                {"exec_timeout_seconds": 1},
+                trace=True,
+            )
+            records = _trace_records(workspace)
+        self.require(not result["ok"])
+        self.equal(result["stopped"], "exec timeout")
+        self.equal(len(records), 1)
+        self.equal(records[0]["iteration"], 1)
+        self.equal(records[0]["exception"], "exec timeout")
+        self.equal(records[0]["code"], code)
+        self.equal(records[0]["got_final"], expected=False)
+
+    def test_degraded_rlm_reply_carries_marker(self) -> None:
+        """rlm() at maximum depth returns a visibly marked plain reply."""
+        code = 'reply = rlm("count", "data")\nprint(reply)'
+        replies = [code, "fortytwo", 'final("end")']
+        with TemporaryDirectory() as temporary:
+            result, chat = _execute(
+                Path(temporary),
+                replies,
+                {"max_depth": 1},
+            )
+        self.require(result["ok"])
+        self.equal(result["llm_calls"], 1)
+        degraded_request = chat.calls[1][-1]["content"]
+        self.require("Task: count" in degraded_request, degraded_request)
+        observation = chat.calls[2][-1]["content"]
+        marker = "[rlm unavailable at this depth; plain completion follows]"
+        self.require(marker in observation, observation)
+        self.require("fortytwo" in observation, observation)
+
+    def test_unterminated_fence_lines_are_stripped(self) -> None:
+        """A malformed fence-only line cannot cause a SyntaxError round."""
+        replies = ['```python\nfinal("unterminated")']
+        with TemporaryDirectory() as temporary:
+            result, _ = _execute(Path(temporary), replies)
+        self.require(result["ok"])
+        self.equal(result["answer"], "unterminated")

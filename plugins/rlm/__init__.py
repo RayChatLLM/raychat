@@ -17,9 +17,11 @@ the host and by the plugin's own modules.  All real behaviour lives in:
 
 The plugin is intentionally a *synchronous* ``rlm`` tool surface: one call
 spawns one REPL child.  The child's namespace is built once at init and
-persists across exec rounds.  RLM-in-RLM is possible but disabled by
-default (``max_depth == 1``), and every exec round is audit-traced to
-``rlm_trace.jsonl`` in the workspace root unless the operator disables it.
+persists across exec rounds.  One level of RLM-in-RLM is enabled by
+default (``max_depth == 2``); every exec round is audit-traced to
+``rlm_trace.jsonl`` and successful top-level runs leave reusable API
+notes in ``rlm_api_notes.json``, both in the workspace root unless the
+operator disables them.
 """
 
 from .configuration import Budget

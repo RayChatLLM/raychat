@@ -18,7 +18,7 @@ from raychat.sdk import ToolDefinition, workspace_path
 from raychat.service_contracts import CHAT
 from raychat.validation import ConfigurationError
 
-from .configuration import Budget, BudgetError, TraceSettings, validate
+from .configuration import Budget, BudgetError, NotesSettings, TraceSettings, validate
 from .loop import RlmResult, RlmRun, run_rlm
 
 if TYPE_CHECKING:
@@ -128,6 +128,21 @@ def _trace_path(ctx: PluginContext) -> Path | None:
     return workspace_path(ctx.workspace, trace.filename)
 
 
+def _notes_path(ctx: PluginContext) -> Path | None:
+    """Resolve the cross-run API-notes file inside the workspace, if enabled.
+
+    Returns
+    -------
+    Path | None
+        The notes file path, or None when notes are disabled.
+
+    """
+    notes = NotesSettings.parse(ctx.settings)
+    if not notes.enabled:
+        return None
+    return workspace_path(ctx.workspace, notes.filename)
+
+
 def _resolved_prompt(
     ctx: PluginContext,
     action: Mapping[str, object],
@@ -191,6 +206,7 @@ def register(api: PluginAPI) -> None:
         try:
             budget = Budget.from_settings(ctx.settings, overrides)
             trace_path = _trace_path(ctx)
+            notes_path = _notes_path(ctx)
         except (BudgetError, ConfigurationError, ValueError) as exc:
             return _failure(f"invalid rlm settings: {exc}")
         try:
@@ -208,6 +224,7 @@ def register(api: PluginAPI) -> None:
             workspace=ctx.workspace,
             plugin_roots=_collect_plugin_roots(ctx),
             trace_path=trace_path,
+            notes_path=notes_path,
         )
         return asyncio.run(
             run_rlm(

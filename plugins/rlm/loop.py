@@ -36,6 +36,7 @@ and halved budgets for nested runs instead of inherited remainders.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -44,12 +45,12 @@ import re
 import sys
 import time
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
-from raychat.validation import object_field
+from raychat.validation import ConfigurationError, array_field, object_field
 
 from .child import CHILD_PROGRAM
 
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 _CODE_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]*)\n(.*?)```", re.DOTALL)
+_FENCE_LINE_RE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$")
 _ENV_WHITELIST_PREFIXES: tuple[str, ...] = ("PATH", "HOME", "TEMP", "TMP")
 _SYSTEM_PROMPT_TEMPLATE: str = (
     "You are a Recursive Language Model worker inside a persistent Python 3\n"
@@ -79,6 +81,11 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
     "replies) and returns stdout/stderr/exception, each truncated to\n"
     "{exec_output_chars} chars.\n"
     "\n"
+    "Variables persist across iterations: reuse expensive results (loaded\n"
+    "records, parsed data) from earlier rounds instead of re-fetching -\n"
+    "re-loading large external data every round is the main cause of\n"
+    "execution timeouts.\n"
+    "\n"
     "Names available:\n"
     "1. prompt - the symbolic prompt string ({prompt_chars} chars).\n"
     "2. llm(text) - ask a fresh instance of your model (text truncated to\n"
@@ -92,17 +99,20 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
     "   ({plugin_names}). Plugin packages are NOT importable until you\n"
     "   access the mapping once: a bare `import {plugin_example}` raises\n"
     '   ModuleNotFoundError. Start with lib = plugins["{plugin_example}"];\n'
-    "   after that, submodules import normally (e.g.\n"
-    "   `import {plugin_example}.some_module`). The package __init__ is\n"
-    "   lazy, so dir(lib) can look nearly empty - the real API lives in\n"
-    "   the submodules listed in your first message; import those.\n"
+    "   that first access attaches every top-level submodule, so\n"
+    "   lib.some_module works immediately (and\n"
+    "   `import {plugin_example}.some_module` does too). The full API is\n"
+    "   the digest in your first message.\n"
     "5. rlm(task, text) - delegate to a nested worker like yourself\n"
     "   (own REPL, half your budgets; text becomes its prompt\n"
     "   variable). The worker starts from ZERO context: its task\n"
     "   string must carry everything it needs - exact imports, call\n"
     "   signatures, field names you already discovered. Use it when a\n"
-    "   piece is too big or too complex for one llm() call; at\n"
-    "   maximum depth it falls back to a plain llm() completion.\n"
+    "   piece is too big or too complex for one llm() call. At maximum\n"
+    "   depth it degrades to a plain llm() completion whose reply starts\n"
+    '   with "[rlm unavailable at this depth; plain completion follows]"\n'
+    "   - that marker means NO nested REPL ran, so re-verify any numeric\n"
+    "   or counting results it contains.\n"
     "\n"
     "Write plain ASCII in code: smart quotes, em dashes and ellipsis\n"
     "characters are SyntaxErrors.\n"
@@ -148,6 +158,15 @@ _FORCED_ANSWER_PROMPT = (
 )
 # Room left in one llm() chunk for the model's own instruction text.
 _CHUNK_STEP_MARGIN = 2000
+# API digest caps: lines per plugin and characters per rendered line.
+_DIGEST_MAX_LINES = 15
+_DIGEST_LINE_CHARS = 110
+# Cross-run API notes: retention, storage clipping and injection clipping.
+_NOTES_KEEP = 8
+_NOTES_TASK_CHARS = 300
+_NOTES_CODE_CHARS = 1200
+_NOTES_INJECT_COUNT = 2
+_NOTES_INJECT_CODE_CHARS = 700
 
 
 class RlmResult(TypedDict):
@@ -178,6 +197,9 @@ class RlmRun:
     trace_path : Path | None
         Audit-trace file receiving one JSON line per exec round, or None
         when tracing is disabled.
+    notes_path : Path | None
+        Cross-run API-notes file (successful top-level runs persist their
+        code there for future runs), or None when notes are disabled.
     depth : int
         Current recursion depth; 1 is the top-level call.
 
@@ -188,6 +210,7 @@ class RlmRun:
     workspace: Path
     plugin_roots: Mapping[str, str]
     trace_path: Path | None = None
+    notes_path: Path | None = None
     depth: int = 1
 
 
@@ -202,6 +225,7 @@ class _RunState:
     iterations: int = 0
     stopped: str | None = None
     answer: str | None = None
+    codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -335,8 +359,9 @@ async def _close_child(io_pair: _ChildIo) -> None:
 def _extract_code(reply: str) -> str:
     """Extract runnable code from one model reply.
 
-    The first fenced block is used when present, otherwise the whole reply
-    is treated as code.
+    The first fenced block is used when present.  Otherwise the whole
+    reply is treated as code, after dropping any bare fence-marker lines
+    (an unterminated ``` block must not turn into a SyntaxError round).
 
     Returns
     -------
@@ -347,7 +372,8 @@ def _extract_code(reply: str) -> str:
     match = _CODE_BLOCK_RE.search(reply)
     if match:
         return match.group(1)
-    return reply
+    lines = [line for line in reply.splitlines() if not _FENCE_LINE_RE.match(line)]
+    return "\n".join(lines)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -410,6 +436,21 @@ def _observation(
     return "\n".join(parts)
 
 
+def _trace_write(state: _RunState, record: dict[str, object]) -> None:
+    """Append one audit record to the trace file.
+
+    Tracing must never break a run: the entire write, serialization
+    included, is swallowed on any failure.
+    """
+    if state.trace_path is None:
+        return
+    with (
+        suppress(Exception),
+        state.trace_path.open("a", encoding="utf-8") as trace_file,
+    ):
+        trace_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _trace_round(
     state: _RunState,
     code: str,
@@ -417,27 +458,39 @@ def _trace_round(
     *,
     got_final: bool,
 ) -> None:
-    """Append one audit record for a completed exec round.
+    """Append the audit record for one completed exec round."""
+    _trace_write(
+        state,
+        {
+            "run_ts": state.run_ts,
+            "iteration": state.iterations,
+            "code": code,
+            "stdout": done.get("stdout"),
+            "stderr": done.get("stderr"),
+            "exception": done.get("exception"),
+            "got_final": got_final,
+        },
+    )
 
-    Tracing must never break a run: the entire write, serialization
-    included, is swallowed on any failure.
+
+def _trace_fatal(state: _RunState, code: str) -> None:
+    """Append the audit record for a round that never completed.
+
+    An exec timeout or protocol error would otherwise erase the dying
+    round's code from the trace; the stop reason lands in ``exception``.
     """
-    if state.trace_path is None:
-        return
-    record: dict[str, object] = {
-        "run_ts": state.run_ts,
-        "iteration": state.iterations,
-        "code": code,
-        "stdout": done.get("stdout"),
-        "stderr": done.get("stderr"),
-        "exception": done.get("exception"),
-        "got_final": got_final,
-    }
-    with (
-        suppress(Exception),
-        state.trace_path.open("a", encoding="utf-8") as trace_file,
-    ):
-        trace_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    _trace_write(
+        state,
+        {
+            "run_ts": state.run_ts,
+            "iteration": state.iterations + 1,
+            "code": code,
+            "stdout": "",
+            "stderr": "",
+            "exception": state.stopped,
+            "got_final": False,
+        },
+    )
 
 
 async def _llm_payload(
@@ -565,29 +618,253 @@ async def _await_done(
         return None
 
 
-def _plugin_modules(plugin_roots: Mapping[str, str]) -> str:
-    """Render each plugin's importable submodules for the first message.
+def _clip_line(line: str) -> str:
+    """Clip one digest line to the per-line character cap.
 
     Returns
     -------
     str
-        One indented line per plugin naming its top-level modules.
+        The line, truncated with a ``...`` suffix when over the cap.
 
     """
-    lines: list[str] = []
+    if len(line) <= _DIGEST_LINE_CHARS:
+        return line
+    return line[: _DIGEST_LINE_CHARS - 3] + "..."
+
+
+def _argument_names(arguments: ast.arguments, *, drop_first: bool) -> str:
+    """Render a compact argument list from a parsed signature.
+
+    Returns
+    -------
+    str
+        Comma-separated argument names; ``self``/``cls`` dropped for
+        methods, ``*``/``**`` markers kept.
+
+    """
+    names = [item.arg for item in (*arguments.posonlyargs, *arguments.args)]
+    if drop_first and names and names[0] in {"self", "cls"}:
+        names = names[1:]
+    if arguments.vararg is not None:
+        names.append("*" + arguments.vararg.arg)
+    names.extend(item.arg for item in arguments.kwonlyargs)
+    if arguments.kwarg is not None:
+        names.append("**" + arguments.kwarg.arg)
+    return ", ".join(names)
+
+
+def _class_entries(module: str, node: ast.ClassDef) -> list[str]:
+    """Render one public class as digest lines.
+
+    Returns
+    -------
+    list[str]
+        One line per public method, or the bare class when it has none.
+
+    """
+    entries = [
+        _clip_line(
+            f"{module}.{node.name}.{item.name}"
+            f"({_argument_names(item.args, drop_first=True)})",
+        )
+        for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not item.name.startswith("_")
+    ]
+    if not entries:
+        entries.append(_clip_line(f"{module}.{node.name}"))
+    return entries
+
+
+def _constant_names(node: ast.stmt) -> list[str]:
+    """Collect public UPPER_CASE constant names from one statement.
+
+    Returns
+    -------
+    list[str]
+        The qualifying constant names, in source order.
+
+    """
+    targets: list[ast.expr] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    return [
+        target.id
+        for target in targets
+        if isinstance(target, ast.Name)
+        and target.id.isupper()
+        and not target.id.startswith("_")
+    ]
+
+
+def _module_entries(path: Path) -> list[str]:
+    """Render one plugin module's public API as digest lines.
+
+    Returns
+    -------
+    list[str]
+        Function, class-method and constant lines; empty on parse errors.
+
+    """
+    module = path.stem
+    entries: list[str] = []
+    constants: list[str] = []
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return entries
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not node.name.startswith("_"):
+                entries.append(
+                    _clip_line(
+                        f"{module}.{node.name}"
+                        f"({_argument_names(node.args, drop_first=False)})",
+                    ),
+                )
+        elif isinstance(node, ast.ClassDef):
+            if not node.name.startswith("_"):
+                entries.extend(_class_entries(module, node))
+        else:
+            constants.extend(_constant_names(node))
+    if constants:
+        entries.append(_clip_line(f"{module} constants: " + ", ".join(constants)))
+    return entries
+
+
+def _digest_entries(root: Path) -> list[str]:
+    """Render one plugin root's public API within the per-plugin line cap.
+
+    Returns
+    -------
+    list[str]
+        At most the capped number of lines, ending with an overflow
+        marker when the API is larger.
+
+    """
+    entries: list[str] = []
+    try:
+        files = sorted(
+            item
+            for item in root.iterdir()
+            if item.suffix == ".py" and not item.name.startswith("_")
+        )
+    except OSError:
+        return entries
+    for path in files:
+        entries.extend(_module_entries(path))
+    if len(entries) > _DIGEST_MAX_LINES:
+        extra = len(entries) - (_DIGEST_MAX_LINES - 1)
+        entries = entries[: _DIGEST_MAX_LINES - 1]
+        entries.append(f"... (+{extra} more)")
+    return entries
+
+
+def _plugin_api_digest(plugin_roots: Mapping[str, str]) -> str:
+    """Render a compact per-plugin API digest for the first message.
+
+    Each plugin root is scanned fresh at run start with ``ast`` only
+    (nothing is imported): public module functions and class methods with
+    their argument names, plus UPPER_CASE constant names.
+
+    Returns
+    -------
+    str
+        An indented digest section, one block per installed plugin.
+
+    """
+    sections: list[str] = []
     for name in sorted(plugin_roots):
-        root = Path(plugin_roots[name])
-        try:
-            modules = sorted(
-                item.stem
-                for item in root.iterdir()
-                if item.suffix == ".py" and not item.name.startswith("_")
-            )
-        except OSError:
-            modules = []
-        listed = ", ".join(modules) if modules else "(none found)"
-        lines.append(f"  {name}: {listed}")
-    return "\n".join(lines) if lines else "  (no plugins installed)"
+        entries = _digest_entries(Path(plugin_roots[name]))
+        if entries:
+            body = "\n".join("    " + entry for entry in entries)
+        else:
+            body = "    (no public API found)"
+        sections.append(f"  {name}:\n{body}")
+    return "\n".join(sections) if sections else "  (no plugins installed)"
+
+
+def _tail_clip(text: str, limit: int) -> str:
+    """Clip text to at most ``limit`` characters, keeping the tail.
+
+    Returns
+    -------
+    str
+        The original text, or its tail behind a clip marker.
+
+    """
+    if len(text) <= limit:
+        return text
+    return "...[rlm clipped]...\n" + text[-limit:]
+
+
+def _load_notes(path: Path | None) -> list[dict[str, object]]:
+    """Read the cross-run API notes; corrupt or missing files mean none.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        Note entries, newest first; empty when absent or unreadable.
+
+    """
+    if path is None:
+        return []
+    try:
+        raw: object = json.loads(path.read_text(encoding="utf-8"))
+        rows = array_field(raw, "rlm api notes")
+    except (OSError, ValueError, ConfigurationError):
+        return []
+    notes: list[dict[str, object]] = []
+    for row in rows:
+        with suppress(ConfigurationError):
+            notes.append(object_field(row, "rlm api note"))
+    return notes
+
+
+def _notes_section(run: RlmRun) -> str:
+    """Render previously successful code for the first user message.
+
+    Returns
+    -------
+    str
+        A leading-newline section with the newest notes, or "".
+
+    """
+    notes = _load_notes(run.notes_path)[:_NOTES_INJECT_COUNT]
+    if not notes:
+        return ""
+    parts = ["Previously successful code in this workspace (newest first):"]
+    for note in notes:
+        task = str(note.get("task") or "")
+        code = _tail_clip(str(note.get("code") or ""), _NOTES_INJECT_CODE_CHARS)
+        parts.append(f"- task: {task}\n{code}")
+    return "\n" + "\n".join(parts)
+
+
+def _record_note(run: RlmRun, state: _RunState, task: str) -> None:
+    """Persist a successful top-level run's code for future runs.
+
+    Only depth-1 runs that produced a real answer are recorded; the last
+    few runs are kept, newest first.  Notes must never break a run: the
+    entire write is swallowed on any failure, and a corrupt existing
+    file is simply replaced.
+    """
+    if run.notes_path is None or run.depth != 1 or state.answer is None:
+        return
+    entry: dict[str, object] = {
+        "ts": state.run_ts,
+        "task": _clip(task, _NOTES_TASK_CHARS),
+        "code": _tail_clip("\n".join(state.codes), _NOTES_CODE_CHARS),
+    }
+    entries: list[dict[str, object]] = [entry, *_load_notes(run.notes_path)]
+    entries = entries[:_NOTES_KEEP]
+    with suppress(Exception):
+        run.notes_path.write_text(
+            json.dumps(entries, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _prompt_chars(prompt: str, prompt_path: str | None) -> int:
@@ -641,8 +918,10 @@ def _seed_messages(
         f"Task: {task}\n"
         f"Symbolic prompt: {prompt_chars} chars{located}\n"
         f"Installed plugins: {plugin_names}\n"
-        f"Plugin modules (import via plugins[name] first):\n"
-        f"{_plugin_modules(run.plugin_roots)}"
+        f"Plugin API digest (access plugins[name] once, then import these"
+        f" submodules):\n"
+        f"{_plugin_api_digest(run.plugin_roots)}"
+        f"{_notes_section(run)}"
     )
     if prompt:
         preview = _clip(prompt, run.budget.prompt_preview_chars)
@@ -709,9 +988,12 @@ async def _one_round(
     await io_pair.writer.drain()
     done = await _await_done(run, state, io_pair)
     if done is None:
+        _trace_fatal(state, code)
         return False
     state.iterations += 1
     final_answer = done.get("final")
+    if not done.get("exception"):
+        state.codes.append(code)
     _trace_round(state, code, done, got_final=final_answer is not None)
     if final_answer is not None:
         state.answer = _clip(str(final_answer), run.budget.max_final_chars)
@@ -811,6 +1093,7 @@ async def run_rlm(
     finally:
         if io_pair is not None:
             await _close_child(io_pair)
+    _record_note(run, state, task)
     ok = state.answer is not None
     return RlmResult(
         ok=ok,
