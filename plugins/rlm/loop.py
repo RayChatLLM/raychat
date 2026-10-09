@@ -83,6 +83,11 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
     "records, parsed data) from earlier rounds instead of re-fetching -\n"
     "re-loading large external data every round is the main cause of\n"
     "execution timeouts.\n"
+    "Iterations are your scarcest budget: batch several steps into one\n"
+    "reply (set up, compute, and print compact evidence together) and\n"
+    "spend a new iteration only when you need the previous output to\n"
+    "decide what comes next.\n"
+    "\n"
     "\n"
     "Names available:\n"
     "1. prompt - the symbolic prompt string ({prompt_chars} chars).\n"
@@ -93,14 +98,13 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
     "   semantic work. llm() never raises; on failure it returns a string\n"
     '   starting "Error:".\n'
     "3. final(answer) - the ONLY way to answer; call it IN your code.\n"
-    "4. plugins - lazy mapping of installed plugin libraries\n"
-    "   ({plugin_names}). Plugin packages are NOT importable until you\n"
-    "   access the mapping once: a bare `import {plugin_example}` raises\n"
-    '   ModuleNotFoundError. Start with lib = plugins["{plugin_example}"];\n'
-    "   that first access attaches every top-level submodule, so\n"
-    "   lib.some_module works immediately (and\n"
-    "   `import {plugin_example}.some_module` does too). The full API is\n"
-    "   the digest in your first message.\n"
+    "4. plugins - mapping of installed plugin libraries\n"
+    "   ({plugin_names}). Plugin packages are directly importable: use\n"
+    "   `from {plugin_example} import some_module` or\n"
+    '   lib = plugins["{plugin_example}"] (which also attaches every\n'
+    "   top-level submodule as lib.some_module). The full API is the\n"
+    "   digest in your first message - trust it; do not re-derive it\n"
+    "   with dir() or source reading.\n"
     "5. rlm(task, text) - delegate to a nested worker like yourself\n"
     "   (own REPL, half your budgets; text becomes its prompt\n"
     "   variable). The worker starts from ZERO context: its task\n"
@@ -165,6 +169,8 @@ _NOTES_TASK_CHARS = 300
 _NOTES_CODE_CHARS = 1200
 _NOTES_INJECT_COUNT = 2
 _NOTES_INJECT_CODE_CHARS = 700
+_NOTES_OBSERVED_CHARS = 200
+_NOTES_INJECT_OBSERVED_CHARS = 400
 
 
 class RlmResult(TypedDict):
@@ -224,6 +230,7 @@ class _RunState:
     stopped: str | None = None
     answer: str | None = None
     codes: list[str] = field(default_factory=list)
+    observations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -838,6 +845,10 @@ def _notes_section(run: RlmRun) -> str:
         task = str(note.get("task") or "")
         code = _tail_clip(str(note.get("code") or ""), _NOTES_INJECT_CODE_CHARS)
         parts.append(f"- task: {task}\n{code}")
+        observed = str(note.get("observed") or "").strip()
+        if observed:
+            clipped = _tail_clip(observed, _NOTES_INJECT_OBSERVED_CHARS)
+            parts.append(f"  observed output:\n{clipped}")
     return "\n" + "\n".join(parts)
 
 
@@ -855,6 +866,10 @@ def _record_note(run: RlmRun, state: _RunState, task: str) -> None:
         "ts": state.run_ts,
         "task": _clip(task, _NOTES_TASK_CHARS),
         "code": _tail_clip("\n".join(state.codes), _NOTES_CODE_CHARS),
+        "observed": _tail_clip(
+            "\n".join(state.observations),
+            _NOTES_INJECT_OBSERVED_CHARS,
+        ),
     }
     entries: list[dict[str, object]] = [entry, *_load_notes(run.notes_path)]
     entries = entries[:_NOTES_KEEP]
@@ -992,6 +1007,9 @@ async def _one_round(
     final_answer = done.get("final")
     if not done.get("exception"):
         state.codes.append(code)
+        stdout = str(done.get("stdout") or "").strip()
+        if stdout:
+            state.observations.append(_clip(stdout, _NOTES_OBSERVED_CHARS))
     _trace_round(state, code, done, got_final=final_answer is not None)
     if final_answer is not None:
         state.answer = _clip(str(final_answer), run.budget.max_final_chars)

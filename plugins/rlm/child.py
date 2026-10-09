@@ -283,6 +283,13 @@ def main():
         with open(prompt_path, "r", encoding="utf-8", errors="replace") as fh:
             PROMPT = fh.read()
     PLUGINS = _Plugins(init.get("plugins") or {})
+    # Plugin packages become directly importable: only path setup happens
+    # here; no plugin code runs until the model imports it.
+    import os as _os
+    for _root in (init.get("plugins") or {}).values():
+        _parent = _os.path.dirname(str(_root))
+        if _parent and _parent not in sys.path:
+            sys.path.insert(0, _parent)
     STATE["output_chars"] = int(init.get("output_chars") or 4096)
     STATE["chunk_chars"] = int(init.get("chunk_chars") or 60000)
     STATE["allow_rlm"] = bool(init.get("allow_rlm"))
