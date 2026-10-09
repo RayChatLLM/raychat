@@ -22,6 +22,7 @@ from .filesystem import (
     RetryPolicy,
     cleanup_tree,
     create_scratch_directory,
+    map_io,
     read_regular,
     remove_owned,
     remove_tree,
@@ -65,6 +66,10 @@ def _tree_digest(path: Path) -> str | None:
     if not path.exists():
         return None
     return digest(files(path, validate_manifest=False))
+
+
+def _optional_digest(source: Path | None) -> str | None:
+    return None if source is None else _tree_digest(source)
 
 
 def _digest_field(value: object) -> str | None:
@@ -194,11 +199,16 @@ class PackageTransaction:
         return result
 
     def _reserve(self, sources: Mapping[str, Path | None]) -> None:
-        for name, source in sources.items():
+        names = list(sources)
+        for name in names:
             if NAME.fullmatch(name) is None:
                 raise PluginError("Invalid transaction package name: " + name)
-            before = _tree_digest(self.root / name)
-            following = None if source is None else _tree_digest(source)
+        # Original and staged identities are independent per package, so
+        # the digests run on the shared pool; container reservation and the
+        # journal entry order stay exactly the request order.
+        befores = list(map_io(self._installed_digest, names))
+        followings = list(map_io(_optional_digest, [sources[name] for name in names]))
+        for name, before, following in zip(names, befores, followings, strict=True):
             container = create_scratch_directory(
                 prefix=".transaction-",
                 parent=self.root,
@@ -214,6 +224,9 @@ class PackageTransaction:
                     identity.st_ino,
                 ),
             )
+
+    def _installed_digest(self, name: str) -> str | None:
+        return _tree_digest(self.root / name)
 
     def _container(self, change: _Change) -> Path:
         container = self.root / change.container
@@ -241,13 +254,19 @@ class PackageTransaction:
             If staged or installed content changed before publication.
 
         """
-        for change in self.changes:
+        # Copying and verifying each incoming tree touches only that
+        # change's private container, so the copies run on the shared pool;
+        # the swap loop below keeps its strict sequential order.
+        def _stage_incoming(change: _Change) -> None:
             source = sources[change.name]
             if source is not None:
                 incoming = self._container(change) / "incoming"
                 shutil.copytree(source, incoming)
                 if _tree_digest(incoming) != change.after:
                     raise PluginError("Staged package changed: " + change.name)
+
+        for staged in map_io(_stage_incoming, self.changes):
+            del staged
         for change in self.changes:
             target = self.root / change.name
             container = self._container(change)
