@@ -17,7 +17,6 @@ from .entrypoint import build_parser, prepare_interactive
 from .handoff import document
 from .plugin_sources import SourceTree
 from .resources import create_resources
-from .startup_trace import mark
 from .storage import SessionStore
 from .ui.controller import run_tui
 from .validation import array_field, configuration_fields, text_field
@@ -66,11 +65,8 @@ def _run(bridge: CoreBridge, launch: Mapping[str, object]) -> int:
         text_field(item, "argument")
         for item in array_field(launch["argv"], "arguments")
     ]
-    mark("core-build-parser-begin")
     parser = build_parser(os.environ, argv)
-    mark("core-parser-built")
     args = parser.parse_args(argv)
-    mark("core-args-parsed")
     saved = None if launch.get("state") is None else document(launch["state"])
     probe = launch.get("probe") is True
     source = (
@@ -120,7 +116,6 @@ def _run(bridge: CoreBridge, launch: Mapping[str, object]) -> int:
         resources.runtime.services["core_updates"] = bridge
         install(resources.runtime, bridge)
         bridge.restore = saved
-        mark("core-tui-start")
         result = run_tui(args, resources, bridge)
         if not bridge.retire:
             bridge.send("finished")
@@ -136,11 +131,9 @@ def main() -> int:
         Zero for a clean retirement or exit, one for a startup failure.
 
     """
-    mark("core-main")
     reader = io.BufferedReader(io.FileIO(0, "rb", closefd=False))
     writer = io.BufferedWriter(io.FileIO(1, "wb", closefd=False))
     launch = decode(reader.readline(MAX_MESSAGE + 1))
-    mark("core-launch-received")
     # Library diagnostics cannot corrupt the control stream.
     sys.stdout = sys.stderr
     bridge = CoreBridge(reader, writer)

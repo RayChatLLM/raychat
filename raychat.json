@@ -494,7 +494,6 @@
       "raychat/service_types.py",
       "raychat/session.py",
       "raychat/session_options.py",
-      "raychat/startup_trace.py",
       "raychat/status.py",
       "raychat/storage.py",
       "raychat/transport.py",

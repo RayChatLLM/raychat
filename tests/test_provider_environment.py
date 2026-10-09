@@ -238,6 +238,9 @@ class _SetupTerminal:
     def present(self, frame: str) -> None:
         self.frames.append(frame)
 
+    def handoff(self) -> None:
+        """Match the production session's screen handoff; nothing to retain."""
+
 
 class ProviderProbeTests(TypedTestCase):
     """Keep setup open until the authenticated models request succeeds."""

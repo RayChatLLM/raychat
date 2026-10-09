@@ -254,6 +254,7 @@ class PackageTransaction:
             If staged or installed content changed before publication.
 
         """
+
         # Copying and verifying each incoming tree touches only that
         # change's private container, so the copies run on the shared pool;
         # the swap loop below keeps its strict sequential order.

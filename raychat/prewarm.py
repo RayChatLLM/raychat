@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 from raychat.composition import package_manager
 from raychat.sdk import PluginError
-from raychat.startup_trace import mark
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,10 +27,8 @@ def warm(workspace: Path) -> None:
     trees here would race the core for the same content-addressed store
     entries moments later without making the launch any faster.
     """
-    mark("prewarm-begin")
     try:
         package_manager(workspace)
     except (PluginError, OSError, RuntimeError, ValueError) as error:
         _LOG.debug("Plugin prewarm skipped: %s", error)
         return
-    mark("prewarm-installed")

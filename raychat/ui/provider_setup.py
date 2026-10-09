@@ -334,7 +334,38 @@ def configure(path: Path, values: Mapping[str, str]) -> dict[str, str] | None:
                 previous = checking
                 saved = form.submit(path)
                 if saved is not None:
+                    _hold_for_chat(terminal, previous, truecolor=truecolor)
                     return saved
+
+
+def _hold_for_chat(
+    terminal: TerminalSession,
+    previous: Surface | None,
+    *,
+    truecolor: bool,
+) -> None:
+    """Keep the screen in the session and show a starting notice.
+
+    The chat window adopts this live session, so the operator never drops
+    back to the shell between saving provider settings and the first chat
+    frame.
+    """
+    colors = SETTINGS.tui.palette
+    columns, rows = shutil.get_terminal_size((80, 24))
+    surface = Surface(max(1, columns), max(1, rows))
+    notice = "Starting RayChat..."
+    x = max(0, (surface.width - len(notice)) // 2)
+    y = max(0, surface.height // 2)
+    surface.text(
+        x,
+        y,
+        notice,
+        style=CellStyle(foreground=colors.cyan, background=colors.panel),
+    )
+    frame = surface.to_ansi(home=False, previous=previous, truecolor=truecolor)
+    if frame:
+        terminal.present(frame)
+    terminal.handoff()
 
 
 def _apply_events(

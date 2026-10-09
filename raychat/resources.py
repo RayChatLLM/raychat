@@ -34,7 +34,6 @@ if TYPE_CHECKING:
 from .application import build_runtime, open_store, options_from_args
 from .presentation import load_protocol, open_private_log
 from .session_options import session_options as checked_session_options
-from .startup_trace import mark
 from .validation import configuration_fields, integer_field, text_field
 from .workers import AgentWorker
 
@@ -263,7 +262,6 @@ def create_resources(
         Owned startup resources, closed automatically if setup fails.
 
     """
-    mark("resources-begin")
     options = _resource_options(args)
     runtime = build_runtime(
         options.workspace,
@@ -275,11 +273,9 @@ def create_resources(
             **({"source": source_override} if source_override is not None else {}),
         },
     )
-    mark("resources-runtime-built")
     resources = AgentResources(runtime, None, protocol=protocol_override)
     try:
         _prepare_resources(args, environ, options, resources)
-        mark("resources-ready")
     except BaseException as error:
         resources.close(primary_error=error)
         raise
