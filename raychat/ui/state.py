@@ -1289,6 +1289,7 @@ class TuiState:
         self._rows_width: int | None = None
         self._row_ends: list[int] = []
         self._rows_revision: int = 0
+        self._entry_rows_memo: dict[int, tuple[TranscriptLine, ...]] = {}
         self._viewport_cache: tuple[tuple[int, ...], TranscriptViewport] | None = None
         self._transcript_viewport_height: int | None = None
         self._transcript_scroll_offset: int | None = None
@@ -1315,6 +1316,30 @@ class TuiState:
         self._row_ends = []
         self._rows_revision += 1
         self._viewport_cache = None
+        self._entry_rows_memo.clear()
+
+    _ENTRY_MEMO_LIMIT: ClassVar[int] = 32
+
+    def _memoized_entry_rows(
+        self,
+        index: int,
+        width: int,
+    ) -> tuple[TranscriptLine, ...]:
+        """Render one entry's rows, reusing recent renders across frames.
+
+        Returns
+        -------
+        tuple[TranscriptLine, ...]
+            The entry's rows at the requested width.
+
+        """
+        rows = self._entry_rows_memo.get(index)
+        if rows is None:
+            rows = entry_lines(self._display_entry(self._entries[index]), width)
+            while len(self._entry_rows_memo) >= self._ENTRY_MEMO_LIMIT:
+                self._entry_rows_memo.pop(next(iter(self._entry_rows_memo)))
+            self._entry_rows_memo[index] = rows
+        return rows
 
     @property
     def rows_revision(self) -> int:
@@ -1914,6 +1939,7 @@ class TuiState:
             error_message = "width must be a positive integer"
             raise ValueError(error_message)
         if self._rows_width != width:
+            self._entry_rows_memo.clear()
             ends: list[int] = []
             total = 0
             for entry in self._entries:
@@ -2024,11 +2050,7 @@ class TranscriptRows(Sequence["TranscriptLine"]):
 
     def _entry_rows(self, index: int) -> tuple[TranscriptLine, ...]:
         if index != self._memo_index:
-            state = self._state
-            self._memo_rows = entry_lines(
-                state._display_entry(state._entries[index]),
-                self._width,
-            )
+            self._memo_rows = self._state._memoized_entry_rows(index, self._width)
             self._memo_index = index
         return self._memo_rows
 
