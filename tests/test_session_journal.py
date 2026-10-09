@@ -139,8 +139,7 @@ class SessionCleanupTests(TypedTestCase):
                 self.equal(len(runtime.source_trees), 1)
                 self.require(
                     all(
-                        tree.prefix not in sys.modules
-                        for tree in runtime.source_trees
+                        tree.prefix not in sys.modules for tree in runtime.source_trees
                     ),
                 )
                 self.require(runtime.session is None)
