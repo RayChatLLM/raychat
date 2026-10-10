@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest import mock
 
 from raychat import core_staging
 from raychat.core_bridge import CoreBridge
@@ -16,7 +20,8 @@ from raychat.sdk import ToolDefinition
 from raychat.session import AgentSession
 from raychat.storage import SessionStore
 from raychat.validation import configuration_fields
-from raychat_bootstrap.wire import decode
+from raychat_bootstrap.releases import Releases
+from raychat_bootstrap.wire import decode, encode
 from tests.assertions import TypedTestCase
 
 if TYPE_CHECKING:
@@ -153,6 +158,158 @@ class StagingEngineTests(TypedTestCase):
             adopted = _prepared(release, workspace, {"core_staging": captured})
             self.equal(edited.read_text(encoding="utf-8"), "VALUE = 99\n")
             self.require(adopted.staging_digest != adopted.active_digest)
+
+    def test_digest_and_fingerprint_ignore_planted_links_and_fifos(self) -> None:
+        """List only plain regular files so links and FIFOs stay invisible.
+
+        Staging only materializes in trusted workspaces; this filter is
+        defense in depth on top of that grant. A FIFO with a source
+        suffix must never stall the turn-boundary digest: the walk
+        lstat-filters entries and the read opens O_NOFOLLOW and
+        nonblocking, so nothing here waits on a pipe with no writer.
+        """
+        if os.name != "posix":
+            self.skipTest("POSIX symlinks and FIFOs are required")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = _release(root, {"raychat/app.py": "VALUE = 1\n"})
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "secret.py").write_text("TOKEN = 'hunter2'\n")
+            baseline = core_staging.runtime_digest(release)
+            prints = core_staging.fingerprint(release)
+            (release / "raychat" / "leak.py").symlink_to(outside / "secret.py")
+            (release / "raychat" / "pkg").symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+            os.mkfifo(release / "raychat" / "pipe.py")
+            self.equal(core_staging.runtime_digest(release), baseline)
+            self.equal(core_staging.fingerprint(release), prints)
+            staging = root / "staging"
+            core_staging.sync_from_release(release, staging)
+            self.equal(sorted(core_staging.fingerprint(staging)), ["raychat/app.py"])
+
+    def test_reparse_point_metadata_is_skipped_without_following(self) -> None:
+        """Treat Windows reparse attributes as links even with plain modes.
+
+        Junctions keep ordinary directory modes and are hostile to CI,
+        so the attribute is injected through a mocked lstat: a
+        regular-mode file and a directory-mode entry carrying
+        FILE_ATTRIBUTE_REPARSE_POINT must drop out of the walk, and the
+        directory must never be descended into.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = _release(root, {"raychat/app.py": "VALUE = 1\n"})
+            baseline = core_staging.runtime_digest(release)
+            _release(
+                root,
+                {
+                    "raychat/decoy.py": "DECOY = 1\n",
+                    "raychat/junction/evil.py": "EVIL = 1\n",
+                },
+            )
+            real_lstat = Path.lstat
+
+            def reparse_lstat(path: Path) -> object:
+                info = real_lstat(path)
+                if path.name not in {"decoy.py", "junction"}:
+                    return info
+                return mock.Mock(
+                    st_mode=info.st_mode,
+                    st_mtime_ns=info.st_mtime_ns,
+                    st_size=info.st_size,
+                    st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                )
+
+            with mock.patch.object(Path, "lstat", reparse_lstat):
+                self.equal(
+                    sorted(core_staging.fingerprint(release)),
+                    ["raychat/app.py"],
+                )
+                self.equal(core_staging.runtime_digest(release), baseline)
+
+    def test_sync_refuses_linked_staging_root_and_destinations(self) -> None:
+        """Disable staging instead of ever writing through a link.
+
+        Writing through a symlinked staging root or directory could
+        land application source outside the mirror. StagingUnavailableError
+        is an OSError, so the launch path reacts like any other staging
+        failure: staging stays off for the session with a notice, and
+        nothing is written through the link.
+        """
+        if os.name != "posix":
+            self.skipTest("POSIX symlinks are required")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = _release(root, {"raychat/app.py": "VALUE = 1\n"})
+            outside = root / "outside"
+            outside.mkdir()
+            workspace = root / "workspace"
+            linked_root = core_staging.staging_root(workspace)
+            linked_root.parent.mkdir(parents=True)
+            linked_root.symlink_to(outside, target_is_directory=True)
+            with self.rejected(core_staging.StagingUnavailableError, "link"):
+                core_staging.prepare(
+                    release,
+                    workspace,
+                    None,
+                    core_staging.LaunchPolicy(
+                        trusted=True,
+                        probe=False,
+                        recovered=False,
+                    ),
+                )
+            self.equal(list(outside.iterdir()), [])
+            second = root / "second"
+            second.mkdir()
+            state = _prepared(release, second, None)
+            mirrored = state.root / "raychat"
+            shutil.rmtree(mirrored)
+            mirrored.symlink_to(outside, target_is_directory=True)
+            (release / "raychat" / "app.py").write_text("VALUE = 2\n")
+            with self.rejected(core_staging.StagingUnavailableError, "link"):
+                core_staging.sync_from_release(release, state.root)
+            self.equal(list(outside.iterdir()), [])
+
+    def test_planted_link_adds_nothing_and_never_reaches_a_candidate(self) -> None:
+        """Keep linked content out of digests, submissions and candidates.
+
+        The listed file set is lstat-filtered again at read time (an
+        O_NOFOLLOW, nonblocking open that verifies the descriptor), so
+        the window between fingerprint and read is a deliberate re-stat
+        TOCTOU: an entry swapped for a link in that window is refused
+        at open and dropped, never followed.
+        """
+        if os.name != "posix":
+            self.skipTest("POSIX symlinks are required")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = _release(root, {"raychat/app.py": "VALUE = 1\n"})
+            workspace = root / "workspace"
+            workspace.mkdir()
+            beyond = root / "beyond"
+            beyond.mkdir()
+            (beyond / "secret.py").write_text("TOKEN = 'hunter2'\n")
+            state = _prepared(release, workspace, None)
+            baseline = state.capture()["staging_digest"]
+            (state.root / "raychat" / "leak.py").symlink_to(beyond / "secret.py")
+            self.equal(core_staging.runtime_digest(state.root), baseline)
+            self.equal(state.capture()["staging_digest"], baseline)
+            project = root / "project"
+            project.mkdir()
+            (project / "raychat.json").write_bytes(encode({}))
+            releases = Releases(project, root / "releases")
+            with self.rejected(ValueError, "links or reparse"):
+                releases.capture(state.root)
+            leaked = [
+                path
+                for path in (root / "releases").rglob("*")
+                if path.name in {"leak.py", "secret.py"}
+                or path.name.startswith("candidate-")
+            ]
+            self.equal(leaked, [])
 
     def test_prepare_resets_after_recovery(self) -> None:
         """Discard rolled-back edits so they cannot resubmit themselves."""

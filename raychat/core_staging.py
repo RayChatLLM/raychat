@@ -10,22 +10,30 @@ whole tree to the supervisor's validate-and-swap pipeline.
 The mirror is only materialized for trusted workspaces (the same trust
 bit that gates workspace plugin hot-reload): auto-submitting workspace
 content into the application would otherwise let an untrusted workspace
-inject harness code.
+inject harness code. On top of that trust gate, every walk, read and
+write here is belt-and-suspenders hardened: only plain regular files
+reachable through plain directories exist for digests, fingerprints and
+mirroring (symlinks, FIFOs, devices and Windows reparse points are
+invisible and never opened), and the mirror refuses to write through
+linked path components, disabling staging for the session instead.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import stat
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .configuration import SETTINGS
+from .filesystem import read_regular
 from .validation import configuration_fields, text_field
 
 if TYPE_CHECKING:
+    import os
     from collections.abc import Iterator, Mapping
     from pathlib import Path
 
@@ -55,6 +63,15 @@ def staging_root(workspace: Path) -> Path:
     return workspace / SETTINGS.storage.staging_directory
 
 
+class StagingUnavailableError(OSError):
+    """A linked path makes the staging mirror unsafe to use for writes.
+
+    Raised instead of ever writing through a symlink or Windows reparse
+    point; the launch path reacts by disabling staging for the session
+    and surfacing a notice.
+    """
+
+
 def _ignored(path: Path) -> bool:
     return (
         any(part in _IGNORED_NAMES for part in path.parts)
@@ -62,8 +79,65 @@ def _ignored(path: Path) -> bool:
     )
 
 
+def _entry_metadata(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except OSError:
+        return None
+
+
+def _linked_stat(info: os.stat_result) -> bool:
+    """Whether lstat metadata marks a symlink or Windows reparse point.
+
+    Junctions and other reparse points keep ordinary directory or file
+    modes, so the Windows reparse attribute is inspected alongside the
+    POSIX link bit; ``is_file()``/``is_dir()`` style checks would
+    follow the link instead of seeing it.
+
+    Returns
+    -------
+    bool
+        True for metadata that must never be followed or written through.
+
+    Raises
+    ------
+    TypeError
+        The platform reports non-integer attribute metadata.
+
+    """
+    attributes: object = getattr(info, "st_file_attributes", 0)
+    if not isinstance(attributes, int):
+        message = "Invalid filesystem attribute metadata."
+        raise TypeError(message)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT,
+    )
+
+
+def _refuse_linked(path: Path) -> None:
+    """Reject a path whose own entry is a symlink or reparse point.
+
+    Raises
+    ------
+    StagingUnavailableError
+        The entry exists and is a link or Windows reparse point.
+
+    """
+    info = _entry_metadata(path)
+    if info is not None and _linked_stat(info):
+        message = f"Staging path is a link or reparse point: {path}"
+        raise StagingUnavailableError(message)
+
+
 def _tree_files(root: Path) -> Iterator[tuple[str, Path]]:
     """Walk the runtime roots in stable order.
+
+    Only plain regular files reachable through plain directories are
+    listed: symlinks, FIFOs, devices and Windows reparse points - and
+    everything behind them - are invisible to digests, fingerprints and
+    mirroring. The walk never follows or opens an entry it has not
+    lstat-checked, so a planted FIFO cannot stall the turn-boundary
+    digest and a planted link cannot pull outside content in.
 
     Yields
     ------
@@ -71,21 +145,59 @@ def _tree_files(root: Path) -> Iterator[tuple[str, Path]]:
         Relative posix path and file location for each real source file.
 
     """
+    entries: list[tuple[str, Path]] = []
     for name in RUNTIME_ROOTS:
-        base = root / name
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*")):
-            relative = path.relative_to(root)
-            if path.is_file() and not _ignored(relative):
-                yield relative.as_posix(), path
+        pending = [root / name]
+        while pending:
+            directory = pending.pop()
+            info = _entry_metadata(directory)
+            if info is None or _linked_stat(info) or not stat.S_ISDIR(info.st_mode):
+                continue
+            try:
+                children = list(directory.iterdir())
+            except OSError:
+                continue
+            for path in children:
+                child = _entry_metadata(path)
+                if child is None or _linked_stat(child):
+                    continue
+                if stat.S_ISDIR(child.st_mode):
+                    pending.append(path)
+                elif stat.S_ISREG(child.st_mode):
+                    relative = path.relative_to(root)
+                    if not _ignored(relative):
+                        entries.append((relative.as_posix(), path))
+    yield from sorted(entries)
+
+
+def _read_entry(path: Path) -> bytes | None:
+    """Snapshot one listed file, refusing anything but a plain regular file.
+
+    The lstat filter in ``_tree_files`` and the O_NOFOLLOW, nonblocking
+    open here bracket the deliberate re-stat window: an entry swapped
+    for a link, FIFO or device between listing and read is rejected at
+    open time and dropped instead of followed.
+
+    Returns
+    -------
+    bytes | None
+        The file's bytes, or None when it vanished or stopped being a
+        plain regular file.
+
+    """
+    try:
+        info = path.lstat()
+        return read_regular(path, info.st_size + 1, follow_symlinks=False)
+    except (OSError, ValueError):
+        return None
 
 
 def runtime_digest(root: Path) -> str:
     """Hash the runtime roots' names and bytes in stable order.
 
     Unlike the release digest this skips caches (``__pycache__``,
-    ``*.pyc`` and friends) that tools may drop into an editable tree.
+    ``*.pyc`` and friends) that tools may drop into an editable tree,
+    along with every non-regular or linked entry.
 
     Returns
     -------
@@ -95,8 +207,11 @@ def runtime_digest(root: Path) -> str:
     """
     value = hashlib.sha256()
     for name, path in _tree_files(root):
+        data = _read_entry(path)
+        if data is None:
+            continue
         value.update(name.encode() + b"\0")
-        value.update(path.read_bytes())
+        value.update(data)
     return value.hexdigest()
 
 
@@ -111,9 +226,8 @@ def fingerprint(root: Path) -> dict[str, tuple[int, int]]:
     """
     result: dict[str, tuple[int, int]] = {}
     for name, path in _tree_files(root):
-        try:
-            info = path.stat()
-        except OSError:
+        info = _entry_metadata(path)
+        if info is None:
             continue
         result[name] = (info.st_mtime_ns, info.st_size)
     return result
@@ -136,12 +250,37 @@ def _write_replace(path: Path, data: bytes) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _guarded_destination(staging: Path, name: str) -> Path:
+    """Resolve a mirror destination, refusing linked path components.
+
+    If the staging root or a directory on the destination path is a
+    symlink or Windows reparse point, StagingUnavailableError propagates
+    from the component check: writing through it could land bytes
+    outside the mirror, so staging shuts down instead.
+
+    Returns
+    -------
+    Path
+        The write destination for one mirrored file.
+
+    """
+    target = staging
+    for part in name.split("/"):
+        _refuse_linked(target)
+        target /= part
+    return target
+
+
 def sync_from_release(release_root: Path, staging: Path) -> str:
     """Mirror the release's runtime roots into the staging tree.
 
     Files absent from the release are deleted from staging so removals
     survive the round trip; cache artifacts are left alone on the
-    staging side and never copied from the release.
+    staging side and never copied from the release. Every destination
+    path is checked against linked components before it is written.
+
+    StagingUnavailableError propagates when a destination inside the
+    mirror goes through a symlink or Windows reparse point.
 
     Returns
     -------
@@ -149,21 +288,22 @@ def sync_from_release(release_root: Path, staging: Path) -> str:
         The runtime digest of the synchronized staging tree.
 
     """
-    wanted: dict[str, bytes] = {
-        name: path.read_bytes() for name, path in _tree_files(release_root)
-    }
+    _refuse_linked(staging)
+    wanted: dict[str, bytes] = {}
+    for name, path in _tree_files(release_root):
+        data = _read_entry(path)
+        if data is not None:
+            wanted[name] = data
     existing = dict(_tree_files(staging))
     for name, path in existing.items():
         if name not in wanted:
             with contextlib.suppress(OSError):
                 path.unlink()
     for name, data in wanted.items():
-        target = staging.joinpath(*name.split("/"))
+        target = _guarded_destination(staging, name)
         current = existing.get(name)
-        if current is not None:
-            with contextlib.suppress(OSError):
-                if current.read_bytes() == data:
-                    continue
+        if current is not None and _read_entry(current) == data:
+            continue
         _write_replace(target, data)
     return runtime_digest(staging)
 
@@ -237,6 +377,12 @@ def prepare(
     validation gate's reformatting). A tree that changed across the
     swap is left untouched; the next turn boundary resubmits it.
 
+    When the staging root or a mirror destination is a symlink or
+    Windows reparse point, StagingUnavailableError propagates; the
+    launch path treats it like any other staging OSError, so staging
+    stays disabled for the session with a notice and nothing is
+    written through the link.
+
     Returns
     -------
     StagingState | None
@@ -246,6 +392,7 @@ def prepare(
     if policy.probe or not policy.trusted:
         return None
     staging = staging_root(workspace)
+    _refuse_linked(staging)
     active = runtime_digest(release_root)
     saved = _saved_digest(saved_state)
     missing = not any((staging / name).is_dir() for name in RUNTIME_ROOTS)
