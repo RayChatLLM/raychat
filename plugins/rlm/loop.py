@@ -48,7 +48,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from raychat.validation import ConfigurationError, array_field, object_field
 
@@ -56,6 +56,8 @@ from .child import CHILD_PROGRAM
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from typing_extensions import NotRequired
 
     from raychat.sdk import Messages
     from raychat.service_contracts import ChatService
