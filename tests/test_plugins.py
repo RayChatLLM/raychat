@@ -347,6 +347,7 @@ class PluginRuntimeTests(TypedTestCase):
                         "write",
                         "edit",
                         "run",
+                        "rlm",
                         "skill",
                         "memories",
                         "remember",

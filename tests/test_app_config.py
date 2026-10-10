@@ -138,7 +138,7 @@ with patch('raychat.filesystem.os.open', substituted):
                 config.plugins.settings["chat_completions"],
             ),
         )
-        self.equal(config.chat.instruction_role, "system")
+        self.equal(config.chat.instruction_role, "user")
         self.require(("raychat/configuration.py") in (config.release.source_files))
         self.require(("raychat.json") in (config.release.source_files))
         self.require(("raychat/session.py") in (config.release.source_files))

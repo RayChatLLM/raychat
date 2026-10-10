@@ -1,0 +1,27 @@
+{
+  "id": "rlm",
+  "version": "1.0.0",
+  "sdk": 4,
+  "entrypoint": "__init__:register",
+  "description": "recursive language model capabilities",
+  "requires": {},
+  "defaults": {
+    "max_iterations": 24,
+    "exec_timeout_seconds": 60,
+    "total_timeout_seconds": 600,
+    "exec_output_chars": 4096,
+    "max_llm_calls": 40,
+    "max_llm_chunk_chars": 60000,
+    "max_llm_reply_chars": 16384,
+    "max_depth": 2,
+    "max_prompt_bytes": 16777216,
+    "max_final_chars": 65536,
+    "prompt_preview_chars": 400,
+    "trace_enabled": true,
+    "trace_file": "rlm_trace.jsonl",
+    "notes_enabled": true,
+    "notes_file": "rlm_api_notes.json",
+    "instruction_role": "user"
+  },
+  "instructions": "Answer questions about very large data with {\"action\":\"rlm\",\"task\":\"...\"} plus optional \"prompt_file\":\"big.txt\" (workspace-relative) or inline \"prompt\". A sub-model works in a persistent Python REPL: the data stays in REPL variables, never in a context window. The REPL exposes `plugins`, a mapping of ALL currently installed plugin libraries keyed by plugin id (e.g. plugins[\"process\"]), so the sub-model can query live data itself. Prefer this over read for huge files. Budget overrides are ACTION FIELDS, not prose: pass e.g. {\"action\":\"rlm\",\"task\":\"...\",\"max_iterations\":10} - a limit stated only inside the task text does not bind the run (also overridable: max_llm_calls, max_depth, exec_timeout_seconds, total_timeout_seconds). The result is {ok, answer, iterations, llm_calls, stopped}; each execution round is audit-logged to rlm_trace.jsonl in the workspace unless the operator disables tracing."
+}

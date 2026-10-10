@@ -41,6 +41,7 @@ from .accept_tui import SOURCE, Case
 from .acceptance_support import (
     fixture_provider_environment,
     json_text,
+    memory_toggle_arguments,
     message_history,
     read_object,
     require,
@@ -615,7 +616,7 @@ class _CollectiveRun:
                 str(self.case.work),
                 "--context-chars",
                 str(PARENT_CONTEXT_CHARS),
-                "--no-memory",
+                *memory_toggle_arguments(),
                 "--no-session",
                 "--yes",
                 "--log",

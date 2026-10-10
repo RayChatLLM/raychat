@@ -193,6 +193,7 @@ def build_runtime(
         manager=manager,
         **remaining,
     )
+    runtime.workspace_trusted = trusted_workspace
     directories = [manager.roots["workspace"] / "plugins"] if trusted_workspace else []
     try:
         runtime.watch(

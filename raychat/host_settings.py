@@ -178,6 +178,7 @@ class ChatSettings:
     instruction_roles: tuple[str, ...]
     protocol: ChatProtocolSettings
     default_provider: str
+    auto_core_updates: bool
 
     @classmethod
     def parse(cls, value: object, path: str = "chat") -> ChatSettings:
@@ -233,6 +234,10 @@ class ChatSettings:
             auto_approve=boolean_field(
                 fields.get("auto_approve"),
                 f"{path}.auto_approve",
+            ),
+            auto_core_updates=boolean_field(
+                fields.get("auto_core_updates", True),
+                f"{path}.auto_core_updates",
             ),
             log_file=text_field(
                 fields.get("log_file"),
@@ -323,6 +328,7 @@ class StorageSettings:
     atomic_attempts: int
     atomic_random_bytes: int
     workspace_file_mode: int
+    staging_directory: str
 
     @classmethod
     def parse(cls, value: object, path: str = "storage") -> StorageSettings:
@@ -404,6 +410,10 @@ class StorageSettings:
                 fields.get("workspace_file_mode"),
                 f"{path}.workspace_file_mode",
             ),
+            staging_directory=text_field(
+                fields.get("staging_directory", ".raychat/source"),
+                f"{path}.staging_directory",
+            ),
         )
 
 
@@ -427,6 +437,8 @@ class LimitsSettings:
     max_worker_error_chars: int
     worker_poll_seconds: float
     worker_stop_seconds: float
+    staging_reject_limit: int
+    staging_poll_seconds: float
 
     @classmethod
     def parse(cls, value: object, path: str = "limits") -> LimitsSettings:
@@ -503,6 +515,15 @@ class LimitsSettings:
             worker_stop_seconds=_number(
                 fields.get("worker_stop_seconds"),
                 f"{path}.worker_stop_seconds",
+            ),
+            staging_reject_limit=integer_field(
+                fields.get("staging_reject_limit", 3),
+                f"{path}.staging_reject_limit",
+                minimum=1,
+            ),
+            staging_poll_seconds=_number(
+                fields.get("staging_poll_seconds", 1.0),
+                f"{path}.staging_poll_seconds",
             ),
         )
 

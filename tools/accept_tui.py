@@ -37,6 +37,7 @@ from .acceptance_support import (
     ignore_bytecode,
     json_text,
     matches,
+    memory_toggle_arguments,
     read_messages,
     read_object,
     require,
@@ -111,7 +112,7 @@ class Case:
             str(self.probe),
             "--provider",
             "probe",
-            "--no-memory",
+            *memory_toggle_arguments(),
         ]
         flags += (
             ["--session-dir", str(self.output / "saved")]

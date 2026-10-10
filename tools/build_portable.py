@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import stat
 import sys
 import zipfile
@@ -27,12 +28,13 @@ from raychat.filesystem import (
     read_regular,
     write_bytes,
 )
+from raychat.validation import array_field, configuration_fields, text_field
 from tools import release_folder
 from tools.build_plugin_catalog import build_catalog
 from tools.smoke_process import SmokeCommand, run_checked
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 ARCHIVE_ROOT = SETTINGS.release.archive_root
 MANIFEST_NAME = SETTINGS.release.manifest_name
@@ -200,6 +202,124 @@ def _zip_info(relative: str) -> zipfile.ZipInfo:
     return info
 
 
+_CATALOG_ARCHIVE_PATTERN = re.compile(
+    r"^plugin_catalog/(?P<name>package-[0-9a-f]{64}\.zip)$",
+)
+
+
+def _shipped_records(
+    catalog: Mapping[str, object],
+    shipped: set[str],
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Select the catalog records whose archives ship, preserving order.
+
+    Returns
+    -------
+    tuple[list[dict[str, object]], list[str]]
+        The shipped records and their plugin identifiers.
+
+    Raises
+    ------
+    RuntimeError
+        If a shipped archive has no catalog record, or a shipped plugin
+        depends on one that is not packaged.
+
+    """
+    records: list[dict[str, object]] = []
+    names: list[str] = []
+    matched: set[str] = set()
+    for raw_record in array_field(catalog["plugins"], "catalog plugins"):
+        record = configuration_fields(raw_record, "catalog record")
+        url = text_field(record["url"], "catalog record url")
+        if url not in shipped:
+            continue
+        records.append(dict(record))
+        names.append(text_field(record["id"], "catalog record id"))
+        matched.add(url)
+    missing = sorted(shipped - matched)
+    if missing:
+        error_message = (
+            "Packaged plugin archives without catalog records: " + ", ".join(missing)
+        )
+        raise RuntimeError(error_message)
+    for identity, record in zip(names, records, strict=True):
+        absent = sorted(
+            set(configuration_fields(record.get("requires", {}), "requires"))
+            - set(names),
+        )
+        if absent:
+            error_message = (
+                f"Packaged plugin {identity!r} requires unpackaged"
+                " plugins: " + ", ".join(absent)
+            )
+            raise RuntimeError(error_message)
+    return records, names
+
+
+def _slim_catalog(sources: dict[str, bytes]) -> None:
+    """Restrict the staged catalog and profile to the packaged plugins.
+
+    The development tree keeps the complete catalog; the release ships
+    only the content-addressed plugin archives named in the source
+    allowlist. The staged catalog.json, its content-addressed
+    catalog-<sha256>.json twin and profile.json are regenerated here from
+    the shipped set, byte-identical to a catalog rebuild over the shipped
+    plugin sources, so the allowlist stays the single source of truth and
+    the packaged application never references a plugin it does not carry.
+
+    Raises
+    ------
+    RuntimeError
+        If plugin archives are staged without a staged catalog.
+
+    """
+    shipped: set[str] = set()
+    for relative in sources:
+        match = _CATALOG_ARCHIVE_PATTERN.match(relative)
+        if match is not None:
+            shipped.add(match.group("name"))
+    staged = sources.get("plugin_catalog/catalog.json")
+    if staged is None:
+        if shipped:
+            error_message = (
+                "Packaged plugin archives without a staged catalog: "
+                + ", ".join(sorted(shipped))
+            )
+            raise RuntimeError(error_message)
+        return
+    raw_catalog: object = json.loads(staged.decode("utf-8"))
+    catalog = configuration_fields(raw_catalog, "plugin catalog")
+    records, names = _shipped_records(catalog, shipped)
+    slimmed: dict[str, object] = {**catalog, "plugins": records}
+    catalog_data = (json.dumps(slimmed, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8",
+    )
+    catalog_name = "catalog-" + hashlib.sha256(catalog_data).hexdigest() + ".json"
+    raw_profile: object = json.loads(
+        sources["plugin_catalog/profile.json"].decode("utf-8"),
+    )
+    profile: dict[str, object] = dict(
+        configuration_fields(raw_profile, "plugin profile"),
+    )
+    profile["catalog"] = catalog_name
+    profile["packages"] = [
+        name + "@" + text_field(record["version"], "catalog record version")
+        for name, record in zip(names, records, strict=True)
+    ]
+    stale = [
+        relative
+        for relative in sources
+        if relative.startswith("plugin_catalog/catalog-") and relative.endswith(".json")
+    ]
+    for relative in stale:
+        del sources[relative]
+    sources["plugin_catalog/catalog.json"] = catalog_data
+    sources["plugin_catalog/" + catalog_name] = catalog_data
+    sources["plugin_catalog/profile.json"] = (
+        json.dumps(profile, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
 def build_archive(root: Path) -> tuple[bytes, dict[str, bytes]]:
     """Return deterministic archive bytes and the expected member mapping.
 
@@ -210,6 +330,7 @@ def build_archive(root: Path) -> tuple[bytes, dict[str, bytes]]:
 
     """
     sources = source_data(root)
+    _slim_catalog(sources)
     members = {MANIFEST_NAME: _manifest(sources), **sources}
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -463,6 +584,11 @@ def smoke_archive(raw: bytes, *, output: Path | None = None) -> SmokeReport:
                 ),
                 ("tools.optimization_tui", "optimization", []),
             ):
+                # The battery follows the shipped allowlist: a scenario
+                # whose driver is not packaged has nothing to verify.
+                driver = root / Path(*module.split(".")).with_suffix(".py")
+                if not driver.is_file():
+                    continue
                 run_checked(
                     SmokeCommand(
                         (

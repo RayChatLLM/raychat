@@ -97,13 +97,18 @@ def register(api: PluginAPI) -> None:
     api.configure(
         lambda ctx: ctx.set_status("catalog", StatusItem(f"{len(store)} skills")),
     )
-    api.register_instruction(
-        "skill_catalog",
-        lambda _session, _limit, _ctx: (
-            "\nAvailable skills: " + json.dumps(store.catalog(), ensure_ascii=False)
-        ),
-        priority=40,
-    )
+
+    def skill_catalog(
+        _session: InstructionSession,
+        _limit: int,
+        _ctx: PluginContext,
+    ) -> str:
+        catalog = store.catalog()
+        if not catalog:
+            return ""
+        return "\nAvailable skills: " + json.dumps(catalog, ensure_ascii=False)
+
+    api.register_instruction("skill_catalog", skill_catalog, priority=40)
 
     def loaded_skills(
         _session: InstructionSession,

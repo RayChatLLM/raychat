@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from raychat.filesystem import read_regular
-from raychat.validation import json_object, object_field
+from raychat.validation import array_field, json_object, object_field
 from tests.assertions import TypedTestCase
 from tests.plugin_support import package
 from tests.test_package_system import PackageTestCase
@@ -264,18 +264,49 @@ class PortableBuildTests(PackageTestCase):
         require("tools/smoke_process.py" in sources)
         require(("tests/test_build_portable.py") in (sources))
         require(("tests/test_release.py") in (sources))
-        require(("plugins/optimization/optimize_chat_prompt.py") in (set(sources)))
         require(("raychat/entrypoint.py") in (set(sources)))
         require(("raychat/storage.py") in (sources))
         require(("tests/test_plugin_sessions.py") in (sources))
-        require(("plugins/optimization/GEPA_LICENSE") in (sources))
-        require(("plugins/optimization/gepa/optimize_anything.py") in (sources))
         require(not (any(path.startswith("gepa/") for path in sources)))
+        core = (
+            "chat_completions",
+            "context",
+            "filesystem",
+            "goals",
+            "plugin_manager",
+            "process",
+            "skills",
+            "subagents",
+            "workflows",
+        )
+        # The allowlist regenerates inside live-update candidates, so the
+        # test asserts consistency, not a fixed set: every packaged plugin
+        # ships sources and archive together, and the core nine are
+        # always among them.
+        catalog = object_field(
+            json_object(sources["plugin_catalog/catalog.json"]),
+            "plugin catalog",
+        )
+        identities = {}
+        for raw_record in array_field(catalog["plugins"], "catalog plugins"):
+            record = object_field(raw_record, "catalog record")
+            identities[str(record["url"])] = str(record["id"])
+        packaged = {
+            identities[path.removeprefix("plugin_catalog/")]
+            for path in sources
+            if path.startswith("plugin_catalog/") and path.endswith(".zip")
+        }
+        sourced = {
+            path.split("/")[1] for path in sources if path.startswith("plugins/")
+        }
+        require(packaged == sourced)
+        require(set(core) <= packaged)
+        for name in packaged:
+            require(f"plugins/{name}/plugin.json" in sources)
         for driver in (
             "accept_tui",
             "features_tui",
             "collective_tui",
-            "optimization_tui",
             "persistence_tui",
             "package_download_tui",
         ):

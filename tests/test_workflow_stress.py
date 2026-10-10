@@ -8,10 +8,13 @@ import os
 import socket
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from unittest import mock
 
+from raychat import configuration
+from raychat.configuration import SETTINGS
 from raychat.filesystem import OwnedTemporaryDirectory
 from raychat.sdk import (
     HTTP_PROVIDER,
@@ -198,6 +201,16 @@ class WorkflowStressTests(unittest.TestCase):
             "RAYCHAT_MODEL": "",
             "RAYCHAT_BASE_URL": "",
         }
+
+        # The benchmark's compaction detector scans messages[1:] for the
+        # digest and so assumes a separate leading instruction message; the
+        # measurement run is role-pinned to the system layout. The children
+        # read SETTINGS while the benchmark imports its captured plugins,
+        # so patching the module attribute covers every child session.
+        pinned = replace(
+            SETTINGS,
+            chat=replace(SETTINGS.chat, instruction_role="system"),
+        )
         with (
             contextlib.redirect_stdout(io.StringIO()),
             mock.patch.dict(os.environ, environment),
@@ -208,6 +221,7 @@ class WorkflowStressTests(unittest.TestCase):
                 "DETERMINISTIC_TIMEOUT",
                 600 if os.name == "nt" else benchmark.DETERMINISTIC_TIMEOUT,
             ),
+            mock.patch.object(configuration, "SETTINGS", pinned),
         ):
             raw: object = benchmark.run(agents=50)
         report = object_field(raw, "workflow report")

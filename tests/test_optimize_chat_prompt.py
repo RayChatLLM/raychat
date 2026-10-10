@@ -693,8 +693,10 @@ class ChatPromptOptimizationTests(_OptimizationTestCase):
         )
 
         def task_chat(messages: Messages) -> str:
+            # Under instruction_role="user" the task rides behind the merged
+            # instruction block and the task marker; other roles leave it bare.
             task = next(
-                message["content"]
+                message["content"].rpartition("\n\n--- USER TASK ---\n")[2]
                 for message in messages
                 if message["role"] == "user"
                 and not message["content"].startswith(

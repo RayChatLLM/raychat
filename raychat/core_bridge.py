@@ -43,7 +43,6 @@ class CoreBridge:
         self.frame: dict[str, object] = {}
         self.frame_time = 0.0
         self.size_received = False
-        self.verifications: dict[str, dict[str, object]] = {}
         self.status_time = time.monotonic()
         self.active = False
         self.recover_history = False

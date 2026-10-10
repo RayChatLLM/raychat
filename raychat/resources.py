@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
     from .core_bridge import CoreBridge
+    from .core_staging import StagingState
     from .plugins import Runtime
     from .sdk import SessionOptions
     from .storage import SessionStore
@@ -97,6 +98,7 @@ class AgentResources:
     store: SessionStore | None = None
     protocol: str | None = None
     live: CoreBridge | None = None
+    staging: StagingState | None = None
 
     def close(self, *, primary_error: BaseException | None = None) -> None:
         """Attempt host, store and log cleanup, preserving the first failure.

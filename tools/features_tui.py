@@ -24,6 +24,7 @@ from .acceptance_support import (
     fixture_provider_environment,
     ignore_bytecode,
     json_text,
+    profile_has_plugin,
     read_messages,
     read_object,
     require,
@@ -33,6 +34,7 @@ from .acceptance_support import (
 from .drive_tui import TerminalChat
 
 SOURCE = Path(__file__).resolve().parents[1]
+_MEMORY_PACKAGED = profile_has_plugin("memory")
 _EXPECTED_JUDGMENTS = 2
 _EXPECTED_RESTART_REQUESTS = 3
 
@@ -53,14 +55,16 @@ def _chat(case: Case) -> TerminalChat:
             "64000",
             "--instruction-role",
             "system",
-            "--memory",
-            str(case.work / "memory.json"),
+            *(["--memory", str(case.work / "memory.json")] if _MEMORY_PACKAGED else []),
             "--skills-dir",
             str(case.work / "skills"),
             "--no-session",
             "--yes",
         ],
-        environ=fixture_provider_environment(model="features_probe"),
+        environ={
+            **fixture_provider_environment(model="features_probe"),
+            "FEATURES_PROBE_MEMORY": "1" if _MEMORY_PACKAGED else "0",
+        },
     )
 
 
@@ -153,13 +157,16 @@ def _skills(case: Case, chat: TerminalChat) -> None:
         "FEATURE_SKILL_BODY_92ad" not in reset[0]["content"],
         "features_tui: acceptance check at original line 136",
     )
-    require(
-        "FEATURE_MEMORY_ALPHA" in reset[0]["content"],
-        "features_tui: acceptance check at original line 137",
-    )
-    case.checks.append(
-        "clearing chat removes loaded skill state and retains durable memory",
-    )
+    if _MEMORY_PACKAGED:
+        require(
+            "FEATURE_MEMORY_ALPHA" in reset[0]["content"],
+            "features_tui: acceptance check at original line 137",
+        )
+        case.checks.append(
+            "clearing chat removes loaded skill state and retains durable memory",
+        )
+    else:
+        case.checks.append("clearing chat removes loaded skill state")
 
 
 def _memory(case: Case, chat: TerminalChat) -> None:
@@ -204,7 +211,12 @@ def _filesystem(case: Case, chat: TerminalChat, outside: Path) -> None:
         "features_tui: acceptance check at original line 94",
     )
     instructions = requests[0][0]["content"]
-    for name in ("filesystem", "memory", "skills", "goals"):
+    packaged = tuple(
+        name
+        for name in ("filesystem", "memory", "skills", "goals")
+        if profile_has_plugin(name)
+    )
+    for name in packaged:
         manifest = read_object(case.home / "plugins" / name / "plugin.json")
         require(
             text_field(manifest["instructions"], "instructions") in instructions,
@@ -286,13 +298,15 @@ def run(case: Case) -> dict[str, object]:
     try:
         chat.wait("Main chat", 30)
         _filesystem(case, chat, outside)
-        _memory(case, chat)
+        if _MEMORY_PACKAGED:
+            _memory(case, chat)
         _skills(case, chat)
         _goal(case, chat)
     finally:
         chat.close(case.output / "features.ansi")
 
-    _durable(case)
+    if _MEMORY_PACKAGED:
+        _durable(case)
     report = case.result()
     report.update(
         model_requests=len(_requests(case)),
@@ -300,7 +314,7 @@ def run(case: Case) -> dict[str, object]:
         file_sha256=hashlib.sha256(
             (case.work / "feature.txt").read_bytes(),
         ).hexdigest(),
-        durable_entries=2,
+        durable_entries=2 if _MEMORY_PACKAGED else 0,
         provider="offline scripted provider; actual TUI and feature execution",
     )
     (case.output / "result.json").write_text(

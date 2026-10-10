@@ -454,6 +454,12 @@ class _FailFirstFlushStream(FakeTerminalStream):
         io.StringIO.flush(self)
 
 
+def _task_text(content: str) -> str:
+    # Under instruction_role="user" the active prompt rides behind the merged
+    # instruction block and the task marker; other roles leave it bare.
+    return content.rpartition("\n\n--- USER TASK ---\n")[2]
+
+
 def _require_inactive(test: TypedTestCase, session: runtime.TerminalSession) -> None:
     with test.rejected(RuntimeError):
         session.read()
@@ -1293,7 +1299,7 @@ class AgentWorkerTests(TypedTestCase):
         def chat(messages: Messages) -> str:
             calls.append(messages)
             prompts = [
-                message["content"]
+                _task_text(message["content"])
                 for message in messages
                 if message["role"] == "user"
                 and not message["content"].startswith(
@@ -1323,18 +1329,16 @@ class AgentWorkerTests(TypedTestCase):
             second_id = worker.submit("second prompt")
             second, _ = collect_until(worker, "completed")
             self.equal(second.payload["job_id"], second_id)
-            self.require(("first prompt") in ([item["content"] for item in calls[-1]]))
-            self.require(
-                ('{"action":"done","message":"first prompt"}')
-                in ([item["content"] for item in calls[-1]]),
-            )
-            self.require(("second prompt") in ([item["content"] for item in calls[-1]]))
+            rendered = [_task_text(item["content"]) for item in calls[-1]]
+            self.require(("first prompt") in (rendered))
+            self.require(('{"action":"done","message":"first prompt"}') in (rendered))
+            self.require(("second prompt") in (rendered))
 
             worker.reset()
             collect_until(worker, "reset")
             worker.submit("fresh prompt")
             collect_until(worker, "completed")
-            rendered = [item["content"] for item in calls[-1]]
+            rendered = [_task_text(item["content"]) for item in calls[-1]]
             self.require(("fresh prompt") in (rendered))
             self.require(("first prompt") not in (rendered))
             self.require(("second prompt") not in (rendered))

@@ -24,12 +24,13 @@ from raychat.service_contracts import (
     INSTRUCTIONS,
     MEMORY,
 )
+from raychat.status import StatusItem
 from raychat.validation import (
     integer_field,
 )
 
 from .configuration import load as load_settings
-from .summaries import clip, summary_line
+from .summaries import clip, messages_size, summary_line
 
 _namespace: object = globals()
 _PLUGIN_SETTINGS = load_settings(_namespace)
@@ -40,6 +41,7 @@ COMPACTION_PREFIX = _PLUGIN_SETTINGS.compaction_prefix
 COMPACTION_SEPARATOR = _PLUGIN_SETTINGS.compaction_separator
 _SUMMARY_LIMITS = _PLUGIN_SETTINGS.summary_limits
 _MODEL_COMPACTION = _PLUGIN_SETTINGS.model_compaction
+_COMPACTION_STATUS_SECONDS = 30.0
 
 # Model-written compaction: one bounded provider call summarizes the messages
 # being compacted; the mechanical digest remains the always-available fallback.
@@ -402,9 +404,26 @@ class ContextPolicy:
             raise RuntimeError(error_message)
         active = self.history[active_index]
         instructions = self.select_instruction(active.content)
-        if self._full_size(instructions) <= self.session.context_chars:
+        full_size = self._full_size(instructions)
+        if full_size <= self.session.context_chars:
             return self._full_messages(instructions)
-        return self._compacted_messages(instructions, active_index)
+        compacted = self._compacted_messages(instructions, active_index)
+        self._announce_compaction(full_size, messages_size(compacted))
+        return compacted
+
+    def _announce_compaction(self, before: int, after: int) -> None:
+        """Surface a compaction as a transient status; never fail a request."""
+        try:
+            self.ctx.set_status(
+                "compaction",
+                StatusItem(
+                    f"Compacted history {before:,} -> {after:,} chars",
+                    priority=85,
+                ),
+                ttl_seconds=_COMPACTION_STATUS_SECONDS,
+            )
+        except (RuntimeError, ValueError):
+            return
 
 
 _PAIR_SIZE = 2

@@ -813,6 +813,52 @@ class PackageManager:
         except ConfigurationError as error:
             raise PluginError(str(error)) from error
 
+    def _workspace_plugin_scoped(self, path: Path) -> bool:
+        """Whether a path lies under the workspace plugins discovery root.
+
+        Returns
+        -------
+        bool
+            True for packages eligible for startup quarantine instead of
+            failing composition when broken.
+
+        """
+        try:
+            return path.resolve().is_relative_to(
+                (self.roots["workspace"] / "plugins").resolve(),
+            )
+        except OSError:
+            return False
+
+    def _candidate_identifier(self, path: Path) -> str:
+        """Identify one package candidate, tolerating broken workspace packages.
+
+        Returns
+        -------
+        str
+            The manifest identifier, or the directory name when a workspace
+            package manifest cannot be read.
+
+        Raises
+        ------
+        PluginError
+            A broken package manifest outside the workspace plugins root.
+        OSError
+            An unreadable package outside the workspace plugins root.
+        ValueError
+            An invalid package manifest outside the workspace plugins root.
+
+        """
+        try:
+            return read_manifest(path, require_current_sdk=False).id
+        except (PluginError, OSError, ValueError):
+            # A half-written workspace package must not make discovery
+            # fail: composition quarantines it under its directory name
+            # while every other package still loads.
+            if not self._workspace_plugin_scoped(path):
+                raise
+            return path.name
+
     def paths(self, *, include_disabled: bool = False) -> dict[str, Path]:
         """Resolve installed packages while retaining scope and ambiguity checks.
 
@@ -827,7 +873,8 @@ class PackageManager:
         Raises
         ------
         PluginError
-            If more than one source claims a plugin identifier.
+            If more than one source claims a plugin identifier, or a package
+            manifest outside the workspace plugins root is broken.
 
         """
         disabled = self.disabled
@@ -842,17 +889,18 @@ class PackageManager:
                 (p, "workspace") for p in discover(self.roots["workspace"] / "plugins")
             ]
         for path, _scope in candidates:
-            manifest = read_manifest(path, require_current_sdk=False)
-            if manifest.id in disabled and not include_disabled:
+            identifier = self._candidate_identifier(path)
+            if identifier in disabled and not include_disabled:
                 continue
-            previous = result.get(manifest.id)
+            previous = result.get(identifier)
             if previous is not None and previous.resolve() != path.resolve():
-                raise PluginError(
+                error_message = (
                     "Ambiguous plugin ID: "
-                    + manifest.id
-                    + ". Uninstall or disable one source.",
+                    + identifier
+                    + ". Uninstall or disable one source."
                 )
-            result[manifest.id] = path.resolve()
+                raise PluginError(error_message)
+            result[identifier] = path.resolve()
         return result
 
     @property

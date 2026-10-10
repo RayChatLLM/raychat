@@ -78,6 +78,19 @@ def _json(value: object) -> str:
     return json.dumps(value)
 
 
+def _task_text(content: str) -> str:
+    # Under instruction_role="user" the active prompt rides behind the merged
+    # instruction block and the task marker; other roles leave it bare.
+    return content.rpartition("\n\n--- USER TASK ---\n")[2]
+
+
+def _judge_payload(messages: Messages) -> dict[str, object]:
+    # The judge merges its instructions and evidence into one user message
+    # under instruction_role="user"; other roles keep the payload separate.
+    content = messages[-1]["content"]
+    return _json_fields(content.rpartition("\n--- GOAL EVIDENCE ---\n")[2])
+
+
 def _json_fields(value: str | bytes) -> dict[str, object]:
     return object_field(json_object(value), "test JSON")
 
@@ -1034,8 +1047,8 @@ class GoalModeTests(PackageTestCase):
         equal([kind for kind, _ in events].count("done"), 1)
         equal(events[-1][0], "done")
         equal(len(judge_calls), 2)
-        first_payload = _json_fields(judge_calls[0][1]["content"])
-        second_payload = _json_fields(judge_calls[1][1]["content"])
+        first_payload = _judge_payload(judge_calls[0])
+        second_payload = _judge_payload(judge_calls[1])
         equal(first_payload["goal"], "Finish and verify the work")
         require(("Draft result") in (_json(first_payload["transcript"])))
         require(("HOST_GOAL_REVIEW") in (_json(second_payload["transcript"])))
@@ -1257,7 +1270,7 @@ class GoalModeTests(PackageTestCase):
             worker.stop()
             require(worker.join(3))
 
-        equal(main.calls[0][-1]["content"], "Finish every check")
+        equal(_task_text(main.calls[0][-1]["content"]), "Finish every check")
         require(controller.status() is None)
         equal(result, "actually final")
         equal(kinds.count("done"), 1)

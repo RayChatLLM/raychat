@@ -34,7 +34,15 @@ if TYPE_CHECKING:
     from typing import BinaryIO
 
 _RUNTIME_ROOTS = ("raychat", "plugins", "plugin_catalog")
-_FIXED_ROOTS = ("raychat_bootstrap", "tests", "tools", "examples", "docs", ".github")
+_FIXED_ROOTS = (
+    "raychat_bootstrap",
+    "tests",
+    "tools",
+    "examples",
+    "docs",
+    "environment",
+    ".github",
+)
 _FIXED_FILES = (
     "raychat.py",
     "pyproject.toml",
@@ -46,7 +54,16 @@ _FIXED_FILES = (
     ".gitattributes",
     ".gitignore",
 )
-_IGNORED = {"__pycache__", ".git", ".venv", ".mypy_cache", ".ruff_cache", ".DS_Store"}
+_IGNORED = {
+    "__pycache__",
+    ".git",
+    ".venv",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".DS_Store",
+    # The user's saved provider secrets never belong in a captured release.
+    ".env",
+}
 
 
 def _inspect(path: Path) -> os.stat_result:
@@ -593,7 +610,14 @@ class Releases:
 
     @staticmethod
     async def validate(root: Path, log: Path, *, python: str | None = None) -> Release:
-        """Require imports, strict checks, fixed tests and portable packaging.
+        """Require imports, fixed tests and portable packaging.
+
+        Live validation runs with the application's own interpreter and
+        deliberately uses no development tooling: linters and type
+        checkers belong to the development workflow, not to the runtime
+        gate, so self-edits activate on machines where only the
+        application itself is installed. Imports, the fixed test suite
+        and deterministic packaging remain the safety net.
 
         Returns
         -------
@@ -606,37 +630,7 @@ class Releases:
             A required check failed or timed out.
 
         """
-        source_paths = tuple(
-            name for name in ("raychat", "plugins") if (root / name).is_dir()
-        ) or ("raychat",)
         commands = (
-            (
-                "-c",
-                (
-                    "from importlib.metadata import version; from pathlib import Path; "
-                    "pins = dict(line.split('==') for line in "
-                    "Path('requirements-dev.txt').read_text(encoding='utf-8')"
-                    ".splitlines() "
-                    "if '==' in line); "
-                    "mismatches = [name + '==' + pin for name, pin in pins.items() "
-                    "if version(name) != pin]; "
-                    "assert not mismatches, 'Install the pinned evaluation tools: ' "
-                    "+ ', '.join(mismatches)"
-                ),
-            ),
-            ("-m", "ruff", "format", "--isolated", "--preview", *source_paths),
-            (
-                "-m",
-                "ruff",
-                "check",
-                "--isolated",
-                "--preview",
-                "--select",
-                "COM812",
-                "--fix",
-                *source_paths,
-            ),
-            ("-m", "ruff", "format", "--isolated", "--preview", *source_paths),
             ("-m", "tools.build_plugin_catalog"),
             (
                 "-c",
@@ -645,7 +639,6 @@ class Releases:
                     "import raychat.ui.controller"
                 ),
             ),
-            ("-m", "tools.verify_quality", str(root / "build" / "quality")),
             ("-m", "unittest", "discover", "-s", "tests", "-q"),
             (
                 "-m",

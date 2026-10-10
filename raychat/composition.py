@@ -13,7 +13,7 @@ from raychat.configuration import PLUGIN_OVERRIDES, SETTINGS
 
 from ._common import DEFAULT_WORKSPACE
 from .distribution import read_distribution
-from .packages import dependency_order, read_manifest
+from .packages import Manifest, dependency_order, read_manifest
 from .plugin_manager import PackageManager
 from .plugin_sources import SourceTree
 from .plugins import Runtime
@@ -32,6 +32,7 @@ from .validation import array_field, configuration_fields
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from types import ModuleType
 
     from .sdk import Chat, SessionHost
 
@@ -134,14 +135,25 @@ def _available_sources(
                 raise ValueError("Duplicate package snapshot: " + tree.manifest.id)
             available[tree.manifest.id] = tree
     else:
-        available.update(manager.paths(include_disabled=True))
+        installed = manager.paths(include_disabled=True)
+        available.update(installed)
+        # Identifiers come from the manager where possible: a broken
+        # workspace package already resolved there under its directory
+        # name, and reading its manifest again here would fail startup
+        # before composition can quarantine it.
+        identifiers = {path.resolve(): name for name, path in installed.items()}
         for name in selected or ():
-            if name not in available:
-                path = Path(name).expanduser().resolve()
-                available[read_manifest(path).id] = path
+            if name in available:
+                continue
+            path = Path(name).expanduser().resolve()
+            if path not in identifiers:
+                identifiers[path] = read_manifest(path).id
+                available[identifiers[path]] = path
         if selected is not None:
             selected = tuple(
-                name if name in available else read_manifest(name).id
+                name
+                if name in available
+                else identifiers[Path(name).expanduser().resolve()]
                 for name in selected
             )
     return available, selected
@@ -167,12 +179,106 @@ def _capture_package(
     return tree
 
 
+def _workspace_scoped(manager: PackageManager, package: SourceTree | Path) -> bool:
+    """Whether a package was auto-discovered from the workspace plugins root.
+
+    Returns
+    -------
+    bool
+        True for workspace packages, which quarantine instead of failing
+        startup when broken.
+
+    """
+    path = package.path if isinstance(package, SourceTree) else package
+    try:
+        return (
+            Path(path)
+            .resolve()
+            .is_relative_to(
+                (manager.roots["workspace"] / "plugins").resolve(),
+            )
+        )
+    except (OSError, KeyError):
+        return False
+
+
+@dataclass(frozen=True)
+class _LoadContext:
+    """Shared collaborators for quarantine-aware package loading."""
+
+    runtime: Runtime
+    manager: PackageManager
+    settings: Mapping[str, object]
+    trees: list[SourceTree]
+
+
+def _quarantined_manifest(
+    context: _LoadContext,
+    name: str,
+    package: SourceTree | Path,
+) -> Manifest | None:
+    """Read one manifest, quarantining broken workspace packages.
+
+    Returns
+    -------
+    Manifest | None
+        The manifest, or None when the package was quarantined.
+
+    Raises
+    ------
+    PluginError
+        A broken package outside the workspace quarantine scope.
+    OSError
+        An unreadable package outside the workspace quarantine scope.
+    ValueError
+        An invalid manifest outside the workspace quarantine scope.
+
+    """
+    try:
+        if isinstance(package, SourceTree):
+            return package.manifest
+        return read_manifest(package, require_current_sdk=False)
+    except (PluginError, OSError, ValueError) as error:
+        if not _workspace_scoped(context.manager, package):
+            raise
+        context.runtime.quarantined[name] = str(error)
+        return None
+
+
+def _quarantined_entrypoint(
+    runtime: Runtime,
+    manager: PackageManager,
+    name: str,
+    tree: SourceTree,
+) -> ModuleType | None:
+    """Import one captured entrypoint, quarantining broken workspace packages.
+
+    Returns
+    -------
+    ModuleType | None
+        The loaded module, or None when the package was quarantined.
+
+    Raises
+    ------
+    PluginError
+        A broken package outside the workspace quarantine scope.
+
+    """
+    try:
+        return tree.entrypoint()
+    except PluginError as error:
+        if not _workspace_scoped(manager, tree):
+            raise
+        runtime.quarantined[name] = str(error)
+        return None
+
+
 def _capture_runtime(
     runtime: Runtime,
     manager: PackageManager,
     setup: _RuntimeSetup,
     trees: list[SourceTree],
-) -> list[SourceTree]:
+) -> list[tuple[str, SourceTree]]:
     selected = (
         None if setup.plugins is None else tuple(str(name) for name in setup.plugins)
     )
@@ -188,18 +294,27 @@ def _capture_runtime(
         for name in (available if selected is None else selected)
         if name not in disabled
     )
-    manifests = {
-        name: package.manifest
-        if isinstance(package, SourceTree)
-        else read_manifest(package, require_current_sdk=False)
-        for name, package in available.items()
-    }
-    ordered = dependency_order(manifests, selected, disabled=disabled)
+    # A broken workspace package must not stop the application from
+    # starting: it is quarantined with the reason recorded, and the
+    # operator or the agent repairs it while everything else runs.
     settings = configuration_fields(
         runtime.options["plugin_settings"],
         "plugin settings",
     )
-    return [_capture_package(available[name], settings, trees) for name in ordered]
+    context = _LoadContext(runtime, manager, settings, trees)
+    manifests = {}
+    for name, package in available.items():
+        manifest = _quarantined_manifest(context, name, package)
+        if manifest is not None:
+            manifests[name] = manifest
+    ordered = dependency_order(
+        manifests,
+        tuple(name for name in selected if name not in runtime.quarantined),
+        disabled=disabled,
+    )
+    return [
+        (name, _capture_package(available[name], settings, trees)) for name in ordered
+    ]
 
 
 def _load_runtime(
@@ -210,7 +325,14 @@ def _load_runtime(
 ) -> None:
     with manager.source_read() if setup.source is None else nullcontext():
         captured = _capture_runtime(runtime, manager, setup, trees)
-    runtime.load([tree.entrypoint() for tree in captured])
+    # Deferred imports stay outside the source lock; a broken workspace
+    # package quarantines here instead of failing startup.
+    modules = []
+    for name, tree in captured:
+        module = _quarantined_entrypoint(runtime, manager, name, tree)
+        if module is not None:
+            modules.append(module)
+    runtime.load(modules)
     for tree in trees:
         if tree not in runtime.source_trees:
             tree.retire()

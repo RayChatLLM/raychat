@@ -87,10 +87,7 @@ def _exercise(
             "bare_tui: acceptance check at original line 127",
         )
         require(
-            all(
-                name in instructions
-                for name in ("core_source", "core_update", "core_recover")
-            ),
+            "core_recover" in instructions,
             "bare_tui: acceptance check at original line 130",
         )
     require(

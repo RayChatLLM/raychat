@@ -413,7 +413,15 @@ class HotPluginTests(_HotPluginFixture):
                 '{"action":"done","message":"used"}',
             ],
         )
-        session = create_session(chat, self.root, runtime=runtime, auto_approve=True)
+        session = create_session(
+            chat,
+            self.root,
+            runtime=runtime,
+            auto_approve=True,
+            # Without the context plugin the host emits the instruction
+            # block as its own message, so this layout is role-pinned.
+            instruction_role="system",
+        )
         self.equal(session.run("install the plugin"), "installed")
         self.equal(runtime.generation, 1)
         self.equal(session.run("use it"), "used")

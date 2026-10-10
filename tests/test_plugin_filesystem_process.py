@@ -53,6 +53,10 @@ if not TYPE_CHECKING:
 _CANCELLATION_DEADLINE = 2
 _POINTER_BYTES_64 = 8
 _PROCESS_HANDLE = 202
+_APPEND_SEQUENCE_WRITES = 30
+_APPEND_CHUNK_CHARS = 2000
+_APPEND_ALTERNATION_ROUNDS = 5
+_TRANSIENT_REJECTIONS = 2
 
 
 class _ExpectedFailure:
@@ -447,6 +451,125 @@ class WorkspaceFilesystemTests(_WorkspaceFixture):
         self.equal(path.read_bytes(), b"original")
         self.equal(path.stat().st_mode, before_mode)
         self.equal(list(self.root.glob(".stable.txt.chat-agent-*.tmp")), [])
+
+    def test_append_sequence_builds_the_exact_concatenation(self) -> None:
+        """Thirty sequential appends extend one file to the exact concatenation."""
+        runtime = create_runtime(self.root, timeout=5)
+        self.addCleanup(runtime.close)
+        unit = "chunk-é☃\\" + ("x" * 30) + "\n"
+        repeats = _APPEND_CHUNK_CHARS // len(unit) + 1
+        chunk = (unit * repeats)[:_APPEND_CHUNK_CHARS]
+        expected = ""
+        for index in range(_APPEND_SEQUENCE_WRITES):
+            result = runtime.execute(
+                {
+                    "action": "write",
+                    "path": "build/package/module.py",
+                    "content": chunk,
+                    "append": True,
+                },
+            )
+            expected += chunk
+            raw = expected.encode("utf-8")
+            with self.subTest(index=index):
+                self.check(condition=result.get("ok") is True)
+                self.equal(result.get("bytes_written"), len(raw))
+                self.equal(result.get("sha256"), hashlib.sha256(raw).hexdigest())
+        written = self.root / "build" / "package" / "module.py"
+        self.equal(written.read_text(encoding="utf-8"), expected)
+
+    def test_append_alternates_with_reads_across_multibyte_boundaries(self) -> None:
+        """Rapid append/read alternation keeps exact bytes across odd chunks."""
+        runtime = create_runtime(self.root, timeout=5)
+        self.addCleanup(runtime.close)
+        chunks = ("prefix\\", "☃", "🚀-tail\\\\", "line\n\\", "é" * 7, "ascii-end\n")
+        expected = ""
+        for index, chunk in enumerate(chunks * _APPEND_ALTERNATION_ROUNDS):
+            append = runtime.execute(
+                {
+                    "action": "write",
+                    "path": "mixed.txt",
+                    "content": chunk,
+                    "append": True,
+                },
+            )
+            expected += chunk
+            raw = expected.encode("utf-8")
+            read = runtime.execute({"action": "read", "path": "mixed.txt"})
+            with self.subTest(index=index):
+                self.check(condition=append.get("ok") is True)
+                self.equal(append.get("bytes_written"), len(raw))
+                self.equal(append.get("sha256"), hashlib.sha256(raw).hexdigest())
+                self.check(condition=read.get("ok") is True)
+                self.equal(read.get("content"), expected)
+                self.equal(read.get("sha256"), hashlib.sha256(raw).hexdigest())
+
+    def test_append_retries_replace_rejected_by_transient_scanner_handles(
+        self,
+    ) -> None:
+        """Appends absorb brief sharing violations from external file scanners."""
+        runtime = create_runtime(self.root, timeout=5)
+        self.addCleanup(runtime.close)
+        seeded = runtime.execute(
+            {"action": "write", "path": "scanned.py", "content": "start\n"},
+        )
+        self.check(condition=seeded.get("ok") is True)
+        real_replace = os.replace
+        rejections: list[str] = []
+
+        def scanner_held_replace(
+            source: str | os.PathLike[str],
+            destination: str | os.PathLike[str],
+        ) -> None:
+            if len(rejections) < _TRANSIENT_REJECTIONS:
+                rejections.append(str(destination))
+                error_message = "sharing violation"
+                raise PermissionError(error_message)
+            real_replace(source, destination)
+
+        with mock.patch.object(os, "replace", new=scanner_held_replace):
+            result = runtime.execute(
+                {
+                    "action": "write",
+                    "path": "scanned.py",
+                    "content": "more\n",
+                    "append": True,
+                },
+            )
+        self.check(condition=result.get("ok") is True)
+        self.equal(len(rejections), _TRANSIENT_REJECTIONS)
+        path = self.root / "scanned.py"
+        self.equal(path.read_text(encoding="utf-8"), "start\nmore\n")
+        self.equal(list(self.root.glob(".scanned.py.chat-agent-*.tmp")), [])
+
+    def test_append_propagates_persistent_permission_rejections(self) -> None:
+        """A persistent permission failure still fails after bounded retries."""
+        runtime = create_runtime(self.root, timeout=5)
+        self.addCleanup(runtime.close)
+        seeded = runtime.execute(
+            {"action": "write", "path": "locked.py", "content": "start\n"},
+        )
+        self.check(condition=seeded.get("ok") is True)
+        with (
+            mock.patch.object(
+                os,
+                "replace",
+                side_effect=PermissionError("sharing violation"),
+            ),
+            mock.patch.object(time, "sleep") as sleeper,
+            self.rejecting(PermissionError, "sharing violation"),
+        ):
+            runtime.execute(
+                {
+                    "action": "write",
+                    "path": "locked.py",
+                    "content": "more\n",
+                    "append": True,
+                },
+            )
+        self.equal(sleeper.call_count, _rc_filesystem.SHARING_RETRY_ATTEMPTS - 1)
+        self.equal((self.root / "locked.py").read_text(encoding="utf-8"), "start\n")
+        self.equal(list(self.root.glob(".locked.py.chat-agent-*.tmp")), [])
 
     def test_atomic_write_and_edit_preserve_existing_mode(self) -> None:
         """Atomic write and edit preserve existing mode."""

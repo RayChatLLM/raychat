@@ -922,15 +922,44 @@ class _RuntimeRegistry:
             Collect usage instructions from installed plugin manifests.
 
         """
+        return "".join(item.text for item in self._manifest_contributions())
+
+    def _manifest_contributions(self) -> tuple[InstructionContribution, ...]:
+        """Describe each plugin's usage, claiming the tools it registered.
+
+        Claimed actions are omitted from the generic tool catalog that
+        trails the instructions, so every tool is described exactly once:
+        in its own plugin's prose.
+
+        Returns
+        -------
+        tuple[InstructionContribution, ...]
+            A header plus one contribution per documented plugin.
+
+        """
         sections = []
         for name, module in self.modules.items():
             manifest = _manifest(module)
             if manifest.instructions:
-                sections.append(
-                    f"Plugin {name} ({manifest.version}):\n{manifest.instructions}",
+                owned = tuple(
+                    sorted(
+                        tool
+                        for tool in self.tools
+                        if self.owners.get(("tools", tool)) == name
+                    ),
                 )
+                sections.append(
+                    InstructionContribution(
+                        f"\n\nPlugin {name} ({manifest.version}):"
+                        f"\n{manifest.instructions}",
+                        owned,
+                    ),
+                )
+        if not sections:
+            return ()
         return (
-            "\n\nInstalled plugin usage:\n" + "\n\n".join(sections) if sections else ""
+            InstructionContribution("\n\nInstalled plugin usage:"),
+            *sections,
         )
 
     def tool_catalog(self) -> tuple[dict[str, object], ...]:
@@ -1031,6 +1060,8 @@ class Runtime(_RuntimeRegistry):
         self.source_read: Callable[[], AbstractContextManager[None]] = nullcontext
         self.workspace = Path(workspace).resolve()
         self.session: SessionLifecycle | None = None
+        self.workspace_trusted = False
+        self.quarantined: dict[str, str] = {}
         self.closed = False
         self._closing = False
         self.disabled: set[str] = set()
@@ -1108,7 +1139,7 @@ class Runtime(_RuntimeRegistry):
             If the declaration or operation violates the plugin contract.
 
         """
-        result = [InstructionContribution(self.plugin_instructions())]
+        result = list(self._manifest_contributions())
         for name, (_priority, callback) in sorted(
             self.instructions.items(),
             key=_instruction_order,

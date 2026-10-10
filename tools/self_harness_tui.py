@@ -23,7 +23,12 @@ from raychat.validation import (
 )
 
 from .accept_tui import SOURCE, Case
-from .acceptance_support import json_text, read_object, verification_paths
+from .acceptance_support import (
+    json_text,
+    memory_toggle_arguments,
+    read_object,
+    verification_paths,
+)
 from .collective_tui import wait_done
 from .drive_tui import TerminalChat
 
@@ -130,7 +135,7 @@ def run(
             str(case.config),
             "--workspace",
             str(case.work),
-            "--no-memory",
+            *memory_toggle_arguments(),
             "--no-session",
             "--yes",
         ],

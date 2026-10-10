@@ -10,10 +10,12 @@ import os
 import re
 import secrets
 import stat
+import time
 from codecs import IncrementalDecoder
 from dataclasses import dataclass
+from functools import partial
 from heapq import nsmallest
-from typing import TYPE_CHECKING, BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol, TypeVar
 
 from raychat.configuration import SETTINGS
 from raychat.filesystem import replace_completed, staged_file, write_bytes
@@ -27,7 +29,7 @@ from .configuration import load as load_settings
 from .configuration import validate
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from raychat.sdk import CancelCheck, PluginAPI, PluginContext
@@ -59,8 +61,48 @@ OUTPUT_BYTES: int = _PLUGIN_SETTINGS.output_bytes
 LIST_PAGE_ENTRIES: int = _PLUGIN_SETTINGS.list_page_entries
 FILE_COPY_BYTES: int = _PLUGIN_SETTINGS.file_copy_bytes
 MAX_FILE_OFFSET: int = _PLUGIN_SETTINGS.max_file_offset
+SHARING_RETRY_ATTEMPTS: int = 6
+SHARING_RETRY_INITIAL_SECONDS: float = 0.01
 _UTF8_PREFIX_MASK = 0xC0
 _UTF8_CONTINUATION = 0x80
+_BACKOFF_FACTOR = 2
+
+_RetryResult = TypeVar("_RetryResult")
+
+
+def _retry_sharing_violation(
+    operation: Callable[[], _RetryResult],
+    attempts: int = SHARING_RETRY_ATTEMPTS,
+    delay: float = SHARING_RETRY_INITIAL_SECONDS,
+) -> _RetryResult:
+    """Run an operation, absorbing brief Windows sharing violations.
+
+    External scanners (plugin hot-reload fingerprinting, quarantine checks,
+    antivirus and indexing services) briefly open workspace files without
+    delete sharing. On Windows that makes ``os.replace`` onto such an open
+    file, and whole-file reads of a just-replaced file, fail with
+    ``PermissionError`` even though the identical call succeeds moments
+    later. A short bounded exponential backoff turns those transient
+    rejections into successes, while a persistent permission problem still
+    propagates from the final attempt.
+
+    Returns
+    -------
+    _RetryResult
+        The operation's value from its first successful attempt.
+
+    """
+    if attempts <= 1:
+        return operation()
+    try:
+        return operation()
+    except PermissionError:
+        time.sleep(delay)
+        return _retry_sharing_violation(
+            operation,
+            attempts - 1,
+            delay * _BACKOFF_FACTOR,
+        )
 
 
 def _file_state(info: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -241,10 +283,15 @@ def _sync_and_preserve_mode(stream: BinaryIO, mode: int | None) -> bool:
 def _atomic_write(path: Path, data: bytes) -> tuple[int, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = _existing_regular_mode(path, "write")
-    write_bytes(
-        path,
-        data,
-        mode=mode if mode is not None else SETTINGS.storage.workspace_file_mode,
+    # The publishing replace retries transient sharing violations from
+    # external file scanners on every platform.
+    _retry_sharing_violation(
+        partial(
+            write_bytes,
+            path,
+            data,
+            mode=mode if mode is not None else SETTINGS.storage.workspace_file_mode,
+        ),
     )
     return len(data), hashlib.sha256(data).hexdigest()
 
@@ -681,8 +728,11 @@ def _execute_file(
     if isinstance(request, _WriteRequest):
         data = request.content.encode("utf-8")
         if request.append:
+            # Appends reuse the atomic replace, so a crash never leaves a
+            # partially extended file. The pre-read retries transient
+            # sharing violations from external file scanners.
             with contextlib.suppress(FileNotFoundError):
-                data = path.read_bytes() + data
+                data = _retry_sharing_violation(path.read_bytes) + data
         count, digest = _atomic_write(path, data)
         return {
             "ok": True,

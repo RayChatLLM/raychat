@@ -10,12 +10,14 @@ import shutil
 import tempfile
 import threading
 import time
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
+from raychat import core_staging
 from raychat.core_bridge import CoreBridge
-from raychat.core_tools import install
+from raychat.core_recover import install
 from raychat.plugins import Runtime
 from raychat.resources import AgentResources
 from raychat.storage import SessionStore
@@ -28,7 +30,7 @@ from tests.assertions import TypedTestCase
 from tests.test_live_recovery_qa import RecordingCore, RecoveryHarness
 from tests.test_tui_sessions import Scheduler, Terminal
 from tests.tui_support import arguments
-from tools.live_agent_tui import completed_review
+from tools.acceptance_support import completed_review
 
 if TYPE_CHECKING:
     import argparse
@@ -522,3 +524,242 @@ class LiveFeedbackTests(TypedTestCase):
                 self.equal(bridge.update_results, {})
             finally:
                 resources.close()
+
+
+def _staged_workspace(root: Path) -> tuple[Path, core_staging.StagingState]:
+    release = root / "release"
+    (release / "raychat").mkdir(parents=True)
+    (release / "raychat" / "app.py").write_text("VALUE = 1\n")
+    state = core_staging.prepare(
+        release,
+        root,
+        None,
+        core_staging.LaunchPolicy(trusted=True, probe=False, recovered=False),
+    )
+    if state is None:
+        message = "Fixture staging must be enabled"
+        raise RuntimeError(message)
+    return release, state
+
+
+class StagingTriggerTests(TypedTestCase):
+    """Submit the mirror exactly once per change, at turn quiescence only."""
+
+    def run_ui(
+        self,
+        args: argparse.Namespace,
+        resources: AgentResources,
+        driver: Callable[[list[TuiSnapshot]], bytes],
+    ) -> list[TuiSnapshot]:
+        """Reuse the feedback harness's controller loop.
+
+        Returns
+        -------
+        list[TuiSnapshot]
+            Every visible state in rendering order.
+
+        """
+        return LiveFeedbackTests.run_ui(
+            typing.cast("LiveFeedbackTests", self),
+            args,
+            resources,
+            driver,
+        )
+
+    def test_staging_change_submits_whole_tree_once(self) -> None:
+        """One edit produces one submission with the mirror as the source."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, staging = _staged_workspace(root)
+            runtime = Runtime(root)
+            bridge = FeedbackBridge()
+            install(runtime, bridge)
+            runtime.services["core_updates"] = bridge
+            reviewed: list[str] = []
+
+            def chat(messages: Messages) -> str:
+                reviewed.append(messages[-1]["content"])
+                return '{"action":"done","message":"reviewed"}'
+
+            resources = AgentResources(
+                runtime,
+                chat,
+                live=bridge,
+                staging=staging,
+            )
+            args = arguments([
+                "--workspace",
+                str(root),
+                "--no-session",
+                "--quality",
+                "8",
+            ])
+            phase = "edit"
+            deadline = time.monotonic() + 10
+
+            def updates() -> list[dict[str, object]]:
+                return [item for item in bridge.controls if item["kind"] == "update"]
+
+            def drive(_snapshots: list[TuiSnapshot]) -> bytes:
+                nonlocal phase
+                self.require(
+                    time.monotonic() < deadline,
+                    "Staging trigger stalled: " + phase,
+                )
+                staging.last_check = 0.0
+                if phase == "edit":
+                    (staging.root / "raychat" / "app.py").write_text(
+                        "VALUE = 2\n",
+                    )
+                    phase = "await-submit"
+                elif phase == "await-submit" and updates():
+                    submitted = updates()[0]
+                    self.equal(submitted["source"], str(staging.root))
+                    self.equal(submitted["changes"], {})
+                    bridge.deliver(str(submitted["request_id"]), "activated")
+                    phase = "await-review"
+                elif phase == "await-review" and reviewed:
+                    self.equal(len(updates()), 1)
+                    self.equal(staging.inflight_id, "")
+                    self.equal(staging.consecutive_rejections, 0)
+                    return b"\x03"
+                time.sleep(0.001)
+                return b""
+
+            try:
+                self.run_ui(args, resources, drive)
+                self.equal(len(updates()), 1)
+                self.require(reviewed[0].startswith("CORE_UPDATE_RESULT: "))
+            finally:
+                resources.close()
+
+    def test_rejections_suppress_until_the_user_speaks(self) -> None:
+        """Three rejections stop automatic resubmission; a prompt resumes it."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, staging = _staged_workspace(root)
+            runtime = Runtime(root)
+            bridge = FeedbackBridge()
+            install(runtime, bridge)
+            runtime.services["core_updates"] = bridge
+            prompts: list[str] = []
+
+            def chat(messages: Messages) -> str:
+                prompts.append(messages[-1]["content"])
+                return '{"action":"done","message":"noted"}'
+
+            resources = AgentResources(
+                runtime,
+                chat,
+                live=bridge,
+                staging=staging,
+            )
+            args = arguments([
+                "--workspace",
+                str(root),
+                "--no-session",
+                "--quality",
+                "8",
+            ])
+            script = _LimiterScript(self, bridge, staging, prompts)
+            try:
+                self.run_ui(args, resources, script.drive)
+                self.equal(len(script.updates()), _LIMIT_RESUBMITS)
+                self.equal(
+                    [item["prompt"] for item in script.updates()][-1],
+                    "lift the suppression",
+                )
+            finally:
+                resources.close()
+
+
+_REJECT_LIMIT = 3
+_LIMIT_RESUBMITS = 4
+_SUPPRESSED_FRAMES = 40
+
+
+class _LimiterScript:
+    """Drive the rejection limiter choreography frame by frame."""
+
+    def __init__(
+        self,
+        case: TypedTestCase,
+        bridge: FeedbackBridge,
+        staging: core_staging.StagingState,
+        prompts: list[str],
+    ) -> None:
+        self.case = case
+        self.bridge = bridge
+        self.staging = staging
+        self.prompts = prompts
+        self.edits = 0
+        self.quiet_frames = 0
+        self.phase = "reject-cycles"
+        self.deadline = time.monotonic() + 15
+
+    def updates(self) -> list[dict[str, object]]:
+        """List submitted update controls.
+
+        Returns
+        -------
+        list[dict[str, object]]
+            Every update message the bridge recorded.
+
+        """
+        return [item for item in self.bridge.controls if item["kind"] == "update"]
+
+    def _reviews(self) -> int:
+        return len([
+            item for item in self.prompts if item.startswith("CORE_UPDATE_RESULT")
+        ])
+
+    def _edit(self, value: int) -> None:
+        self.edits += 1
+        (self.staging.root / "raychat" / "app.py").write_text(
+            f"VALUE = {value}\n",
+        )
+
+    def _reject_cycles(self) -> bytes:
+        if self.staging.suppressed:
+            self.case.equal(len(self.updates()), _REJECT_LIMIT)
+            self.phase = "edit-while-suppressed"
+        elif self.edits == self._reviews() and self.edits < _REJECT_LIMIT:
+            self._edit(self.edits + 2)
+        return b""
+
+    def _edit_while_suppressed(self) -> bytes:
+        if self.edits == _REJECT_LIMIT:
+            self._edit(100)
+        self.quiet_frames += 1
+        if self.quiet_frames > _SUPPRESSED_FRAMES:
+            self.case.equal(len(self.updates()), _REJECT_LIMIT)
+            self.phase = "speak"
+            return b"lift the suppression\r"
+        return b""
+
+    def drive(self, _snapshots: list[TuiSnapshot]) -> bytes:
+        """Advance one frame of the limiter scenario.
+
+        Returns
+        -------
+        bytes
+            Keystrokes for the terminal, if any.
+
+        """
+        self.case.require(
+            time.monotonic() < self.deadline,
+            f"Limiter stalled in {self.phase} edits={self.edits}",
+        )
+        self.staging.last_check = 0.0
+        if self.staging.inflight_id:
+            self.bridge.deliver(str(self.staging.inflight_id), "rejected")
+        elif self.phase == "reject-cycles":
+            return self._reject_cycles()
+        elif self.phase == "edit-while-suppressed":
+            return self._edit_while_suppressed()
+        elif self.phase == "speak" and "lift the suppression" in self.prompts:
+            self.phase = "resubmitted"
+        elif self.phase == "resubmitted" and len(self.updates()) == _LIMIT_RESUBMITS:
+            return b"\x03"
+        time.sleep(0.001)
+        return b""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from enum import IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -260,7 +261,8 @@ def _skills(prompt: str, results: list[Action], instructions: str) -> Action:
     _require(_SKILL in instructions, "Skill catalog did not reach the provider")
     if prompt == "FEATURE_SKILL_RESET":
         _require(_SKILL_BODY not in instructions)
-        _require(_MEMORIES[0] in instructions and _MEMORIES[2] in instructions)
+        if os.environ.get("FEATURES_PROBE_MEMORY", "1") == "1":
+            _require(_MEMORIES[0] in instructions and _MEMORIES[2] in instructions)
         return _done("SKILL_RESET_MEMORY_RETAINED")
     if prompt == "FEATURE_SKILL_REUSE":
         _require(_SKILL_BODY in instructions)

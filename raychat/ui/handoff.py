@@ -166,8 +166,10 @@ def capture(
         plugins = {"unavailable": str(error)}
     picker = controller.picker
     live = resources.live
+    staging = resources.staging
     return document({
         "version": VERSION,
+        "core_staging": None if staging is None else staging.capture(),
         "session": snapshot,
         "store": writer(controller),
         "plugins": plugins,

@@ -1,5 +1,5 @@
 {
-  "catalog": "catalog-5cac186245a020bcdf6a0498f2d9395744fb80e6d352abc7e1eff1d2f23d1d3f.json",
+  "catalog": "catalog-b7ae6c737e419e5a2b951aaceb39c1e511b08b780152180ac8de2f0fa3e45e74.json",
   "id": "standard",
   "packages": [
     "chat_completions@1.0.0",
@@ -10,6 +10,7 @@
     "optimization@1.0.0",
     "plugin_manager@1.0.0",
     "process@1.0.0",
+    "rlm@1.0.0",
     "self_harness@1.0.0",
     "skills@1.0.0",
     "subagents@1.0.0",
