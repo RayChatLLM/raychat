@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from raychat.filesystem import read_regular
-from raychat.validation import json_object, object_field
+from raychat.validation import array_field, json_object, object_field
 from tests.assertions import TypedTestCase
 from tests.plugin_support import package
 from tests.test_package_system import PackageTestCase
@@ -283,8 +283,16 @@ class PortableBuildTests(PackageTestCase):
         # test asserts consistency, not a fixed set: every packaged plugin
         # ships sources and archive together, and the core nine are
         # always among them.
+        catalog = object_field(
+            json_object(sources["plugin_catalog/catalog.json"]),
+            "plugin catalog",
+        )
+        identities = {}
+        for raw_record in array_field(catalog["plugins"], "catalog plugins"):
+            record = object_field(raw_record, "catalog record")
+            identities[str(record["url"])] = str(record["id"])
         packaged = {
-            path.removeprefix("plugin_catalog/").rsplit("-", 1)[0]
+            identities[path.removeprefix("plugin_catalog/")]
             for path in sources
             if path.startswith("plugin_catalog/") and path.endswith(".zip")
         }

@@ -62,8 +62,6 @@ if TYPE_CHECKING:
 
     from .configuration import Budget
 
-_LOGGER = logging.getLogger(__name__)
-
 _CODE_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]*)\n(.*?)```", re.DOTALL)
 _FENCE_LINE_RE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$")
 _ENV_WHITELIST_PREFIXES: tuple[str, ...] = ("PATH", "HOME", "TEMP", "TMP")
@@ -516,7 +514,7 @@ async def _llm_payload(
             run.budget.max_llm_reply_chars,
         )
     except Exception as exc:
-        _LOGGER.debug("rlm llm() call failed", exc_info=True)
+        logging.getLogger(__name__).debug("rlm llm() call failed", exc_info=True)
         return {
             "op": "llm_result",
             "ok": False,
@@ -1022,7 +1020,10 @@ async def _forced_answer(
     try:
         reply = await _call_llm(run, messages)
     except Exception:
-        _LOGGER.debug("rlm forced final answer failed", exc_info=True)
+        logging.getLogger(__name__).debug(
+            "rlm forced final answer failed",
+            exc_info=True,
+        )
         return
     if reply.strip():
         state.answer = _clip(reply.strip(), run.budget.max_final_chars)
@@ -1088,7 +1089,7 @@ async def run_rlm(
     except EOFError as exc:
         state.stopped = f"child exited: {exc}"
     except Exception as exc:
-        _LOGGER.debug("rlm host failure", exc_info=True)
+        logging.getLogger(__name__).debug("rlm host failure", exc_info=True)
         state.stopped = f"host error: {type(exc).__name__}: {exc}"
     finally:
         if io_pair is not None:

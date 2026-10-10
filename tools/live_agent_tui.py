@@ -8,6 +8,7 @@ import html
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from raychat.validation import (
     configuration_fields,

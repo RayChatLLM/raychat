@@ -26,8 +26,6 @@ if TYPE_CHECKING:
 
     from raychat.sdk import PluginAPI, PluginContext
 
-_LOGGER = logging.getLogger(__name__)
-
 _OVERRIDABLE: tuple[str, ...] = (
     "max_iterations",
     "exec_timeout_seconds",
@@ -108,7 +106,10 @@ def _collect_plugin_roots(ctx: PluginContext) -> dict[str, str]:
             if name and name != "rlm" and Path(path).is_dir():
                 roots[name] = path
     except Exception:
-        _LOGGER.debug("rlm plugin-root discovery failed", exc_info=True)
+        logging.getLogger(__name__).debug(
+            "rlm plugin-root discovery failed",
+            exc_info=True,
+        )
         return roots
     return roots
 
@@ -216,7 +217,10 @@ def register(api: PluginAPI) -> None:
         try:
             chat_service = ctx.require_service(CHAT)
         except Exception as exc:
-            _LOGGER.debug("rlm chat service unavailable", exc_info=True)
+            logging.getLogger(__name__).debug(
+                "rlm chat service unavailable",
+                exc_info=True,
+            )
             return _failure(f"chat service unavailable: {exc}")
         run = RlmRun(
             chat_service=chat_service,

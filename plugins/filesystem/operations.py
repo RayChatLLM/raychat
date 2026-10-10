@@ -13,6 +13,7 @@ import stat
 import time
 from codecs import IncrementalDecoder
 from dataclasses import dataclass
+from functools import partial
 from heapq import nsmallest
 from typing import TYPE_CHECKING, BinaryIO, Protocol, TypeVar
 
@@ -282,10 +283,15 @@ def _sync_and_preserve_mode(stream: BinaryIO, mode: int | None) -> bool:
 def _atomic_write(path: Path, data: bytes) -> tuple[int, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = _existing_regular_mode(path, "write")
-    write_bytes(
-        path,
-        data,
-        mode=mode if mode is not None else SETTINGS.storage.workspace_file_mode,
+    # The publishing replace retries transient sharing violations from
+    # external file scanners on every platform.
+    _retry_sharing_violation(
+        partial(
+            write_bytes,
+            path,
+            data,
+            mode=mode if mode is not None else SETTINGS.storage.workspace_file_mode,
+        ),
     )
     return len(data), hashlib.sha256(data).hexdigest()
 

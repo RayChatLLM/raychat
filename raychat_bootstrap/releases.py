@@ -54,7 +54,16 @@ _FIXED_FILES = (
     ".gitattributes",
     ".gitignore",
 )
-_IGNORED = {"__pycache__", ".git", ".venv", ".mypy_cache", ".ruff_cache", ".DS_Store"}
+_IGNORED = {
+    "__pycache__",
+    ".git",
+    ".venv",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".DS_Store",
+    # The user's saved provider secrets never belong in a captured release.
+    ".env",
+}
 
 
 def _inspect(path: Path) -> os.stat_result:
