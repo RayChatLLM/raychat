@@ -88,7 +88,11 @@ _SYSTEM_PROMPT_TEMPLATE: str = (
     "Iterations are your scarcest budget: batch several steps into one\n"
     "reply (set up, compute, and print compact evidence together) and\n"
     "spend a new iteration only when you need the previous output to\n"
-    "decide what comes next.\n"
+    "decide what comes next. Economy NEVER outranks completeness: an\n"
+    "answer computed over a truncated retrieval is wrong, not cheap.\n"
+    "Whenever you fetch with a limit, verify you got everything\n"
+    "(compare retrieved count to the source's total) or paginate until\n"
+    "you have, BEFORE computing any count, list or answer from it.\n"
     "\n"
     "\n"
     "Names available:\n"
@@ -665,6 +669,29 @@ def _argument_names(arguments: ast.arguments, *, drop_first: bool) -> str:
     return ", ".join(names)
 
 
+def _entry_suffix(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str:
+    """Render the return annotation and docstring gist for one callable.
+
+    Returns
+    -------
+    str
+        " -> Type - gist" with whichever parts the source provides.
+
+    """
+    suffix = ""
+    if node.returns is not None:
+        with suppress(ValueError):
+            suffix += " -> " + ast.unparse(node.returns)
+    gist = ast.get_docstring(node) or ""
+    if gist:
+        first = gist.strip().splitlines()[0].strip().rstrip(".")
+        if first:
+            suffix += " - " + first
+    return suffix
+
+
 def _class_entries(module: str, node: ast.ClassDef) -> list[str]:
     """Render one public class as digest lines.
 
@@ -677,7 +704,8 @@ def _class_entries(module: str, node: ast.ClassDef) -> list[str]:
     entries = [
         _clip_line(
             f"{module}.{node.name}.{item.name}"
-            f"({_argument_names(item.args, drop_first=True)})",
+            f"({_argument_names(item.args, drop_first=True)})"
+            f"{_entry_suffix(item)}",
         )
         for item in node.body
         if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -733,7 +761,8 @@ def _module_entries(path: Path) -> list[str]:
                 entries.append(
                     _clip_line(
                         f"{module}.{node.name}"
-                        f"({_argument_names(node.args, drop_first=False)})",
+                        f"({_argument_names(node.args, drop_first=False)})"
+                        f"{_entry_suffix(node)}",
                     ),
                 )
         elif isinstance(node, ast.ClassDef):
