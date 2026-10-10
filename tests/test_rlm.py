@@ -127,6 +127,7 @@ class RlmLoopTests(TypedTestCase):
         self.equal(result["answer"], None)
         self.equal(result["iterations"], 1)
         self.equal(result["stopped"], "max_iterations reached")
+        self.require("note" not in result)
 
     def test_forced_answer_after_exhaustion(self) -> None:
         """Out of iterations, one plain-text completion becomes the answer."""
@@ -197,6 +198,7 @@ class RlmLoopTests(TypedTestCase):
                 sorted(record),
                 [
                     "code",
+                    "depth",
                     "exception",
                     "got_final",
                     "iteration",
@@ -466,3 +468,47 @@ class InstructionRoleTests(TypedTestCase):
             [message["role"] for message in chat.calls[0]],
             ["system", "user"],
         )
+
+
+class TraceDepthAndResumeNoteTests(TypedTestCase):
+    """Make recursion attribution and capped-run resumption explicit."""
+
+    def test_trace_records_carry_the_run_depth(self) -> None:
+        """Root rounds trace depth 1; nested-depth rounds trace their depth."""
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            _execute(workspace, ['final("root")'], trace=True)
+            root_records = _trace_records(workspace)
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            _execute(workspace, ['final("nested")'], trace=True, depth=2)
+            nested_records = _trace_records(workspace)
+        self.equal(root_records[0]["depth"], 1)
+        self.equal(nested_records[0]["depth"], 2)
+
+    def test_capped_run_with_notes_reports_the_resume_note(self) -> None:
+        """Hitting the iteration budget with notes saved tells the caller."""
+        replies = ['print("partial progress")', "forced plain answer"]
+        with TemporaryDirectory() as temporary:
+            result, _ = _execute(
+                Path(temporary),
+                replies,
+                {"max_iterations": 1},
+                notes=True,
+            )
+        self.require(result["ok"])
+        self.require("note" in result)
+        self.require("resumes from them" in result["note"])
+
+    def test_nested_capped_run_stays_noteless(self) -> None:
+        """Only top-level runs advertise resumption; workers never do."""
+        replies = ['print("partial")', "forced"]
+        with TemporaryDirectory() as temporary:
+            result, _ = _execute(
+                Path(temporary),
+                replies,
+                {"max_iterations": 1},
+                notes=True,
+                depth=2,
+            )
+        self.require("note" not in result)

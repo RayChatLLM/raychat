@@ -48,7 +48,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from raychat.validation import ConfigurationError, array_field, object_field
 
@@ -181,6 +181,7 @@ class RlmResult(TypedDict):
     iterations: int
     llm_calls: int
     stopped: str | None
+    note: NotRequired[str]
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,7 @@ class _RunState:
     deadline: float
     run_ts: str
     trace_path: Path | None
+    depth: int = 1
     iterations: int = 0
     stopped: str | None = None
     answer: str | None = None
@@ -469,6 +471,7 @@ def _trace_round(
         state,
         {
             "run_ts": state.run_ts,
+            "depth": state.depth,
             "iteration": state.iterations,
             "code": code,
             "stdout": done.get("stdout"),
@@ -489,6 +492,7 @@ def _trace_fatal(state: _RunState, code: str) -> None:
         state,
         {
             "run_ts": state.run_ts,
+            "depth": state.depth,
             "iteration": state.iterations + 1,
             "code": code,
             "stdout": "",
@@ -1103,6 +1107,7 @@ async def run_rlm(
         deadline=time.monotonic() + run.budget.total_timeout_seconds,
         run_ts=datetime.now(timezone.utc).isoformat(),
         trace_path=run.trace_path,
+        depth=run.depth,
     )
     messages = _seed_messages(run, task, prompt, prompt_path)
     io_pair: _ChildIo | None = None
@@ -1119,13 +1124,21 @@ async def run_rlm(
             await _close_child(io_pair)
     _record_note(run, state, task)
     ok = state.answer is not None
-    return RlmResult(
+    result = RlmResult(
         ok=ok,
         answer=state.answer,
         iterations=state.iterations,
         llm_calls=shared["llm_calls"],
         stopped=None if ok else (state.stopped or "budget exhausted"),
     )
+    capped = state.stopped == "max_iterations reached"
+    if capped and run.depth == 1 and run.notes_path is not None:
+        result["note"] = (
+            "Iteration budget hit mid-task; this run's working code and"
+            " observations are saved, so a fresh rlm run on the same task"
+            " resumes from them instead of starting over."
+        )
+    return result
 
 
 __all__ = ["RlmResult", "RlmRun", "run_rlm"]
