@@ -308,7 +308,9 @@ class TuiSessionTests(TypedTestCase):
         calls = []
 
         def chat(messages: Messages) -> str:
-            judge = messages[0]["content"] == goals.JUDGE_INSTRUCTIONS
+            # Under instruction_role="user" the judge merges its evidence into
+            # the instruction message, so classify by prefix, not equality.
+            judge = messages[0]["content"].startswith(goals.JUDGE_INSTRUCTIONS)
             calls.append("judge" if judge else "task")
             return (
                 '{"decision":"complete","feedback":"verified"}'

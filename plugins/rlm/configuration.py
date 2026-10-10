@@ -277,6 +277,33 @@ class TraceSettings:
         )
 
 
+_INSTRUCTION_ROLES = frozenset({"system", "user"})
+
+
+def instruction_role(fields: Mapping[str, object], path: str = "rlm") -> str:
+    """Validate the role carrying the sub-model's instruction message.
+
+    Some providers reject or penalize ``system`` messages; ``user`` sends
+    the instructions as the opening user turn instead.
+
+    Returns
+    -------
+    str
+        Either ``"system"`` or ``"user"``.
+
+    Raises
+    ------
+    BudgetError
+        If the configured value is neither supported role.
+
+    """
+    value = fields.get("instruction_role", "user")
+    if not isinstance(value, str) or value not in _INSTRUCTION_ROLES:
+        message = f"{path}.instruction_role must be 'system' or 'user'"
+        raise BudgetError(message)
+    return value
+
+
 @dataclass(frozen=True, kw_only=True)
 class NotesSettings:
     """Checked cross-run API-notes policy for one plugin generation.
@@ -329,6 +356,7 @@ class NotesSettings:
 
 _SETTING_NAMES: tuple[str, ...] = (
     *sorted(DEFAULT_BUDGET),
+    "instruction_role",
     "notes_enabled",
     "notes_file",
     "trace_enabled",
@@ -341,4 +369,5 @@ def validate(raw: object) -> None:
     fields = settings_fields(raw, "rlm", required=_SETTING_NAMES)
     Budget.from_settings(fields)
     TraceSettings.parse(fields)
+    instruction_role(fields)
     NotesSettings.parse(fields)

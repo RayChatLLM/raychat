@@ -215,6 +215,7 @@ class RlmRun:
     plugin_roots: Mapping[str, str]
     trace_path: Path | None = None
     notes_path: Path | None = None
+    instruction_role: str = "user"
     depth: int = 1
 
 
@@ -939,6 +940,10 @@ def _seed_messages(
     if prompt:
         preview = _clip(prompt, run.budget.prompt_preview_chars)
         first_user += f"\nPrompt preview:\n{preview}"
+    if run.instruction_role == "user":
+        # Providers that dislike system messages get one merged opening
+        # user turn; two adjacent user messages would be rejected by some.
+        return [{"role": "user", "content": system_prompt + "\n\n" + first_user}]
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": first_user},

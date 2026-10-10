@@ -81,6 +81,12 @@ async def _launch(arguments: list[str], cwd: Path) -> _LaunchResult:
         await asyncio.wait_for(process.wait(), 5)
 
 
+def _task_text(content: str) -> str:
+    # Under instruction_role="user" the active prompt rides behind the merged
+    # instruction block and the task marker; other roles leave it bare.
+    return content.rpartition("\n\n--- USER TASK ---\n")[2]
+
+
 def _json_dump(value: object) -> str:
     return json.dumps(value)
 
@@ -303,7 +309,9 @@ class ResumeTests(_EntrypointFixture):
         with mock.patch("raychat.ui.picker.choose") as picker:
             self.equal(self.main(["--resume", "--exec", "continue"], chat=chat), 0)
         picker.assert_not_called()
-        self.require(("previous prompt") in ([m["content"] for m in chat.calls[0]]))
+        self.require(
+            ("previous prompt") in ([_task_text(m["content"]) for m in chat.calls[0]]),
+        )
         with_history = SessionStore(self.root, self.directory, identifier)
         self.addCleanup(with_history.close)
         self.equal(len(array_field(with_history.snapshot()["history"], "history")), 4)

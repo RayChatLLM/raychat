@@ -310,6 +310,7 @@
       "defaults": {
         "exec_output_chars": 4096,
         "exec_timeout_seconds": 60,
+        "instruction_role": "user",
         "max_depth": 2,
         "max_final_chars": 65536,
         "max_iterations": 24,
@@ -330,7 +331,7 @@
       "instructions": "Answer questions about very large data with {\"action\":\"rlm\",\"task\":\"...\"} plus optional \"prompt_file\":\"big.txt\" (workspace-relative) or inline \"prompt\". A sub-model works in a persistent Python REPL: the data stays in REPL variables, never in a context window. The REPL exposes `plugins`, a mapping of ALL currently installed plugin libraries keyed by plugin id (e.g. plugins[\"process\"]), so the sub-model can query live data itself. Prefer this over read for huge files. Budget overrides are ACTION FIELDS, not prose: pass e.g. {\"action\":\"rlm\",\"task\":\"...\",\"max_iterations\":10} - a limit stated only inside the task text does not bind the run (also overridable: max_llm_calls, max_depth, exec_timeout_seconds, total_timeout_seconds). The result is {ok, answer, iterations, llm_calls, stopped}; each execution round is audit-logged to rlm_trace.jsonl in the workspace unless the operator disables tracing.",
       "requires": {},
       "sdk": 4,
-      "sha256": "7557d7bed9f8ea48ff5644a186d35d53bce4c69b1030af14d93b4aa45e8be279",
+      "sha256": "fbceb0004ace4618be591fb825f4dac8bbaa6718a8a3111661df14566e523b56",
       "url": "rlm-1.0.0.zip",
       "version": "1.0.0"
     },

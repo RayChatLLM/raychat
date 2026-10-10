@@ -10,7 +10,7 @@
     "command_timeout_seconds": 30,
     "context_chars": 3500000,
     "keep_recent_turns": 4,
-    "instruction_role": "system",
+    "instruction_role": "user",
     "message_roles": [
       "system",
       "developer",

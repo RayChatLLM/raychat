@@ -39,6 +39,12 @@ def _manifest_instructions(name: str) -> str:
     return raw.instructions
 
 
+def _task_text(content: str) -> str:
+    # Under instruction_role="user" the active prompt rides behind the merged
+    # instruction block and the task marker; other roles leave it bare.
+    return content.rpartition("\n\n--- USER TASK ---\n")[2]
+
+
 def _decode_object(data: str) -> dict[str, object]:
     return object_field(json_object(data), "decoded host result")
 
@@ -122,7 +128,8 @@ class RunAgentTests(_RunFixture):
         system = chat.calls[0][0]["content"]
         self.require(('"name": "test"') in (system))
         self.require(("Use UTF-8") in (system))
-        self.equal(chat.calls[0][1], {"role": "user", "content": "build it"})
+        self.equal(chat.calls[0][-1]["role"], "user")
+        self.equal(_task_text(chat.calls[0][-1]["content"]), "build it")
 
     def test_protocol_override_is_per_run_and_default_remains_exact(self) -> None:
         """Check protocol override is per run and default remains exact."""
@@ -295,6 +302,9 @@ class RunAgentTests(_RunFixture):
             self.root / "memory-workspace",
             memory=memory,
             context_chars=budget,
+            # The floor arithmetic below indexes the instruction and task
+            # messages separately, so this layout is role-pinned.
+            instruction_role="system",
         )
 
         self.equal(result, "fit")
@@ -428,14 +438,13 @@ class RunAgentTests(_RunFixture):
         )
 
         final_messages = chat.calls[-1]
-        self.equal(sum(item["role"] == "system" for item in final_messages), 1)
-        loaded = [
-            item
-            for item in final_messages
-            if item["role"] == "system"
-            and "Loaded operator-configured skill" in item["content"]
-        ]
-        self.equal(len(loaded), 1)
+        self.equal(
+            sum(
+                item["content"].count("Loaded operator-configured skill")
+                for item in final_messages
+            ),
+            1,
+        )
         host_results = [
             _decode_object(item["content"][len(SETTINGS.chat.protocol.result_prefix) :])
             for item in final_messages
@@ -505,7 +514,13 @@ class RunAgentTests(_RunFixture):
         # Persistent context is rebuilt before every API call, so a newly saved
         # fact is available immediately without duplicating system messages.
         self.require(("durable fact") in (first.calls[1][0]["content"]))
-        self.equal(sum(item["role"] == "system" for item in first.calls[1]), 1)
+        self.equal(
+            sum(
+                item["content"].count("Persistent memories: ")
+                for item in first.calls[1]
+            ),
+            1,
+        )
         results = [
             _decode_object(item["content"][len(SETTINGS.chat.protocol.result_prefix) :])
             for item in first.calls[-1]
@@ -729,6 +744,9 @@ class RunAgentTests(_RunFixture):
             log=log,
             context_chars=budget,
             keep_recent_turns=0,
+            # The compaction assertions below check the exact
+            # ["system", "user"] request shape, so this layout is role-pinned.
+            instruction_role="system",
         )
 
         self.equal(len(chat.calls), 2)

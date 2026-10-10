@@ -42,6 +42,12 @@ def _json(value: object) -> str:
     return json.dumps(value)
 
 
+def _task_text(content: str) -> str:
+    # Under instruction_role="user" the active prompt rides behind the merged
+    # instruction block and the task marker; other roles leave it bare.
+    return content.rpartition("\n\n--- USER TASK ---\n")[2]
+
+
 def _json_fields(value: str | bytes) -> dict[str, object]:
     return object_field(json_object(value), "provider request")
 
@@ -198,7 +204,7 @@ class AgentSessionTests(PackageTestCase):
         while len(child.calls) < expected_calls and time.monotonic() < deadline:
             time.sleep(0.005)
         equal(
-            [m["content"] for m in child.calls[-1] if m["role"] == "user"],
+            [_task_text(m["content"]) for m in child.calls[-1] if m["role"] == "user"],
             ["first", "follow-up"],
         )
         equal(_permissions(entry.worker), frozenset({"list", "read", "done"}))
@@ -241,7 +247,11 @@ class AgentSessionTests(PackageTestCase):
                 selected.worker.submit("new task")
                 collect_until(selected.worker, "completed", 2)
                 equal(
-                    [m["content"] for m in left.calls[-1] if m["role"] == "user"],
+                    [
+                        _task_text(m["content"])
+                        for m in left.calls[-1]
+                        if m["role"] == "user"
+                    ],
                     ["new task"],
                 )
                 right.release.set()
@@ -289,7 +299,7 @@ class AgentSessionTests(PackageTestCase):
         entry.worker.submit("follow-up", result=result)
         equal(result.result(3), "answer 1")
         equal(
-            [m["content"] for m in second.calls[-1] if m["role"] == "user"],
+            [_task_text(m["content"]) for m in second.calls[-1] if m["role"] == "user"],
             ["first prompt", "follow-up"],
         )
         equal(_permissions(entry.worker), frozenset({"list", "read", "done"}))
@@ -310,9 +320,11 @@ class AgentSessionTests(PackageTestCase):
                     self.rfile.read(int(self.headers["Content-Length"])),
                 )
                 requests.append(payload)
-                last = text_field(
-                    _messages(payload["messages"])[-1]["content"],
-                    "content",
+                last = _task_text(
+                    text_field(
+                        _messages(payload["messages"])[-1]["content"],
+                        "content",
+                    ),
                 )
                 if last == "WAIT":
                     waiting.set()
@@ -394,7 +406,7 @@ class AgentSessionTests(PackageTestCase):
             final, _ = collect_until(entry.worker, "completed", 15)
             equal(final.payload["result"], "reply AFTER")
             history = [
-                m["content"]
+                _task_text(text_field(m["content"], "content"))
                 for m in _messages(requests[-1]["messages"])
                 if m["role"] == "user"
             ]

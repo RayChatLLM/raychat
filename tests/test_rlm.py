@@ -38,6 +38,7 @@ class _RunOptions(TypedDict, total=False):
     notes: bool
     depth: int
     plugin_roots: Mapping[str, str]
+    instruction_role: str
 
 
 def _execute(
@@ -65,6 +66,7 @@ def _execute(
         trace_path=workspace / _TRACE_NAME if options.get("trace") else None,
         notes_path=workspace / _NOTES_NAME if options.get("notes") else None,
         depth=options.get("depth", 1),
+        instruction_role=options.get("instruction_role", "user"),
     )
     result = asyncio.run(_rlm_loop.run_rlm(run, task="answer the task"))
     return result, chat
@@ -277,7 +279,7 @@ class RlmLoopTests(TypedTestCase):
                 plugin_roots={"tinyapi": str(package)},
             )
         self.require(result["ok"])
-        first = chat.calls[0][1]["content"]
+        first = chat.calls[0][-1]["content"]
         self.require("Plugin API digest" in first, first)
         self.require("toolbox.fetch_rows(query, limit)" in first, first)
         self.require("toolbox.Client.connect(host, port)" in first, first)
@@ -304,8 +306,19 @@ class RlmLoopTests(TypedTestCase):
                 plugin_roots={"bigapi": str(package)},
             )
         self.require(result["ok"])
-        first = chat.calls[0][1]["content"]
-        digest_lines = [line for line in first.splitlines() if line.startswith("    ")]
+        first = chat.calls[0][-1]["content"]
+        lines = first.splitlines()
+        start = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("Plugin API digest")
+        )
+        digest_lines = []
+        for line in lines[start + 1 :]:
+            if not line.startswith("  "):
+                break
+            if line.startswith("    "):
+                digest_lines.append(line)
         self.equal(len(digest_lines), 15)
         self.require("... (+16 more)" in first, first)
 
@@ -331,7 +344,7 @@ class RlmLoopTests(TypedTestCase):
         self.require("x = 1" in code, code)
         self.require('final("done")' in code, code)
         self.require(second_run["ok"])
-        first_message = chat.calls[0][1]["content"]
+        first_message = chat.calls[0][-1]["content"]
         self.require(
             "Previously successful code in this workspace (newest first):"
             in first_message,
@@ -350,7 +363,7 @@ class RlmLoopTests(TypedTestCase):
             )
         self.require(result["ok"])
         self.equal(result["answer"], "ok")
-        first_message = chat.calls[0][1]["content"]
+        first_message = chat.calls[0][-1]["content"]
         self.require("Previously successful" not in first_message, first_message)
         self.require(isinstance(rewritten, list), rewritten)
 
@@ -414,3 +427,42 @@ class RlmLoopTests(TypedTestCase):
             result, _ = _execute(Path(temporary), replies)
         self.require(result["ok"])
         self.equal(result["answer"], "unterminated")
+
+
+class InstructionRoleTests(TypedTestCase):
+    """Send the sub-model's instructions under the configured role."""
+
+    def test_user_role_merges_instructions_into_one_opening_turn(self) -> None:
+        """A user-role run opens with one user message and no system role."""
+        with TemporaryDirectory() as temporary:
+            result, chat = _execute(
+                Path(temporary),
+                ['final("done")'],
+                instruction_role="user",
+            )
+        self.require(result["ok"])
+        first = chat.calls[0]
+        self.equal([message["role"] for message in first], ["user"])
+        self.require("Recursive Language Model" in first[0]["content"])
+        self.require("Task: answer the task" in first[0]["content"])
+
+    def test_default_role_is_a_single_user_turn(self) -> None:
+        """The default seed is one merged user message (provider-friendly)."""
+        with TemporaryDirectory() as temporary:
+            result, chat = _execute(Path(temporary), ['final("done")'])
+        self.require(result["ok"])
+        self.equal([message["role"] for message in chat.calls[0]], ["user"])
+
+    def test_system_role_keeps_the_system_message(self) -> None:
+        """Opting back into system seeds system plus user messages."""
+        with TemporaryDirectory() as temporary:
+            result, chat = _execute(
+                Path(temporary),
+                ['final("done")'],
+                instruction_role="system",
+            )
+        self.require(result["ok"])
+        self.equal(
+            [message["role"] for message in chat.calls[0]],
+            ["system", "user"],
+        )

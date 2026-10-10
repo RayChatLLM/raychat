@@ -45,6 +45,12 @@ def _json(value: object) -> str:
     return json.dumps(value)
 
 
+def _task_text(content: str) -> str:
+    # Under instruction_role="user" the active prompt rides behind the merged
+    # instruction block and the task marker; other roles leave it bare.
+    return content.rpartition("\n\n--- USER TASK ---\n")[2]
+
+
 def _ignore_event(_kind: str, _payload: Mapping[str, object]) -> None:
     pass
 
@@ -136,6 +142,9 @@ class AgentSessionTests(_SessionCase):
             protocol="P",
             memory=SizedMemory(self.root / "sized-memory.json"),
             context_chars=budget,
+            # The header/memory assertions below index the instruction and
+            # digest messages separately, so this layout is role-pinned.
+            instruction_role="system",
         )
         self.addCleanup(session.close)
         self.send_quietly(session, "old")
@@ -326,7 +335,10 @@ class AgentSessionTests(_SessionCase):
         )
 
         self.equal(
-            chat.calls[1][1:],
+            [
+                {"role": m["role"], "content": _task_text(m["content"])}
+                for m in chat.calls[1][-3:]
+            ],
             [
                 {"role": "user", "content": "first prompt"},
                 {"role": "assistant", "content": first_reply},
@@ -535,7 +547,8 @@ class AgentSessionTests(_SessionCase):
         self.send_quietly(session, "start fresh")
 
         fresh = chat.calls[2]
-        self.equal(fresh[-1], {"role": "user", "content": "start fresh"})
+        self.equal(fresh[-1]["role"], "user")
+        self.equal(_task_text(fresh[-1]["content"]), "start fresh")
         self.require("load it" not in _json(fresh))
         self.require(body not in fresh[0]["content"])
         self.require("durable across reset" in fresh[0]["content"])

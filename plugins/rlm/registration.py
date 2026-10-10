@@ -18,7 +18,14 @@ from raychat.sdk import ToolDefinition, workspace_path
 from raychat.service_contracts import CHAT
 from raychat.validation import ConfigurationError
 
-from .configuration import Budget, BudgetError, NotesSettings, TraceSettings, validate
+from .configuration import (
+    Budget,
+    BudgetError,
+    NotesSettings,
+    TraceSettings,
+    instruction_role,
+    validate,
+)
 from .loop import RlmResult, RlmRun, run_rlm
 
 if TYPE_CHECKING:
@@ -222,6 +229,7 @@ def register(api: PluginAPI) -> None:
                 exc_info=True,
             )
             return _failure(f"chat service unavailable: {exc}")
+        role = instruction_role(dict(ctx.settings))
         run = RlmRun(
             chat_service=chat_service,
             budget=budget,
@@ -229,6 +237,7 @@ def register(api: PluginAPI) -> None:
             plugin_roots=_collect_plugin_roots(ctx),
             trace_path=trace_path,
             notes_path=notes_path,
+            instruction_role=role,
         )
         return asyncio.run(
             run_rlm(
