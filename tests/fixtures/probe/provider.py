@@ -84,7 +84,11 @@ class ProbeChat:
         """
         with (self.root / "requests.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(_json_dump(messages) + "\n")
-        prompt = next(m["content"] for m in reversed(messages) if m["role"] == "user")
+        prompt = next(
+            message["content"]
+            for message in reversed(messages)
+            if message["role"] == "user"
+        ).rsplit("\n\n--- USER TASK ---\n", 1)[-1]
         if prompt == "START_WORKFLOW":
             return _json_dump(
                 {

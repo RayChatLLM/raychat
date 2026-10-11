@@ -209,7 +209,11 @@ def sent(case: Case, prompt: str) -> list[list[dict[str, str]]]:
         The observed or prepared value described above.
 
     """
-    return [request for request in requests(case) if request[-1]["content"] == prompt]
+    return [
+        request
+        for request in requests(case)
+        if request[-1]["content"].rsplit("\n\n--- USER TASK ---\n", 1)[-1] == prompt
+    ]
 
 
 def wait_for(
@@ -291,7 +295,7 @@ def users(messages: list[dict[str, str]]) -> list[str]:
 
     """
     return [
-        message["content"]
+        message["content"].rsplit("\n\n--- USER TASK ---\n", 1)[-1]
         for message in messages
         if message["role"] == "user" and not message["content"].startswith("HOST_")
     ]
