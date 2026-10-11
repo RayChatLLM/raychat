@@ -609,9 +609,7 @@ def concurrent_checkpoint(case: Case, *, persist: bool, complete: bool) -> None:
             .read_text(encoding="utf-8")
             .splitlines()
         ]
-        visible_prompts = [
-            item["content"] for item in requests[-1] if item["role"] == "user"
-        ]
+        visible_prompts = users(requests[-1])
         require(
             visible_prompts == [*expected, "CHECKPOINT_REPLACEMENT"],
             (

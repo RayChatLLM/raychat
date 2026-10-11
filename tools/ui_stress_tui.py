@@ -56,7 +56,8 @@ PROVIDER = (
     'coding="utf-8") as stream:\n            stream.write(json.dum'
     'ps(messages, ensure_ascii=False) + "\\n")\n        prompt = ne'
     'xt(m["content"] for m in reversed(messages) if m["role"] == '
-    '"user")\n        if prompt == "UI_HOLD":\n            (self.ro'
+    '"user").rsplit("\\n\\n--- USER TASK ---\\n", 1)[-1]\n'
+    '        if prompt == "UI_HOLD":\n            (self.ro'
     'ot / "hold.started").touch()\n            while not (self.roo'
     't / "hold.release").exists():\n                cancel_check()'
     '\n                time.sleep(0.01)\n        if prompt == "LONG'
@@ -111,7 +112,7 @@ def expected(prompt: str) -> str:
 
 
 def requests(case: Case) -> list[list[dict[str, str]]]:
-    """Read complete provider histories recorded by the external fixture.
+    """Read provider histories with instruction envelopes removed from user tasks.
 
     Returns
     -------
@@ -120,7 +121,15 @@ def requests(case: Case) -> list[list[dict[str, str]]]:
 
     """
     path = case.work / "requests.jsonl"
-    return read_messages(path) if path.exists() else []
+    histories = read_messages(path) if path.exists() else []
+    for history in histories:
+        for message in history:
+            if message["role"] == "user":
+                message["content"] = message["content"].rsplit(
+                    "\n\n--- USER TASK ---\n",
+                    1,
+                )[-1]
+    return histories
 
 
 def settle(chat: TerminalChat, seconds: float = 0.35) -> None:

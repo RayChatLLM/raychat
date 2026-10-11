@@ -170,7 +170,7 @@ class Ledger:
             The parent prompt does not identify a batch file.
 
         """
-        last = messages[-1]["content"]
+        last = messages[-1]["content"].rsplit("\n\n--- USER TASK ---\n", 1)[-1]
         if index is not None:
             return self._respond_child(last, index)
         prompt_index = next(
@@ -348,7 +348,10 @@ class _ModelGateway:
                     separators=(",", ":"),
                 ),
             ),
-            "compacted": any("HOST_COMPACTION" in m["content"] for m in messages[1:]),
+            "compacted": any(
+                re.search(r"(?m)^HOST_COMPACTION: ", message["content"])
+                for message in messages
+            ),
         }
         with self.ledger.lock:
             self.ledger.requests.append(record)

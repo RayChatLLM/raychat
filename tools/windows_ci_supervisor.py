@@ -72,9 +72,6 @@ def _infrastructure_path(report: dict[str, object]) -> str | None:
     computer = text_field(identity.get("computer"), "hosted computer")
     expected = {
         "sha256": "6DE531403BD14940AE52264803DB7EA8A4F3AD68C5CF95B106F8E6B271880086",
-        "parent_sha256": (
-            "9DD862527186698D54CDF61E34FFF3FF67D6A0B089331F3CA073C8D78EA3E03C"
-        ),
         "parent_path": r"C:\ProgramData\GitHub\HostedComputeAgent\hosted-compute-agent",
         "scheduler_path": r"C:\Windows\system32\svchost.exe",
         "scheduler_signature_status": "Valid",
@@ -88,6 +85,11 @@ def _infrastructure_path(report: dict[str, object]) -> str | None:
     }
     matched = (
         re.fullmatch(r"[A-Za-z0-9._-]+", computer) is not None
+        and identity.get("parent_sha256")
+        in {
+            "9DD862527186698D54CDF61E34FFF3FF67D6A0B089331F3CA073C8D78EA3E03C",
+            "717D7BF0B7D2D885D91FBCC02274AEDE1E9DAADCBB1DD51E1A08303AADBB94C5",
+        }
         and re.fullmatch(
             r"C:\\Users\\(?:RUNNER~1|runneradmin)\\AppData\\Local\\Temp\\provjobd\.exe[0-9]+",
             path,

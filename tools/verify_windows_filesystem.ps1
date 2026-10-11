@@ -307,14 +307,17 @@ function Get-HostedDefenderException {
     $Daemon, $Agent, $Scheduler = $Chain[0], $Chain[1], $Chain[2]
     $Owner = "$env:COMPUTERNAME\runneradmin"
     $DaemonHash = '6DE531403BD14940AE52264803DB7EA8A4F3AD68C5CF95B106F8E6B271880086'
-    $AgentHash = '9DD862527186698D54CDF61E34FFF3FF67D6A0B089331F3CA073C8D78EA3E03C'
+    $AgentHashes = @(
+        '9DD862527186698D54CDF61E34FFF3FF67D6A0B089331F3CA073C8D78EA3E03C',
+        '717D7BF0B7D2D885D91FBCC02274AEDE1E9DAADCBB1DD51E1A08303AADBB94C5'
+    )
     $AgentPath = 'C:\ProgramData\GitHub\HostedComputeAgent\hosted-compute-agent'
     $MicrosoftSigner = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
     if ($Daemon.binary.path -notmatch '^C:\\Users\\(?:RUNNER~1|runneradmin)\\AppData\\Local\\Temp\\provjobd\.exe[0-9]+$' -or
         $Daemon.binary.sha256 -cne $DaemonHash -or $Daemon.owner -ine $Owner -or
         [DateTimeOffset]$Daemon.created -ge [DateTimeOffset]$AcceptanceStarted -or
         $Daemon.parent_pid -ne $Agent.pid -or $Agent.parent_pid -ne $Scheduler.pid -or
-        $Agent.binary.path -ine $AgentPath -or $Agent.binary.sha256 -cne $AgentHash -or
+        $Agent.binary.path -ine $AgentPath -or $AgentHashes -cnotcontains $Agent.binary.sha256 -or
         $Agent.owner -ine $Owner -or [DateTimeOffset]$Agent.created -ge [DateTimeOffset]$AcceptanceStarted -or
         $Scheduler.binary.path -ine 'C:\Windows\system32\svchost.exe' -or
         $Scheduler.binary.signature_status -cne 'Valid' -or
@@ -324,7 +327,7 @@ function Get-HostedDefenderException {
     }
     return [ordered]@{
         path = $Daemon.binary.path; sha256 = $DaemonHash
-        parent_path = $AgentPath; parent_sha256 = $AgentHash
+        parent_path = $AgentPath; parent_sha256 = $Agent.binary.sha256
         owner = $Owner; computer = $env:COMPUTERNAME
         created_utc = ([DateTimeOffset]$Daemon.created).ToString('o')
         parent_created_utc = ([DateTimeOffset]$Agent.created).ToString('o')
