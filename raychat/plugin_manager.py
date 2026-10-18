@@ -1822,11 +1822,13 @@ class PackageManager:
         Raises
         ------
         PluginError
-            If this scope does not own the installed package.
+            If this scope does not own the installed package, or another
+            installed package still depends on it.
 
         """
         if identifier not in self._states[scope]["packages"]:
             raise PluginError("Plugin is not installed in this scope: " + identifier)
+        self._reject_if_required(identifier)
         temporary = OwnedTemporaryDirectory(prefix="raychat-uninstall-")
         return self._transaction(
             _PackageChange(
@@ -1836,6 +1838,37 @@ class PackageManager:
                 ctx=ctx,
             ),
         )
+
+    def _reject_if_required(self, identifier: str) -> None:
+        """Refuse removal while an installed package still requires ``identifier``.
+
+        The queued transaction already validates the dependency graph, but that
+        runs at the next idle boundary, so the refusal would not reach the
+        command's own reply. Checking here surfaces it synchronously, as the
+        documented ``/plugins uninstall`` behaviour requires.
+
+        Raises
+        ------
+        PluginError
+            If an installed package still requires ``identifier``.
+
+        """
+        with self.source_read():
+            paths = self.paths(include_disabled=True)
+        paths.pop(identifier, None)
+        for name, path in paths.items():
+            try:
+                manifest = read_manifest(path, require_current_sdk=False)
+            except PluginError:
+                continue
+            if identifier in manifest.requires:
+                raise PluginError(
+                    "Missing or disabled plugin dependency: "
+                    + identifier
+                    + " (required by "
+                    + name
+                    + ")",
+                )
 
     def update(
         self,
