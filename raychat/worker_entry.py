@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import raychat.composition as _rc_composition
 from raychat.configuration import SETTINGS
 from raychat.plugin_manager import download
-from raychat.sdk import ProviderError
+from raychat.sdk import PluginError, ProviderError
 from raychat.validation import (
     ConfigurationError,
     array_field,
@@ -427,7 +427,23 @@ def _conversation(
     api: Chat,
     cancel_check: CancelCheck,
 ) -> str:
-    runtime = _runtime(request.workspace, request.runtime_plugins, request.source)
+    # Load the subagent's declared read/analysis plugin set (filesystem,
+    # context, ostparse) from the captured source -- not the orchestration
+    # plugins, which need a provider and must not run inside a child. A declared
+    # plugin that is not installed here (ostparse is absent in the test suite)
+    # is dropped rather than failing child startup.
+    try:
+        runtime = _runtime(request.workspace, request.runtime_plugins, request.source)
+    except PluginError:
+        base = [p for p in request.runtime_plugins if p in {"filesystem", "context"}]
+        if not base:
+            base = ["filesystem", "context"]
+        runtime = _runtime(request.workspace, base, request.source)
+    # Grant only the actions whose plugins actually loaded (e.g. ostparse only
+    # when its plugin is present), so a dropped plugin cannot leave a dangling
+    # allowed action.
+    child_tools: set[str] = {str(name) for name in runtime.tools} | {"done"}
+    allowed = {a for a in request.allowed_actions if a in child_tools} or {"done"}
     session = None
     try:
         session = _rc_composition.create_session(
@@ -440,7 +456,7 @@ def _conversation(
             keep_recent_turns=request.keep_recent_turns,
             instruction_role=request.instruction_role,
             protocol=request.protocol,
-            allowed_actions=request.allowed_actions,
+            allowed_actions=allowed,
         )
         session.restore_snapshot(request.snapshot)
         message = session.run(
