@@ -1496,9 +1496,25 @@ class PackageManager:
                 if old is None:
                     continue
                 if old["scope"] != plan.request.scope:
-                    raise PluginError(
-                        "Plugin ID already exists in another scope: " + identifier,
+                    existing = old["scope"]
+                    if existing == "user":
+                        same, remove = (
+                            "add --user to this install",
+                            f"/plugins uninstall {identifier} --user",
+                        )
+                    else:
+                        same, remove = (
+                            "omit --user from this install",
+                            f"/plugins uninstall {identifier}",
+                        )
+                    message = (
+                        f"Plugin '{identifier}' is already installed in the "
+                        f"{existing} scope, and RayChat will not also install it "
+                        f"into another scope (this command targets the "
+                        f"{plan.request.scope} scope). To upgrade it in place, "
+                        f"{same}; or remove the existing copy first with {remove}."
                     )
+                    raise PluginError(message)
                 expected_sources[old["path"]] = digest(
                     files(old["path"], validate_manifest=False),
                 )
