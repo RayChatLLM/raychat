@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from raychat.handoff import export_plugins, restore_plugins
 from raychat.plugins import Runtime
+from raychat.sdk import PluginError
 from raychat.service_contracts import AgentChat, SessionCatalogState
 from raychat.validation import array_field, configuration_fields, text_field
 from raychat.workers import AgentWorker, WorkerExecution
@@ -177,14 +178,20 @@ class ProcessConversation:
         with self._session.turn(notify=event_callback):
             pending: list[dict[str, object]] = []
             profile, coordinator = self.profile, self.coordinator
+            base = tuple(_PLUGIN_SETTINGS.child_plugins)
+            child_plugins = base + tuple(
+                p for p in _CHILD_EXTRA_PLUGINS if p not in base
+            )
+            granted = (
+                tuple(_PLUGIN_SETTINGS.child_allowed_actions) + _CHILD_EXTRA_ACTIONS
+            )
+            child_actions = sorted(set(granted))
             payload: dict[str, object] = {
                 "mode": "conversation",
                 "workspace": str(self.root),
                 "task": prompt,
-                "runtime_plugins": list(
-                    _PLUGIN_SETTINGS.child_plugins,
-                ),
-                "allowed_actions": sorted(self._session.allowed_actions),
+                "runtime_plugins": list(child_plugins),
+                "allowed_actions": child_actions,
                 "command_timeout": self._session.timeout,
                 "context_chars": self._session.context_chars,
                 "keep_recent_turns": self._session.keep_recent_turns,
@@ -547,15 +554,58 @@ def _isolated_chat(_messages: Messages) -> str:
     )
 
 
+# Read/analysis plugins offered to children beyond the bundled child set when
+# they are installed. These are deliberately kept out of the bundled manifest's
+# child_plugins default: ostparse is a user-installed plugin, so naming it in
+# the standard catalog would make the catalog reference a package it does not
+# ship. Children pick it up here at runtime instead, when it is present.
+_CHILD_EXTRA_PLUGINS = ("ostparse",)
+_CHILD_EXTRA_ACTIONS = ("ostparse",)
+
+
+def _child_runtime(coordinator: SessionCoordinator) -> Runtime:
+    """Compose a child runtime from the installed child-safe plugins.
+
+    Children get the bundled read plugins plus the optional read/analysis
+    plugins in _CHILD_EXTRA_PLUGINS (notably ostparse, so a subagent can open
+    and search a store outside the workspace), but never the orchestration
+    plugins (subagents/workflows/rlm) that need a provider. An extra plugin that
+    is not installed here (ostparse is absent in the test suite) is dropped
+    rather than failing child startup.
+
+    Returns
+    -------
+    Runtime
+        A child runtime composed from the installed child-safe plugins.
+
+    """
+    base = tuple(_PLUGIN_SETTINGS.child_plugins)
+    desired = base + tuple(p for p in _CHILD_EXTRA_PLUGINS if p not in base)
+    try:
+        return create_runtime(
+            coordinator.workspace,
+            plugins=desired,
+            source=coordinator.plugin_source,
+        )
+    except PluginError:
+        return create_runtime(
+            coordinator.workspace,
+            plugins=base,
+            source=coordinator.plugin_source,
+        )
+
+
 def _local_session(
     profile: ModelProfile,
     coordinator: SessionCoordinator,
 ) -> AgentSession:
-    runtime = create_runtime(
-        coordinator.workspace,
-        plugins=_PLUGIN_SETTINGS.child_plugins,
-        source=coordinator.plugin_source,
-    )
+    # child_allowed_actions keeps the subagent safety contract: read/analysis
+    # only, no write, no recursive delegation. The ostparse action is granted
+    # only when its plugin actually loaded into this child runtime.
+    runtime = _child_runtime(coordinator)
+    child_tools: set[str] = {str(name) for name in runtime.tools} | {"done"}
+    granted = tuple(_PLUGIN_SETTINGS.child_allowed_actions) + _CHILD_EXTRA_ACTIONS
+    child_actions = tuple(sorted({a for a in granted if a in child_tools}))
     try:
         session = create_session(
             _isolated_chat
@@ -563,7 +613,7 @@ def _local_session(
             else profile.chat_factory(),
             coordinator.workspace,
             runtime=runtime,
-            allowed_actions=_PLUGIN_SETTINGS.child_allowed_actions,
+            allowed_actions=child_actions,
             auto_approve=False,
             timeout=coordinator.timeout,
             context_chars=profile.context_chars or coordinator.context_chars,
